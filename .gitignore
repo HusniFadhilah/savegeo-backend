@@ -1,0 +1,20 @@
+# Environment folders
+venv/
+.env
+/.vscode
+
+# Compiled Python files
+*.pyc
+
+# Files for your text editor
+*~
+*.swp
+
+# Dependency directories
+__pycache__/
+/node_modules
+/node_modules/*
+
+# Logs and databases
+*.log
+*.sqlite
