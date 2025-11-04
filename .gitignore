@@ -18,3 +18,5 @@ __pycache__/
 # Logs and databases
 *.log
 *.sqlite
+
+endless-bounty*

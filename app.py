@@ -21,13 +21,13 @@ logger = logging.getLogger(__name__)
 
 # Initialize Flask app
 app = Flask(__name__)
-CORS(app)  # Enable CORS for frontend communication
+CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=False)
 
 # =========================
 # CONFIGURATION
 # =========================
 SERVICE_ACCOUNT = os.getenv("GEE_SERVICE_ACCOUNT", "your-sa@project.iam.gserviceaccount.com")
-KEY_FILE = os.getenv("GEE_KEY_FILE", "service-account-key.json")
+KEY_FILE = os.getenv("GEE_KEY_FILE", "../endless-bounty-416008-a6cce2f8b208.json")
 API_BASE_URL = "https://api.sp3stab.id/api/en"
 
 # =========================
@@ -216,6 +216,54 @@ def get_tile_url(image, vis_params, name):
     except Exception as e:
         logger.error(f"Error getting tile URL for {name}: {e}")
         return None
+    
+def create_geometry_from_payload(aoi_payload: dict) -> ee.Geometry:
+    """
+    Menerima salah satu:
+      - {"geojson": <Feature/FeatureCollection/Geometry>}
+      - {"west":..,"south":..,"east":..,"north":..}
+    """
+    if not isinstance(aoi_payload, dict):
+        raise ValueError("AOI payload must be an object")
+
+    if "geojson" in aoi_payload:
+        gj = aoi_payload["geojson"]
+        if not isinstance(gj, dict) or "type" not in gj:
+            raise ValueError("Invalid GeoJSON")
+        # dukung Feature, FeatureCollection, atau Geometry murni
+        if gj["type"] == "Feature":
+            geom = gj.get("geometry")
+        elif gj["type"] == "FeatureCollection":
+            feats = gj.get("features", [])
+            if not feats:
+                raise ValueError("Empty FeatureCollection")
+            geom = feats[0].get("geometry")
+        else:
+            geom = gj
+        if not geom:
+            raise ValueError("GeoJSON has no geometry")
+        return ee.Geometry(geom)
+
+    # fallback: bounds
+    required = {"west","south","east","north"}
+    if not required.issubset(aoi_payload.keys()):
+        raise ValueError("AOI bounds missing west/south/east/north")
+    return ee.Geometry.Rectangle([
+        float(aoi_payload["west"]),
+        float(aoi_payload["south"]),
+        float(aoi_payload["east"]),
+        float(aoi_payload["north"]),
+    ])
+
+def geojson_to_ee_geometry(geojson):
+    """Convert GeoJSON to Earth Engine Geometry"""
+    if geojson['type'] == 'FeatureCollection':
+        features = [ee.Feature(ee.Geometry(f['geometry'])) for f in geojson['features']]
+        return ee.FeatureCollection(features).geometry()
+    elif geojson['type'] == 'Feature':
+        return ee.Geometry(geojson['geometry'])
+    else:
+        return ee.Geometry(geojson)
 
 # =========================
 # API ENDPOINTS
@@ -237,7 +285,7 @@ def get_provinces():
         response = requests.get(
             f"{API_BASE_URL}/province",
             params={"is_for_dropdown": 1},
-            timeout=10
+            timeout=20
         )
         response.raise_for_status()
         return jsonify(response.json())
@@ -256,12 +304,50 @@ def get_cities():
         response = requests.get(
             f"{API_BASE_URL}/city",
             params={"is_for_dropdown": 1, "parent_code": province_code},
-            timeout=10
+            timeout=20
         )
         response.raise_for_status()
         return jsonify(response.json())
     except Exception as e:
         logger.error(f"Error fetching cities: {e}")
+        return jsonify({'error': str(e)}), 500
+    
+@app.route('/api/regions/districts', methods=['GET'])
+def get_districts():
+    """Get list of districts for a city"""
+    city_code = request.args.get('city_code')
+    if not city_code:
+        return jsonify({'error': 'city_code is required'}), 400
+    
+    try:
+        response = requests.get(
+            f"{API_BASE_URL}/district",
+            params={"is_for_dropdown": 1, "parent_code": city_code},
+            timeout=20
+        )
+        response.raise_for_status()
+        return jsonify(response.json())
+    except Exception as e:
+        logger.error(f"Error fetching districts: {e}")
+        return jsonify({'error': str(e)}), 500
+    
+@app.route('/api/regions/villages', methods=['GET'])
+def get_villages():
+    """Get list of villages for a district"""
+    district_code = request.args.get('district_code')
+    if not district_code:
+        return jsonify({'error': 'district_code is required'}), 400
+    
+    try:
+        response = requests.get(
+            f"{API_BASE_URL}/village",
+            params={"is_for_dropdown": 1, "parent_code": district_code},
+            timeout=20
+        )
+        response.raise_for_status()
+        return jsonify(response.json())
+    except Exception as e:
+        logger.error(f"Error fetching villages: {e}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/regions/geometry', methods=['GET'])
@@ -269,7 +355,6 @@ def get_region_geometry():
     """Get geometry for a region"""
     endpoint = request.args.get('endpoint')  # province, city, district, village
     code = request.args.get('code')
-    
     if not endpoint or not code:
         return jsonify({'error': 'endpoint and code are required'}), 400
     
@@ -277,7 +362,7 @@ def get_region_geometry():
         response = requests.get(
             f"{API_BASE_URL}/{endpoint}",
             params={"code": code},
-            timeout=15
+            timeout=20
         )
         response.raise_for_status()
         data = response.json()
@@ -292,6 +377,178 @@ def get_region_geometry():
         logger.error(f"Error fetching region geometry: {e}")
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/analyze/carbon', methods=['POST'])
+def analyze_carbon():
+    """
+    Endpoint untuk estimasi stok karbon
+    """
+    try:
+        data = request.get_json()
+        
+        # Validasi input
+        if 'aoi' not in data or 'year' not in data:
+            return jsonify({'error': 'Missing required fields: aoi, year'}), 400
+        
+        # Parse AOI
+        if 'geojson' in data['aoi']:
+            roi = geojson_to_ee_geometry(data['aoi']['geojson'])
+        else:
+            roi = ee.Geometry.Rectangle([
+                data['aoi']['west'],
+                data['aoi']['south'],
+                data['aoi']['east'],
+                data['aoi']['north']
+            ])
+        
+        year = data['year']
+        start_month = data.get('start_month', 1)
+        end_month = data.get('end_month', 12)
+        cloud_threshold = data.get('cloud_threshold', 10)
+        
+        # Buat date range
+        start_date = f'{year}-{str(start_month).zfill(2)}-01'
+        end_date = f'{year}-{str(end_month).zfill(2)}-28'
+        
+        print(f"Processing carbon analysis for {start_date} to {end_date}")
+        
+        # 1. Load reference carbon data
+        carbon_reference = ee.ImageCollection("WCMC/biomass_carbon_density/v1_0").first()
+        
+        # 2. Load Sentinel-2
+        sen2 = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED") \
+            .select('B.*') \
+            .filterBounds(roi) \
+            .filterDate(start_date, end_date) \
+            .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', cloud_threshold)) \
+            .median() \
+            .multiply(0.0001)
+        
+        # 3. Calculate NDVI
+        ndvi = sen2.normalizedDifference(['B8', 'B4']).rename('NDVI')
+        
+        # 4. Get tree mask from Dynamic World
+        dw_tree_mask = ee.ImageCollection("GOOGLE/DYNAMICWORLD/V1") \
+            .select('label') \
+            .filterDate(start_date, end_date) \
+            .filterBounds(roi) \
+            .mode() \
+            .eq(1)  # Class 1 = Trees
+        
+        # 5. Create predictors
+        predictors = ee.Image.constant(1) \
+            .addBands(sen2) \
+            .addBands(ndvi) \
+            .updateMask(dw_tree_mask)
+        
+        # 6. Combine with carbon reference
+        dataset = predictors.addBands(carbon_reference)
+        
+        # 7. Build regression model
+        model = dataset.reduceRegion(
+            reducer=ee.Reducer.robustLinearRegression(14, 1),
+            geometry=roi,
+            scale=250,
+            bestEffort=True,
+            maxPixels=1e13
+        )
+        
+        # 8. Extract coefficients
+        coefficients = ee.Array(model.get('coefficients')).project([0]).toList()
+        
+        # 9. Predict carbon
+        carbon_estimated = predictors \
+            .multiply(ee.Image.constant(coefficients)) \
+            .reduce(ee.Reducer.sum()) \
+            .rename('carbon_estimated')
+        
+        # 10. Calculate RMSE
+        difference = carbon_reference.subtract(carbon_estimated)
+        squared_diff = difference.pow(2)
+        
+        rmse = ee.Number(
+            squared_diff.reduceRegion(
+                reducer=ee.Reducer.mean(),
+                geometry=roi,
+                scale=250,
+                maxPixels=1e13
+            ).values().get(0)
+        ).sqrt().getInfo()
+        
+        # 11. Calculate statistics
+        carbon_stats = carbon_estimated.reduceRegion(
+            reducer=ee.Reducer.mean()
+                .combine(ee.Reducer.stdDev(), '', True)
+                .combine(ee.Reducer.min(), '', True)
+                .combine(ee.Reducer.max(), '', True),
+            geometry=roi,
+            scale=250,
+            maxPixels=1e13
+        ).getInfo()
+        
+        # 12. Calculate area
+        area_ha = roi.area().divide(10000).getInfo()
+        mean_carbon = carbon_stats.get('carbon_estimated_mean', 0)
+        total_carbon_tons = mean_carbon * area_ha
+        
+        # 13. Visualization
+        vis_params = {
+            'min': 0,
+            'max': 200,
+            'palette': ['440154', '414487', '2a788e', '22a884', '7ad151', 'fde725']
+        }
+        
+        carbon_rgb = carbon_estimated.visualize(**vis_params)
+        map_id = carbon_rgb.getMapId()
+        tile_url = map_id['tile_fetcher'].url_format
+        
+        # Reference carbon tile
+        carbon_ref_rgb = carbon_reference.visualize(**vis_params)
+        ref_map_id = carbon_ref_rgb.getMapId()
+        ref_tile_url = ref_map_id['tile_fetcher'].url_format
+        
+        # Response
+        result = {
+            'carbon_estimated': {
+                'tile_url': tile_url,
+                'statistics': {
+                    'mean': round(mean_carbon, 2),
+                    'std_dev': round(carbon_stats.get('carbon_estimated_stdDev', 0), 2),
+                    'min': round(carbon_stats.get('carbon_estimated_min', 0), 2),
+                    'max': round(carbon_stats.get('carbon_estimated_max', 0), 2)
+                },
+                'unit': 'Mg/ha',
+                'description': 'Estimated carbon stock from Sentinel-2'
+            },
+            'carbon_reference': {
+                'tile_url': ref_tile_url,
+                'description': 'WCMC reference carbon density'
+            },
+            'model_performance': {
+                'rmse': round(rmse, 2),
+                'description': 'Root Mean Square Error (lower is better)'
+            },
+            'area_info': {
+                'area_ha': round(area_ha, 2),
+                'total_carbon_tons': round(total_carbon_tons, 2),
+                'carbon_dioxide_equivalent_tons': round(total_carbon_tons * 3.67, 2)
+            },
+            'model_info': {
+                'predictors': 14,
+                'method': 'Robust Linear Regression',
+                'scale': 250,
+                'tree_mask': True
+            }
+        }
+        
+        print("Carbon analysis completed successfully")
+        return jsonify(result)
+        
+    except Exception as e:
+        print(f"Carbon analysis error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/analyze/vegetation', methods=['POST'])
 def analyze_vegetation():
     """Analyze vegetation indices"""
@@ -299,19 +556,19 @@ def analyze_vegetation():
         return jsonify({'error': 'Earth Engine not initialized'}), 500
     
     try:
-        data = request.json
+        data = request.get_json(force=True) or {}
         
         # Extract parameters
-        aoi_bounds = data.get('aoi')
+        aoi_spec = data.get('aoi')
+        if not aoi_spec:
+            return jsonify({'error': 'aoi is required'}), 400
         year = data.get('year', 2022)
         start_month = data.get('start_month', 6)
         end_month = data.get('end_month', 9)
         cloud_threshold = data.get('cloud_threshold', 40)
         indices = data.get('indices', ['NDVI'])
         
-        # Create AOI geometry
-        aoi = create_geometry_from_bounds(aoi_bounds)
-        
+        aoi = create_geometry_from_payload(aoi_spec)
         # Date range
         start_date = f"{year}-{start_month:02d}-01"
         if end_month == 12:
@@ -403,16 +660,18 @@ def analyze_landcover():
         return jsonify({'error': 'Earth Engine not initialized'}), 500
     
     try:
-        data = request.json
+        data = request.get_json(force=True) or {}
         
-        # Extract parameters
-        aoi_bounds = data.get('aoi')
-        year = data.get('year', 2022)
+        aoi_spec = data.get('aoi')
+        if not aoi_spec:
+            return jsonify({'error': 'aoi is required'}), 400
+
+        # ⇩⇩ inilah kunci perbaikannya
+        aoi = create_geometry_from_payload(aoi_spec)
+
+        year = int(data.get('year', 2022))
         datasets = data.get('datasets', ['Dynamic_World'])
         dw_mode = data.get('dw_mode', 'mode')
-        
-        # Create AOI geometry
-        aoi = create_geometry_from_bounds(aoi_bounds)
         
         results = {}
         
@@ -471,7 +730,7 @@ def analyze_landcover():
         
         # ESA WorldCover
         if 'ESA_WorldCover' in datasets:
-            esa = ee.ImageCollection("ESA/WorldCover/v100").first().clip(aoi)
+            esa = ee.ImageCollection("ESA/WorldCover/v300").first().clip(aoi)
             
             vis_params = {"bands": ["Map"]}
             tile_url = get_tile_url(esa, vis_params, 'ESA WorldCover')
@@ -493,14 +752,16 @@ def export_to_drive():
         return jsonify({'error': 'Earth Engine not initialized'}), 500
     
     try:
-        data = request.json
+        data = request.get_json(force=True) or {}
         
-        aoi_bounds = data.get('aoi')
+        aoi_spec = data.get('aoi')
+        if not aoi_spec:
+            return jsonify({'error': 'aoi is required'}), 400
         layer_type = data.get('layer_type')  # 'vegetation' or 'landcover'
         layer_name = data.get('layer_name')
         description = data.get('description', f"export_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
         
-        aoi = create_geometry_from_bounds(aoi_bounds)
+        aoi = create_geometry_from_payload(aoi_spec)
         
         # This would need to be implemented based on your specific requirements
         # For now, return task information
@@ -523,14 +784,16 @@ def analyze_timeseries():
         return jsonify({'error': 'Earth Engine not initialized'}), 500
     
     try:
-        data = request.json
+        data = request.get_json(force=True) or {}
         
-        aoi_bounds = data.get('aoi')
+        aoi_spec = data.get('aoi')
+        if not aoi_spec:
+            return jsonify({'error': 'aoi is required'}), 400
         year = data.get('year', 2022)
         index_name = data.get('index', 'NDVI')
         interval = data.get('interval', 'monthly')  # monthly or biweekly
         
-        aoi = create_geometry_from_bounds(aoi_bounds)
+        aoi = create_geometry_from_payload(aoi_spec)
         
         # Create date ranges
         if interval == 'monthly':
@@ -598,7 +861,7 @@ def internal_error(error):
 # =========================
 
 if __name__ == '__main__':
-    port = int(os.getenv('PORT', 5000))
+    port = int(os.getenv('PORT', 8086))
     debug = os.getenv('DEBUG', 'False').lower() == 'true'
     
     logger.info(f"Starting Flask server on port {port}")
