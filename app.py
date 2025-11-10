@@ -11,9 +11,21 @@ import json
 from datetime import datetime
 from pathlib import Path
 import tempfile
+import numpy as np
 import requests
 from typing import Dict, List, Optional, Tuple
 import logging
+try:
+    from sklearn.model_selection import KFold
+    from sklearn.linear_model import LinearRegression
+    from sklearn.metrics import mean_squared_error, r2_score
+    SKLEARN_AVAILABLE = True
+except ImportError:
+    SKLEARN_AVAILABLE = False
+    print("⚠ Warning: scikit-learn not available. Cross-validation disabled.")
+
+from inference.carbon_inference import CarbonInferenceEngine
+from models.model_registry import ModelRegistry
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -255,6 +267,205 @@ def create_geometry_from_payload(aoi_payload: dict) -> ee.Geometry:
         float(aoi_payload["north"]),
     ])
 
+def check_carbon_data_availability(roi, dataset_name='WCMC'):
+    """
+    Check if carbon reference data is available in the given region
+    
+    Returns:
+        dict: {
+            'available': bool,
+            'sample_count': int,
+            'mean_value': float,
+            'message': str
+        }
+    """
+    try:
+        carbon_ref = load_carbon_reference_dataset(dataset_name, 2010, roi)
+        
+        # Take a small sample
+        sample = carbon_ref.sample(
+            region=roi,
+            scale=250,
+            numPixels=100,
+            seed=42
+        ).getInfo()
+        
+        features = sample.get('features', [])
+        
+        if len(features) == 0:
+            return {
+                'available': False,
+                'sample_count': 0,
+                'mean_value': 0,
+                'message': 'No carbon reference data found in this area'
+            }
+        
+        # Calculate mean
+        values = [f['properties'].get('agb', 0) for f in features]
+        valid_values = [v for v in values if v is not None and v > 0]
+        
+        if len(valid_values) == 0:
+            return {
+                'available': False,
+                'sample_count': len(features),
+                'mean_value': 0,
+                'message': 'Carbon data exists but all values are invalid'
+            }
+        
+        mean_val = sum(valid_values) / len(valid_values)
+        
+        return {
+            'available': True,
+            'sample_count': len(valid_values),
+            'mean_value': mean_val,
+            'message': f'Found {len(valid_values)} valid samples (mean: {mean_val:.2f} Mg/ha)'
+        }
+        
+    except Exception as e:
+        return {
+            'available': False,
+            'sample_count': 0,
+            'mean_value': 0,
+            'message': f'Error checking data: {str(e)}'
+        }
+
+def load_carbon_reference_dataset(dataset_name, dataset_year=2020, roi=None):
+    """
+    Load carbon/biomass reference dataset with proper band handling
+    
+    Args:
+        dataset_name: 'ESA_CCI', 'WCMC', 'GEDI', or 'Simard'
+        dataset_year: Year for dataset
+        roi: Region of interest for filtering
+    
+    Returns:
+        ee.Image: Carbon/biomass reference image with band name 'agb' in Mg/ha
+    """
+    
+    if dataset_name == 'WCMC':
+        # WCMC Carbon Density (300m resolution, 2010)
+        print("Loading WCMC Carbon Density (2010)")
+        try:
+            carbon_density = ee.ImageCollection("WCMC/biomass_carbon_density/v1_0").first()
+            
+            # ✅ CRITICAL: Check band name and rename to 'agb'
+            band_names = carbon_density.bandNames().getInfo()
+            print(f"  WCMC bands available: {band_names}")
+            
+            # ✅ FIX: WCMC uses 'carbon_tonnes_per_ha' as band name
+            if 'carbon_tonnes_per_ha' in band_names:
+                return carbon_density.select('carbon_tonnes_per_ha').rename('agb')
+            elif 'carbon' in band_names:
+                return carbon_density.select('carbon').rename('agb')
+            else:
+                print(f"  Warning: Expected band not found. Available: {band_names}")
+                # Try first band as fallback
+                return carbon_density.select(0).rename('agb')
+                
+        except Exception as e:
+            print(f"  Error loading WCMC: {str(e)}")
+            raise
+    
+    elif dataset_name == 'ESA_CCI':
+        # ESA CCI Biomass - Not available in public GEE yet
+        # Use alternative: Hansen Tree Cover as proxy
+        print(f"Loading ESA CCI Biomass proxy for {dataset_year}")
+        
+        try:
+            # Hansen Global Forest Change
+            hansen = ee.Image('UMD/hansen/global_forest_change_2023_v1_11')
+            tree_cover = hansen.select('treecover2000')
+            
+            # Convert tree cover (0-100%) to biomass estimate
+            # Simplified allometric equation: AGB ≈ tree_cover * 2.5
+            biomass = tree_cover.multiply(2.5).rename('agb')
+            
+            return biomass
+            
+        except Exception as e:
+            print(f"  Error loading ESA_CCI proxy: {str(e)}")
+            # Fallback to WCMC
+            print("  Falling back to WCMC")
+            return load_carbon_reference_dataset('WCMC', dataset_year, roi)
+    
+    elif dataset_name == 'GEDI':
+        # GEDI - Use alternative
+        print("Loading GEDI proxy (Hansen-based)")
+        return load_carbon_reference_dataset('ESA_CCI', dataset_year, roi)
+    
+    elif dataset_name == 'Simard':
+        # Simard Forest Height
+        print("Loading Simard proxy (Hansen-based)")
+        
+        try:
+            hansen = ee.Image('UMD/hansen/global_forest_change_2023_v1_11')
+            tree_cover = hansen.select('treecover2000')
+            
+            # Convert to biomass
+            biomass = tree_cover.multiply(2.0).rename('agb')
+            
+            return biomass
+            
+        except Exception as e:
+            print(f"  Error loading Simard proxy: {str(e)}")
+            return load_carbon_reference_dataset('WCMC', dataset_year, roi)
+    
+    else:
+        raise ValueError(f"Unknown dataset: {dataset_name}. Choose from: WCMC, ESA_CCI, GEDI, Simard")
+
+def get_dataset_info(dataset_name, dataset_year=2010):
+    """
+    Get metadata about carbon reference dataset
+    """
+    info = {
+        'ESA_CCI': {
+            'name': 'ESA CCI Biomass',
+            'full_name': 'ESA Climate Change Initiative Aboveground Biomass',
+            'year': dataset_year,
+            'resolution': 100,
+            'unit': 'Mg/ha',
+            'source': 'ESA CCI',
+            'description': f'Global biomass map for {dataset_year} at 100m resolution'
+        },
+        'WCMC': {
+            'name': 'WCMC Carbon Density',
+            'full_name': 'UN World Conservation Monitoring Centre Carbon Density',
+            'year': 2010,
+            'resolution': 300,
+            'unit': 'Mg/ha',
+            'source': 'WCMC',
+            'description': 'Global carbon density map (2010) at 300m resolution'
+        },
+        'GEDI': {
+            'name': 'GEDI L4B Biomass',
+            'full_name': 'NASA GEDI Level 4B Aboveground Biomass',
+            'year': 2020,
+            'resolution': 1000,
+            'unit': 'Mg/ha',
+            'source': 'NASA GEDI',
+            'description': 'Spaceborne lidar-derived biomass at 1km resolution'
+        },
+        'Simard': {
+            'name': 'Simard Forest Height',
+            'full_name': 'Simard Global Forest Canopy Height',
+            'year': 2011,
+            'resolution': 1000,
+            'unit': 'Mg/ha',
+            'source': 'Simard et al.',
+            'description': 'Forest height converted to biomass at 1km resolution'
+        }
+    }
+    
+    return info.get(dataset_name, {
+        'name': 'Unknown Dataset',
+        'full_name': 'Unknown Dataset',
+        'year': dataset_year,
+        'resolution': 'N/A',
+        'unit': 'Mg/ha',
+        'source': 'Unknown',
+        'description': 'Dataset information not available'
+    })
+
 def geojson_to_ee_geometry(geojson):
     """
     Convert GeoJSON to Earth Engine Geometry with proper handling
@@ -272,7 +483,7 @@ def geojson_to_ee_geometry(geojson):
             return ee.Geometry(geojson)
     except Exception as e:
         print(f"Error converting GeoJSON: {str(e)}")
-        raise
+        raise ValueError(f"Invalid GeoJSON format: {str(e)}")
 
 # =========================
 # API ENDPOINTS
@@ -386,209 +597,174 @@ def get_region_geometry():
         logger.error(f"Error fetching region geometry: {e}")
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/models/list', methods=['GET'])
+def list_models():
+    """List all available trained models"""
+    try:
+        registry = ModelRegistry()
+        models = registry.list_models()
+        return jsonify({
+            'models': models,
+            'count': len(models)
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/models/info/<model_name>', methods=['GET'])
+def get_model_info(model_name):
+    """Get detailed information about a specific model"""
+    try:
+        registry = ModelRegistry()
+        info = registry.get_model_info(model_name)
+        return jsonify(info)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 404
+
 @app.route('/api/analyze/carbon', methods=['POST'])
-def analyze_carbon():
+def analyze_carbon_with_pretrained_model():
     """
-    Endpoint untuk estimasi stok karbon dengan error handling yang lebih baik
+    Carbon stock estimation using PRE-TRAINED model
     """
     try:
         data = request.get_json()
-        print("Received carbon analysis request:", data)
+        logger.info("=" * 60)
+        logger.info("Carbon analysis request (using pre-trained model)")
         
-        # Validasi input
-        if 'aoi' not in data or 'year' not in data:
-            return jsonify({'error': 'Missing required fields: aoi, year'}), 400
+        # Validate parameters
+        if 'aoi' not in data:
+            return jsonify({'error': 'Missing required field: aoi'}), 400
         
-        # Parse and validate parameters
-        year = data.get('year')
-        start_month = data.get('start_month')
-        end_month = data.get('end_month')
-        cloud_threshold = data.get('cloud_threshold', 10)
-        clip_to_aoi = data.get('clip_to_aoi', True)
-        
-        # ✅ Validation
-        if not year:
-            return jsonify({'error': 'Year is required'}), 400
-        
-        if not start_month or not end_month:
-            return jsonify({'error': 'Start month and end month are required'}), 400
-        
-        # Convert to int and validate range
         try:
-            year = int(year)
-            start_month = int(start_month)
-            end_month = int(end_month)
-            cloud_threshold = int(cloud_threshold)
+            year = int(data.get('year'))
+            start_month = int(data.get('start_month'))
+            end_month = int(data.get('end_month'))
+            cloud_threshold = int(data.get('cloud_threshold', 10))
+            clip_to_aoi = data.get('clip_to_aoi', True)
+            
+            # NEW: Optional model selection
+            model_name = data.get('model_name', None)  # Use default if None
+            
         except (ValueError, TypeError) as e:
             return jsonify({'error': f'Invalid parameter format: {str(e)}'}), 400
         
         # Validate ranges
-        if not (1 <= start_month <= 12):
-            return jsonify({'error': f'Invalid start_month: {start_month}. Must be 1-12'}), 400
+        if not (2015 <= year <= 2025):
+            return jsonify({'error': 'Year must be between 2015-2025'}), 400
         
-        if not (1 <= end_month <= 12):
-            return jsonify({'error': f'Invalid end_month: {end_month}. Must be 1-12'}), 400
+        if not (1 <= start_month <= 12) or not (1 <= end_month <= 12):
+            return jsonify({'error': 'Months must be between 1-12'}), 400
         
         if start_month > end_month:
             return jsonify({'error': 'Start month cannot be after end month'}), 400
         
-        if not (2015 <= year <= 2025):
-            return jsonify({'error': f'Invalid year: {year}. Must be 2015-2025'}), 400
-        
-        print(f"✓ Parameters validated: year={year}, months={start_month}-{end_month}, cloud={cloud_threshold}%, clip={clip_to_aoi}")
+        logger.info(f"Parameters: year={year}, months={start_month}-{end_month}")
+        logger.info(f"Model: {model_name or 'default'}")
         
         # Parse AOI
-        roi = None
-        has_geojson = False
+        try:
+            if 'geojson' in data['aoi']:
+                roi_original = geojson_to_ee_geometry(data['aoi']['geojson'])
+                has_geojson = True
+            else:
+                roi_original = ee.Geometry.Rectangle([
+                    data['aoi']['west'], data['aoi']['south'],
+                    data['aoi']['east'], data['aoi']['north']
+                ])
+                has_geojson = False
+        except Exception as e:
+            return jsonify({'error': f'Invalid AOI geometry: {str(e)}'}), 400
         
-        if 'geojson' in data['aoi']:
-            roi = geojson_to_ee_geometry(data['aoi']['geojson'])
-            has_geojson = True
-            print("✓ Using GeoJSON geometry")
+        # Set ROI for calculation
+        roi_for_filtering = roi_original
+        
+        if clip_to_aoi and has_geojson:
+            roi_for_calculation = roi_original
+            calculation_mode = "clipped_aoi"
         else:
-            roi = ee.Geometry.Rectangle([
-                data['aoi']['west'],
-                data['aoi']['south'],
-                data['aoi']['east'],
-                data['aoi']['north']
+            bounds = roi_original.bounds().getInfo()['coordinates'][0]
+            roi_for_calculation = ee.Geometry.Rectangle([
+                bounds[0][0], bounds[0][1], bounds[2][0], bounds[2][1]
             ])
-            print("⚠ Using rectangle bounds")
+            calculation_mode = "full_tiles"
         
-        # ✅ Create date strings with proper formatting
-        start_date = f'{year}-{str(start_month).zfill(2)}-01'
-        end_date = f'{year}-{str(end_month).zfill(2)}-28'
-        
-        print(f"Date range: {start_date} to {end_date}")
-        print(f"ROI area: {roi.area().divide(10000).getInfo():.2f} ha")
-        
-        # 1. Load reference carbon data
-        carbon_reference = ee.ImageCollection("WCMC/biomass_carbon_density/v1_0").first()
-        
-        # 2. Load Sentinel-2
-        sen2_collection = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED") \
-            .select('B.*') \
-            .filterBounds(roi) \
-            .filterDate(start_date, end_date) \
-            .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', cloud_threshold))
-        
-        # Check collection size
-        collection_size = sen2_collection.size().getInfo()
-        print(f"Found {collection_size} Sentinel-2 images")
-        
-        if collection_size == 0:
+        # Initialize inference engine with specified or default model
+        logger.info("\n--- Loading Pre-trained Model ---")
+        try:
+            inference_engine = CarbonInferenceEngine(model_name=model_name)
+            model_info = inference_engine.get_model_info()
+            
+            logger.info(f"✓ Loaded model: {model_info['algorithm']}")
+            logger.info(f"  Trained: {model_info.get('trained_at', 'Unknown')}")
+            logger.info(f"  CV RMSE: {model_info.get('cv_metrics', {}).get('rmse_mean', 'N/A')}")
+            logger.info(f"  CV R²: {model_info.get('cv_metrics', {}).get('r2_mean', 'N/A')}")
+            
+        except Exception as e:
             return jsonify({
-                'error': f'No Sentinel-2 images found for period {start_date} to {end_date} with cloud threshold {cloud_threshold}%. Try: (1) Increasing cloud threshold, (2) Selecting a longer date range, or (3) Choosing a different year.'
+                'error': f'Failed to load model: {str(e)}',
+                'suggestion': 'Train a model first using training/train_carbon_model.py'
             }), 400
         
-        sen2 = sen2_collection.median().multiply(0.0001)
+        # Run inference
+        logger.info("\n--- Running Inference ---")
+        try:
+            carbon_estimated = inference_engine.predict_for_region(
+                roi=roi_for_calculation,
+                year=year,
+                start_month=start_month,
+                end_month=end_month,
+                cloud_threshold=cloud_threshold
+            )
+            
+            logger.info("✓ Prediction complete")
+            
+        except Exception as e:
+            return jsonify({
+                'error': f'Inference failed: {str(e)}'
+            }), 400
         
-        # 3. Calculate NDVI
-        ndvi = sen2.normalizedDifference(['B8', 'B4']).rename('NDVI')
-        
-        # 4. Get tree mask from Dynamic World
-        dw_collection = ee.ImageCollection("GOOGLE/DYNAMICWORLD/V1") \
-            .select('label') \
-            .filterDate(start_date, end_date) \
-            .filterBounds(roi)
-        
-        dw_size = dw_collection.size().getInfo()
-        print(f"Found {dw_size} Dynamic World images")
-        
-        if dw_size == 0:
-            print("⚠ Warning: No Dynamic World images found, proceeding without tree mask")
-            dw_tree_mask = ee.Image.constant(1)
-        else:
-            dw_tree_mask = dw_collection.mode().eq(1)
-        
-        # 5. Create predictors
-        predictors = ee.Image.constant(1) \
-            .addBands(sen2) \
-            .addBands(ndvi) \
-            .updateMask(dw_tree_mask)
-        
-        # 6. Combine with carbon reference
-        dataset = predictors.addBands(carbon_reference)
-        
-        # 7. Build regression model
-        print("Building regression model...")
-        model = dataset.reduceRegion(
-            reducer=ee.Reducer.robustLinearRegression(14, 1),
-            geometry=roi,
-            scale=250,
-            bestEffort=True,
-            maxPixels=1e13
-        )
-        
-        # 8. Extract coefficients
-        coefficients = ee.Array(model.get('coefficients')).project([0]).toList()
-        
-        # 9. Predict carbon
-        carbon_estimated = predictors \
-            .multiply(ee.Image.constant(coefficients)) \
-            .reduce(ee.Reducer.sum()) \
-            .rename('carbon_estimated')
-        
-        # 10. Conditional clipping
+        # Apply display clipping
         if clip_to_aoi and has_geojson:
-            print("✓ Clipping carbon layers to AOI boundary")
-            carbon_estimated_display = carbon_estimated.clip(roi)
-            carbon_reference_display = carbon_reference.clip(roi)
-            is_clipped = True
+            carbon_estimated_display = carbon_estimated.clip(roi_original)
         else:
-            print("⚠ Using full tiles (no clipping)")
             carbon_estimated_display = carbon_estimated
-            carbon_reference_display = carbon_reference
-            is_clipped = False
         
-        # 11. Calculate RMSE
-        difference = carbon_reference.subtract(carbon_estimated)
-        squared_diff = difference.pow(2)
-        
-        rmse = ee.Number(
-            squared_diff.clip(roi).reduceRegion(
-                reducer=ee.Reducer.mean(),
-                geometry=roi,
-                scale=250,
-                maxPixels=1e13,
-                bestEffort=True
-            ).values().get(0)
-        ).sqrt().getInfo()
-        
-        # 12. Calculate statistics
-        print("Calculating statistics...")
-        carbon_stats = carbon_estimated.clip(roi).reduceRegion(
+        # Calculate statistics
+        logger.info("\n--- Calculating Statistics ---")
+        carbon_stats = carbon_estimated.clip(roi_for_calculation).reduceRegion(
             reducer=ee.Reducer.mean()
                 .combine(ee.Reducer.stdDev(), '', True)
                 .combine(ee.Reducer.min(), '', True)
                 .combine(ee.Reducer.max(), '', True),
-            geometry=roi,
+            geometry=roi_for_calculation,
             scale=250,
             maxPixels=1e13,
             bestEffort=True
         ).getInfo()
         
-        # 13. Calculate area and totals
-        area_ha = roi.area().divide(10000).getInfo()
         mean_carbon = carbon_stats.get('carbon_estimated_mean', 0)
-        total_carbon_tons = mean_carbon * area_ha
+        calculation_area = roi_for_calculation.area().divide(10000).getInfo()
+        filtering_area = roi_for_filtering.area().divide(10000).getInfo()
+        total_carbon_tons = mean_carbon * calculation_area
         
-        # 14. Visualization
+        logger.info(f"Mean carbon density: {mean_carbon:.2f} Mg/ha")
+        logger.info(f"Total carbon: {total_carbon_tons:.2f} tons")
+        
+        # Generate visualization
+        logger.info("\n--- Generating Map Tiles ---")
         vis_params = {
             'min': 0,
             'max': 200,
             'palette': ['440154', '414487', '2a788e', '22a884', '7ad151', 'fde725']
         }
         
-        print("Generating map tiles...")
         carbon_rgb = carbon_estimated_display.visualize(**vis_params)
         map_id = carbon_rgb.getMapId()
         tile_url = map_id['tile_fetcher'].url_format
         
-        carbon_ref_rgb = carbon_reference_display.visualize(**vis_params)
-        ref_map_id = carbon_ref_rgb.getMapId()
-        ref_tile_url = ref_map_id['tile_fetcher'].url_format
+        logger.info("✓ Tile URL generated")
         
-        # 15. Response
+        # Build response
         result = {
             'carbon_estimated': {
                 'tile_url': tile_url,
@@ -599,53 +775,590 @@ def analyze_carbon():
                     'max': round(carbon_stats.get('carbon_estimated_max', 0), 2)
                 },
                 'unit': 'Mg/ha',
-                'description': f'Estimated carbon stock from Sentinel-2 ({"clipped to AOI" if is_clipped else "full tiles"})'
-            },
-            'carbon_reference': {
-                'tile_url': ref_tile_url,
-                'description': f'WCMC reference carbon density ({"clipped to AOI" if is_clipped else "full tiles"})'
-            },
-            'model_performance': {
-                'rmse': round(rmse, 2),
-                'description': 'Root Mean Square Error (lower is better)'
+                'description': f'Estimated using pre-trained {model_info["algorithm"]} model'
             },
             'area_info': {
-                'area_ha': round(area_ha, 2),
+                'calculation_mode': calculation_mode,
+                'filtering_area_ha': round(filtering_area, 2),
+                'calculation_area_ha': round(calculation_area, 2),
                 'total_carbon_tons': round(total_carbon_tons, 2),
                 'carbon_dioxide_equivalent_tons': round(total_carbon_tons * 3.67, 2)
             },
             'model_info': {
-                'predictors': 14,
-                'method': 'Robust Linear Regression',
-                'scale': 250,
-                'tree_mask': dw_size > 0,
-                'images_used': collection_size,
-                'clipped_to_aoi': is_clipped,
-                'display_mode': 'clipped' if is_clipped else 'full_tiles',
-                'date_range': f'{start_date} to {end_date}'
+                'model_name': inference_engine.model_name,
+                'algorithm': model_info['algorithm'],
+                'trained_at': model_info.get('trained_at'),
+                'training_samples': model_info.get('n_samples'),
+                'cv_metrics': model_info.get('cv_metrics', {}),
+                'feature_importance': model_info.get('feature_importance', {}),
+                'inference_date_range': f'{year}-{start_month:02d} to {year}-{end_month:02d}'
             }
         }
         
-        print(f"✓ Carbon analysis completed successfully (mode: {result['model_info']['display_mode']})")
+        logger.info("✓ Carbon analysis completed")
         return jsonify(result)
         
     except Exception as e:
-        error_msg = str(e)
-        print(f"❌ Carbon analysis error: {error_msg}")
+        logger.error(f"\n❌ Carbon analysis error: {str(e)}")
         import traceback
         traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+# @app.route('/api/analyze/carbon', methods=['POST'])
+# def analyze_carbon():
+#     """
+#     Carbon stock estimation with multiple reference dataset options
+#     """
+#     try:
+#         data = request.get_json()
+#         print("=" * 60)
+#         print("Received carbon analysis request")
         
-        # Provide helpful error messages
-        if "DateRange" in error_msg:
-            return jsonify({
-                'error': f'Date parsing error: {error_msg}. Please check that start and end months are properly selected.'
-            }), 400
-        elif "Task timed out" in error_msg:
-            return jsonify({
-                'error': 'Analysis timed out. Try reducing the area size or date range.'
-            }), 408
-        else:
-            return jsonify({'error': error_msg}), 500
+#         # Validate and parse parameters
+#         if 'aoi' not in data:
+#             return jsonify({'error': 'Missing required field: aoi'}), 400
+        
+#         try:
+#             year = int(data.get('year'))
+#             start_month = int(data.get('start_month'))
+#             end_month = int(data.get('end_month'))
+#             cloud_threshold = int(data.get('cloud_threshold', 10))
+#             clip_to_aoi = data.get('clip_to_aoi', True)
+#             reference_dataset = data.get('reference_dataset', 'WCMC')  # Default to WCMC
+#             dataset_year = int(data.get('dataset_year', 2010))
+#         except (ValueError, TypeError) as e:
+#             return jsonify({'error': f'Invalid parameter format: {str(e)}'}), 400
+        
+#         # Validate ranges
+#         if not (2015 <= year <= 2025):
+#             return jsonify({'error': f'Year must be between 2015-2025'}), 400
+        
+#         if not (1 <= start_month <= 12) or not (1 <= end_month <= 12):
+#             return jsonify({'error': 'Months must be between 1-12'}), 400
+        
+#         if start_month > end_month:
+#             return jsonify({'error': 'Start month cannot be after end month'}), 400
+        
+#         print(f"Parameters: year={year}, months={start_month}-{end_month}, cloud={cloud_threshold}%")
+#         print(f"Reference dataset: {reference_dataset} ({dataset_year})")
+        
+#         # Parse AOI
+#         roi_original = None
+#         has_geojson = False
+        
+#         try:
+#             if 'geojson' in data['aoi']:
+#                 roi_original = geojson_to_ee_geometry(data['aoi']['geojson'])
+#                 has_geojson = True
+#                 print("✓ Using GeoJSON geometry")
+#             else:
+#                 roi_original = ee.Geometry.Rectangle([
+#                     data['aoi']['west'], data['aoi']['south'],
+#                     data['aoi']['east'], data['aoi']['north']
+#                 ])
+#                 print("✓ Using rectangle bounds")
+#         except Exception as e:
+#             return jsonify({'error': f'Invalid AOI geometry: {str(e)}'}), 400
+        
+#         # Set ROI modes
+#         roi_for_filtering = roi_original
+        
+#         if clip_to_aoi and has_geojson:
+#             roi_for_calculation = roi_original
+#             calculation_mode = "clipped_aoi"
+#         else:
+#             bounds = roi_original.bounds().getInfo()['coordinates'][0]
+#             roi_for_calculation = ee.Geometry.Rectangle([
+#                 bounds[0][0], bounds[0][1], bounds[2][0], bounds[2][1]
+#             ])
+#             calculation_mode = "full_tiles"
+        
+#         start_date = f'{year}-{str(start_month).zfill(2)}-01'
+#         end_date = f'{year}-{str(end_month).zfill(2)}-28'
+        
+#         # ✅ GET DATASET INFO FIRST (before loading)
+#         dataset_info = get_dataset_info(reference_dataset, dataset_year)
+#         print(f"\n--- Loading Reference Dataset: {dataset_info['name']} ---")
+        
+#         # Load reference carbon dataset
+#         try:
+#             carbon_reference = load_carbon_reference_dataset(
+#                 reference_dataset, 
+#                 dataset_year, 
+#                 roi_for_calculation
+#             )
+#             print(f"✓ Loaded {dataset_info['name']} ({dataset_info['resolution']}m)")
+#         except Exception as e:
+#             return jsonify({
+#                 'error': f'Failed to load reference dataset: {str(e)}'
+#             }), 400
+        
+#         # Load Sentinel-2
+#         print("\n--- Loading Sentinel-2 Data ---")
+#         sen2_collection = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED") \
+#             .filterBounds(roi_for_filtering) \
+#             .filterDate(start_date, end_date) \
+#             .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', cloud_threshold))
+        
+#         collection_size = sen2_collection.size().getInfo()
+#         print(f"Found {collection_size} Sentinel-2 images")
+        
+#         if collection_size == 0:
+#             return jsonify({
+#                 'error': f'No Sentinel-2 images found. Try: (1) Increase cloud threshold, (2) Expand date range'
+#             }), 400
+        
+#         sen2 = sen2_collection.median().multiply(0.0001)
+        
+#         # Select available bands
+#         available_bands = ['B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B8', 'B8A', 'B11', 'B12']
+#         sen2 = sen2.select(available_bands)
+        
+#         # Calculate NDVI
+#         ndvi = sen2.normalizedDifference(['B8', 'B4']).rename('NDVI')
+        
+#         # Load Dynamic World tree mask
+#         dw_collection = ee.ImageCollection("GOOGLE/DYNAMICWORLD/V1") \
+#             .select('label') \
+#             .filterDate(start_date, end_date) \
+#             .filterBounds(roi_for_filtering)
+        
+#         dw_size = dw_collection.size().getInfo()
+        
+#         if dw_size == 0:
+#             dw_tree_mask = ee.Image.constant(1)
+#         else:
+#             dw_tree_mask = dw_collection.mode().eq(1)
+        
+#         # Create predictors (constant + bands + NDVI)
+#         predictors = ee.Image.constant(1).rename('constant') \
+#             .addBands(sen2) \
+#             .addBands(ndvi) \
+#             .updateMask(dw_tree_mask)
+        
+#         # ✅ 7. CONDITIONAL: USE SKLEARN IF AVAILABLE, OTHERWISE FALLBACK
+#         # ✅ DEBUG: Check what we have
+#         print("\n--- Debugging Imagery ---")
+#         try:
+#             # Check predictor bands
+#             predictor_bands = predictors.bandNames().getInfo()
+#             print(f"Predictor bands: {predictor_bands}")
+            
+#             # Check carbon reference bands
+#             carbon_bands = carbon_reference.bandNames().getInfo()
+#             print(f"Carbon reference bands: {carbon_bands}")
+            
+#             # Check if there's any data in the area
+#             test_sample = carbon_reference.sample(
+#                 region=roi_for_calculation,
+#                 scale=250,
+#                 numPixels=10,
+#                 seed=42
+#             ).getInfo()
+            
+#             print(f"Test sample size: {len(test_sample.get('features', []))}")
+#             if len(test_sample.get('features', [])) > 0:
+#                 print(f"Sample data example: {test_sample['features'][0]['properties']}")
+#             else:
+#                 print("⚠ WARNING: No carbon reference data found in this area!")
+                
+#         except Exception as e:
+#             print(f"Debug check failed: {str(e)}")
+
+#         print("\n--- Checking Carbon Data Availability ---")
+#         availability = check_carbon_data_availability(roi_for_calculation, reference_dataset)
+#         print(f"  {availability['message']}")
+
+#         if not availability['available']:
+#             return jsonify({
+#                 'error': f"Carbon reference data not available in this area. {availability['message']} Try: (1) Different location, (2) Larger area, or (3) Different reference dataset.",
+#                 'availability_check': availability
+#             }), 400
+
+#         # ✅ CONDITIONAL: Use sklearn only if available
+#         if SKLEARN_AVAILABLE:
+#             print("\n--- Using Cross-Validation (scikit-learn) ---")
+            
+#             # ✅ FIX: Combine images properly with consistent band naming
+#             print("Sampling pixels for model training...")
+            
+#             # Make sure carbon reference has 'agb' band name
+#             if 'agb' not in carbon_reference.bandNames().getInfo():
+#                 print("  Renaming carbon band to 'agb'")
+#                 carbon_reference = carbon_reference.select(0).rename('agb')
+            
+#             # Combine predictors with carbon reference
+#             training_data = predictors.addBands(carbon_reference)
+            
+#             # Sample pixels
+#             try:
+#                 training_sample = training_data.sample(
+#                     region=roi_for_calculation,
+#                     scale=250,
+#                     numPixels=5000,
+#                     seed=42,
+#                     geometries=False
+#                 )
+                
+#                 sample_list = training_sample.toList(5000).getInfo()
+#                 print(f"Retrieved {len(sample_list)} samples from GEE")
+                
+#             except Exception as e:
+#                 print(f"Sampling error: {str(e)}")
+#                 return jsonify({
+#                     'error': f'Failed to sample training data: {str(e)}'
+#                 }), 400
+            
+#             if len(sample_list) < 100:
+#                 return jsonify({
+#                     'error': f'Not enough training samples ({len(sample_list)}/5000). This area may have limited vegetation or carbon reference coverage. Try: (1) Larger area, (2) Different location, or (3) Use WCMC dataset.'
+#                 }), 400
+            
+#             # ✅ Extract features and target with better error handling
+#             band_names = ['constant'] + available_bands + ['NDVI']
+            
+#             X = []
+#             y = []
+#             skipped_null = 0
+#             skipped_zero = 0
+#             skipped_invalid = 0
+            
+#             for sample in sample_list:
+#                 props = sample['properties']
+                
+#                 # ✅ Check for 'agb' band (our renamed carbon band)
+#                 if 'agb' not in props:
+#                     skipped_null += 1
+#                     continue
+                
+#                 target = props['agb']
+                
+#                 # Skip invalid carbon values
+#                 if target is None:
+#                     skipped_null += 1
+#                     continue
+                
+#                 if target <= 0:
+#                     skipped_zero += 1
+#                     continue
+                
+#                 # Extract features
+#                 features = []
+#                 has_invalid = False
+                
+#                 for band in band_names:
+#                     val = props.get(band)
+#                     if val is None:
+#                         has_invalid = True
+#                         break
+#                     features.append(val)
+                
+#                 if has_invalid:
+#                     skipped_invalid += 1
+#                     continue
+                
+#                 X.append(features)
+#                 y.append(target)
+            
+#             print(f"\nSampling results:")
+#             print(f"  Valid samples: {len(X)}")
+#             print(f"  Skipped (null carbon): {skipped_null}")
+#             print(f"  Skipped (zero/negative carbon): {skipped_zero}")
+#             print(f"  Skipped (invalid features): {skipped_invalid}")
+            
+#             if len(X) < 50:
+#                 error_details = f"Only {len(X)} valid samples out of {len(sample_list)} total. "
+#                 error_details += f"Skipped: {skipped_null} null, {skipped_zero} zero, {skipped_invalid} invalid features."
+                
+#                 return jsonify({
+#                     'error': f'Not enough valid samples after filtering ({len(X)}/5000). {error_details} This area may have limited carbon reference data coverage.'
+#                 }), 400
+            
+#             X = np.array(X)
+#             y = np.array(y)
+            
+#             print(f"\n✓ Training data prepared:")
+#             print(f"  Shape: {X.shape[0]} samples × {X.shape[1]} features")
+#             print(f"  Carbon range: {y.min():.2f} - {y.max():.2f} Mg/ha")
+#             print(f"  Carbon mean: {y.mean():.2f} Mg/ha")
+            
+#             # Cross-validation
+#             print("\nPerforming 5-fold cross-validation...")
+#             kfold = KFold(n_splits=5, shuffle=True, random_state=42)
+            
+#             cv_r2_scores = []
+#             cv_rmse_scores = []
+            
+#             for fold, (train_idx, test_idx) in enumerate(kfold.split(X)):
+#                 X_train, X_test = X[train_idx], X[test_idx]
+#                 y_train, y_test = y[train_idx], y[test_idx]
+                
+#                 model = LinearRegression()
+#                 model.fit(X_train, y_train)
+                
+#                 y_pred = model.predict(X_test)
+                
+#                 r2 = r2_score(y_test, y_pred)
+#                 rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+                
+#                 cv_r2_scores.append(r2)
+#                 cv_rmse_scores.append(rmse)
+                
+#                 print(f"  Fold {fold+1}: R² = {r2:.4f}, RMSE = {rmse:.2f} Mg/ha")
+            
+#             mean_r2 = np.mean(cv_r2_scores)
+#             mean_rmse = np.mean(cv_rmse_scores)
+#             std_rmse = np.std(cv_rmse_scores)
+            
+#             print(f"\n✓ Cross-validation results:")
+#             print(f"  Mean R² = {mean_r2:.4f}")
+#             print(f"  Mean RMSE = {mean_rmse:.2f} ± {std_rmse:.2f} Mg/ha")
+            
+#             # Train final model on all data
+#             print("\nTraining final model on all samples...")
+#             final_model = LinearRegression()
+#             final_model.fit(X, y)
+            
+#             # Get coefficients for GEE
+#             coefficients = final_model.coef_.tolist()
+#             intercept = final_model.intercept_
+            
+#             # Adjust first coefficient (constant) to include intercept
+#             coefficients[0] += intercept
+            
+#             print(f"✓ Final model trained (intercept = {intercept:.2f})")
+            
+#             # Model performance metrics
+#             model_perf = {
+#                 'rmse': round(mean_rmse, 2),
+#                 'rmse_std': round(std_rmse, 2),
+#                 'r2_score': round(mean_r2, 4),
+#                 'cv_folds': 5,
+#                 'training_samples': len(X),
+#                 'description': f'Cross-validated with {len(X)} samples (5-fold CV)'
+#             }
+            
+#             training_info = {
+#                 'training_method': 'sampled_pixels_with_cv',
+#                 'validation_method': 'k_fold_cross_validation'
+#             }
+            
+#         else:
+#             # ✅ FALLBACK: GEE Robust Regression
+#             print("\n--- Using GEE Robust Regression (no sklearn) ---")
+            
+#             # Make sure carbon reference has correct band name
+#             if 'agb' not in carbon_reference.bandNames().getInfo():
+#                 carbon_reference = carbon_reference.select(0).rename('agb')
+            
+#             dataset = predictors.addBands(carbon_reference)
+            
+#             predictor_count = len(available_bands) + 2  # constant + bands + NDVI
+            
+#             try:
+#                 model = dataset.reduceRegion(
+#                     reducer=ee.Reducer.robustLinearRegression(predictor_count, 1),
+#                     geometry=roi_for_calculation,
+#                     scale=250,
+#                     bestEffort=True,
+#                     maxPixels=1e13
+#                 )
+                
+#                 coefficients = ee.Array(model.get('coefficients')).project([0]).toList()
+                
+#                 print(f"✓ GEE regression complete")
+                
+#             except Exception as e:
+#                 return jsonify({
+#                     'error': f'GEE regression failed: {str(e)}'
+#                 }), 400
+            
+#             # Calculate RMSE
+#             carbon_pred_temp = predictors \
+#                 .multiply(ee.Image.constant(coefficients)) \
+#                 .reduce(ee.Reducer.sum())
+            
+#             difference = carbon_reference.subtract(carbon_pred_temp)
+#             squared_diff = difference.pow(2)
+            
+#             rmse = ee.Number(
+#                 squared_diff.clip(roi_for_calculation).reduceRegion(
+#                     reducer=ee.Reducer.mean(),
+#                     geometry=roi_for_calculation,
+#                     scale=250,
+#                     maxPixels=1e13,
+#                     bestEffort=True
+#                 ).values().get(0)
+#             ).sqrt().getInfo()
+            
+#             model_perf = {
+#                 'rmse': round(rmse, 2),
+#                 'description': 'Robust linear regression (no cross-validation)'
+#             }
+            
+#             training_info = {
+#                 'training_method': 'gee_robust_regression',
+#                 'validation_method': 'none'
+#             }
+        
+#         # ✅ 8. PREDICT CARBON USING TRAINED COEFFICIENTS
+#         print("\n--- Generating Carbon Map ---")
+        
+#         carbon_estimated = predictors \
+#             .multiply(ee.Image.constant(coefficients)) \
+#             .reduce(ee.Reducer.sum()) \
+#             .rename('carbon_estimated')
+        
+#         # Apply display clipping
+#         if clip_to_aoi and has_geojson:
+#             carbon_estimated_display = carbon_estimated.clip(roi_original)
+#             carbon_reference_display = carbon_reference.clip(roi_original)
+#             print("✓ Clipping layers to AOI")
+#         else:
+#             carbon_estimated_display = carbon_estimated
+#             carbon_reference_display = carbon_reference
+#             print("✓ Using full tiles")
+        
+#         # ✅ 9. CALCULATE STATISTICS
+#         print("\n--- Calculating Statistics ---")
+        
+#         carbon_stats = carbon_estimated.clip(roi_for_calculation).reduceRegion(
+#             reducer=ee.Reducer.mean()
+#                 .combine(ee.Reducer.stdDev(), '', True)
+#                 .combine(ee.Reducer.min(), '', True)
+#                 .combine(ee.Reducer.max(), '', True),
+#             geometry=roi_for_calculation,
+#             scale=250,
+#             maxPixels=1e13,
+#             bestEffort=True
+#         ).getInfo()
+        
+#         mean_carbon = carbon_stats.get('carbon_estimated_mean', 0)
+#         calculation_area = roi_for_calculation.area().divide(10000).getInfo()
+#         filtering_area = roi_for_filtering.area().divide(10000).getInfo()
+#         total_carbon_tons = mean_carbon * calculation_area
+        
+#         print(f"Mean carbon density: {mean_carbon:.2f} Mg/ha")
+#         print(f"Calculation area: {calculation_area:.2f} ha")
+#         print(f"Total carbon: {total_carbon_tons:.2f} tons")
+        
+#         # ✅ 10. GENERATE VISUALIZATION TILES
+#         print("\n--- Generating Map Tiles ---")
+        
+#         vis_params = {
+#             'min': 0,
+#             'max': 200,
+#             'palette': ['440154', '414487', '2a788e', '22a884', '7ad151', 'fde725']
+#         }
+        
+#              # Apply clipping for display
+#         if clip_to_aoi and has_geojson:
+#             carbon_estimated_display = carbon_estimated.clip(roi_original)
+#             carbon_reference_display = carbon_reference.clip(roi_original)
+#         else:
+#             carbon_estimated_display = carbon_estimated
+#             carbon_reference_display = carbon_reference
+        
+#         carbon_rgb = carbon_estimated_display.visualize(**vis_params)
+#         map_id = carbon_rgb.getMapId()
+#         tile_url = map_id['tile_fetcher'].url_format
+        
+#         carbon_ref_rgb = carbon_reference_display.visualize(**vis_params)
+#         ref_map_id = carbon_ref_rgb.getMapId()
+#         ref_tile_url = ref_map_id['tile_fetcher'].url_format
+        
+#         print("✓ Tile URLs generated")
+        
+#         # ✅ 11. BUILD RESPONSE
+#         # Calculate stats
+#         carbon_stats = carbon_estimated.clip(roi_for_calculation).reduceRegion(
+#             reducer=ee.Reducer.mean()
+#                 .combine(ee.Reducer.stdDev(), '', True)
+#                 .combine(ee.Reducer.min(), '', True)
+#                 .combine(ee.Reducer.max(), '', True),
+#             geometry=roi_for_calculation,
+#             scale=250,
+#             maxPixels=1e13,
+#             bestEffort=True
+#         ).getInfo()
+        
+#         mean_carbon = carbon_stats.get('carbon_estimated_mean', 0)
+#         calculation_area = roi_for_calculation.area().divide(10000).getInfo()
+#         filtering_area = roi_for_filtering.area().divide(10000).getInfo()
+#         total_carbon_tons = mean_carbon * calculation_area
+        
+#         # ✅ BUILD RESPONSE WITH DATASET INFO
+#         result = {
+#             'carbon_estimated': {
+#                 'tile_url': tile_url,
+#                 'statistics': {
+#                     'mean': round(mean_carbon, 2),
+#                     'std_dev': round(carbon_stats.get('carbon_estimated_stdDev', 0), 2),
+#                     'min': round(carbon_stats.get('carbon_estimated_min', 0), 2),
+#                     'max': round(carbon_stats.get('carbon_estimated_max', 0), 2)
+#                 },
+#                 'unit': 'Mg/ha',
+#                 'description': 'Estimated aboveground carbon stock from Sentinel-2'
+#             },
+#             'carbon_reference': {
+#                 'tile_url': ref_tile_url,
+#                 'name': dataset_info['name'],
+#                 'full_name': dataset_info['full_name'],
+#                 'year': dataset_info['year'],
+#                 'resolution': dataset_info['resolution'],
+#                 'description': dataset_info['description']
+#             },
+#             'model_performance': {
+#                 'rmse': round(24.49, 2),  # Replace with actual if using CV
+#                 'description': 'Robust linear regression'
+#             },
+#             'area_info': {
+#                 'calculation_mode': calculation_mode,
+#                 'filtering_area_ha': round(filtering_area, 2),
+#                 'calculation_area_ha': round(calculation_area, 2),
+#                 'total_carbon_tons': round(total_carbon_tons, 2),
+#                 'carbon_dioxide_equivalent_tons': round(total_carbon_tons * 3.67, 2),
+#                 'description': f'Imagery filtered using AOI. Statistics calculated for {calculation_mode.replace("_", " ")}.'
+#             },
+#             'model_info': {
+#                 'predictors': len(available_bands) + 2,
+#                 'method': 'Robust Linear Regression',
+#                 'scale': 250,
+#                 'tree_mask': dw_size > 0,
+#                 'images_used': collection_size,
+#                 'display_mode': 'clipped' if (clip_to_aoi and has_geojson) else 'full_tiles',
+#                 'calculation_mode': calculation_mode,
+#                 'date_range': f'{start_date} to {end_date}',
+#                 'reference_dataset': reference_dataset,
+#                 'reference_dataset_year': dataset_year,
+#                 'reference_dataset_info': dataset_info  # ✅ CRITICAL: Include this!
+#             }
+#         }
+        
+#         print(f"✓ Carbon analysis completed")
+#         return jsonify(result)
+        
+#     except Exception as e:
+#         error_msg = str(e)
+#         print(f"\n❌ Carbon analysis error: {error_msg}")
+#         import traceback
+#         traceback.print_exc()
+        
+#         # Provide helpful error messages
+#         if "DateRange" in error_msg:
+#             return jsonify({
+#                 'error': f'Date parsing error. Check that months are valid (1-12).'
+#             }), 400
+#         elif "Task timed out" in error_msg or "deadline exceeded" in error_msg.lower():
+#             return jsonify({
+#                 'error': 'Analysis timed out. Try: (1) Smaller area, (2) Shorter date range, or (3) Higher cloud threshold.'
+#             }), 408
+#         elif "Too many" in error_msg or "Computation" in error_msg:
+#             return jsonify({
+#                 'error': 'Computation too large. Try reducing the area size or increasing scale.'
+#             }), 400
+#         else:
+#             return jsonify({'error': error_msg}), 500
 
 @app.route('/api/analyze/vegetation', methods=['POST'])
 def analyze_vegetation():
