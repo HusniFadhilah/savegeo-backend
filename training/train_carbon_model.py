@@ -28,11 +28,19 @@ KEY_FILE = os.getenv("GEE_KEY_FILE", "../endless-bounty-416008-a6cce2f8b208.json
 API_BASE_URL = "https://api.sp3stab.id/api/en"
 
 def init_ee():
-    if not Path(KEY_FILE).exists():
-        raise FileNotFoundError(f"Key file not found: {KEY_FILE}")
-    credentials = ee.ServiceAccountCredentials(SERVICE_ACCOUNT, KEY_FILE)
-    ee.Initialize(credentials)
-    print("✓ Earth Engine initialized with Service Account")
+    """Initialize Google Earth Engine"""
+    try:
+        if Path(KEY_FILE).exists():
+            credentials = ee.ServiceAccountCredentials(SERVICE_ACCOUNT, KEY_FILE)
+            ee.Initialize(credentials)
+            logger.info("✓ Earth Engine initialized successfully")
+            return True
+        else:
+            logger.error(f"Key file not found: {KEY_FILE}")
+            return False
+    except Exception as e:
+        logger.error(f"Failed to initialize Earth Engine: {e}")
+        return False
 
 init_ee()
 
