@@ -27,6 +27,9 @@ except ImportError:
 from inference.carbon_inference import CarbonInferenceEngine
 from models.model_registry import ModelRegistry
 
+from dotenv import load_dotenv
+load_dotenv()
+
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

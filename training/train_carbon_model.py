@@ -17,6 +17,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from models.carbon_model import CarbonEstimationModel
 from models.model_registry import ModelRegistry
 from training.data_preparation import sample_training_data
+from dotenv import load_dotenv
+load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
