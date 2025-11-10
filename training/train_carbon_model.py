@@ -3,7 +3,7 @@ Training script for carbon estimation model
 Run this to train a new model or retrain existing one
 """
 
-import ee
+import ee, os
 import numpy as np
 import argparse
 import logging
@@ -21,6 +21,20 @@ from training.data_preparation import sample_training_data
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+    
+# Initialize Earth Engine
+SERVICE_ACCOUNT = os.getenv("GEE_SERVICE_ACCOUNT", "your-sa@project.iam.gserviceaccount.com")
+KEY_FILE = os.getenv("GEE_KEY_FILE", "../endless-bounty-416008-a6cce2f8b208.json")
+API_BASE_URL = "https://api.sp3stab.id/api/en"
+
+def init_ee():
+    if not Path(KEY_FILE).exists():
+        raise FileNotFoundError(f"Key file not found: {KEY_FILE}")
+    credentials = ee.ServiceAccountCredentials(SERVICE_ACCOUNT, KEY_FILE)
+    ee.Initialize(credentials)
+    print("✓ Earth Engine initialized with Service Account")
+
+init_ee()
 
 def train_carbon_model(
     training_region: str = 'indonesia',
@@ -45,14 +59,6 @@ def train_carbon_model(
     logger.info("=" * 60)
     logger.info("CARBON ESTIMATION MODEL TRAINING")
     logger.info("=" * 60)
-    
-    # Initialize Earth Engine
-    try:
-        ee.Initialize()
-        logger.info("✓ Earth Engine initialized")
-    except Exception as e:
-        logger.error(f"Failed to initialize Earth Engine: {e}")
-        return
     
     # Define training region
     if training_region == 'indonesia':

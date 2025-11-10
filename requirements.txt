@@ -17,3 +17,4 @@ matplotlib>=3.5.0
 # Optional but recommended
 pandas>=1.3.0
 seaborn>=0.11.0
+dotenv
