@@ -57,12 +57,12 @@ service_account_info = {
 }
 
 # Simpan ke file sementara (tidak dikomit)
-service_account_path = "./endless-bounty-416008-a6cce2f8b208.json"
+service_account_path = "endless-bounty-416008-a6cce2f8b208.json"
 with open(service_account_path, "w") as f:
     json.dump(service_account_info, f)
 
 SERVICE_ACCOUNT = os.getenv("GEE_SERVICE_ACCOUNT", "your-sa@project.iam.gserviceaccount.com")
-KEY_FILE = os.getenv("GEE_KEY_FILE", "./endless-bounty-416008-a6cce2f8b208.json")
+KEY_FILE = os.getenv("GEE_KEY_FILE", service_account_path)
 API_BASE_URL = "https://api.sp3stab.id/api/en"
 
 # =========================
@@ -1684,7 +1684,7 @@ def analyze_timeseries():
 
 @app.errorhandler(404)
 def not_found(error):
-    return jsonify({'error': 'Endpoint not found'}), 404
+    return jsonify({'error': f'Endpoint not found {os.path.exists(service_account_path)} {service_account_info}'}), 404
 
 @app.errorhandler(500)
 def internal_error(error):
