@@ -47,9 +47,9 @@ def init_ee():
 init_ee()
 
 def train_carbon_model(
-    training_region: str = 'indonesia',
+    training_region: str = 'central_java',
     reference_dataset: str = 'WCMC',
-    n_samples: int = 10000,
+    n_samples: int = 1000,
     algorithm: str = 'random_forest',
     model_name: str = None,
     **model_params
@@ -73,6 +73,11 @@ def train_carbon_model(
     # Define training region
     if training_region == 'indonesia':
         roi = ee.Geometry.Rectangle([95, -11, 141, 6])  # Indonesia bbox
+    elif training_region == 'central_java':
+        roi = ee.Geometry.Rectangle([109.5, -8.0, 111.5, -6.5])  # Jateng bbox
+    elif training_region == 'custom':
+        # Sumatera + Kalimantan (wilayah luas di barat & tengah Indonesia)
+        roi = ee.Geometry.Rectangle([95, -6, 120, 7])
     elif training_region == 'southeast_asia':
         roi = ee.Geometry.Rectangle([95, -11, 155, 20])
     elif training_region == 'global':
@@ -152,13 +157,13 @@ def train_carbon_model(
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Train carbon estimation model')
-    parser.add_argument('--region', default='indonesia', 
-                        choices=['indonesia', 'southeast_asia', 'global'],
+    parser.add_argument('--region', default='custom', 
+                        choices=['indonesia', 'central_java','custom','southeast_asia', 'global'],
                         help='Training region')
     parser.add_argument('--dataset', default='WCMC',
                         choices=['WCMC', 'ESA_CCI', 'GEDI', 'Simard'],
                         help='Reference biomass dataset')
-    parser.add_argument('--samples', type=int, default=10000,
+    parser.add_argument('--samples', type=int, default=1000,
                         help='Number of training samples')
     parser.add_argument('--algorithm', default='random_forest',
                         choices=['linear', 'ridge', 'lasso', 'random_forest', 'gradient_boosting'],

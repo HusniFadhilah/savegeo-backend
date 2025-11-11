@@ -131,7 +131,7 @@ class CarbonInferenceEngine:
         Extract model coefficients for GEE application
         
         For linear models, this is straightforward.
-        For tree-based models, we need to approximate or use a different approach.
+        For tree-based models, we create a linear surrogate.
         """
         
         # Check if model is linear
@@ -145,22 +145,64 @@ class CarbonInferenceEngine:
             
             return coefficients
         else:
-            # Non-linear model - need different approach
-            # Option 1: Train a linear surrogate model
-            # Option 2: Use GEE's classifier (not covered here)
-            # Option 3: Perform pixel-by-pixel prediction (slower)
-            
+            # Non-linear model - create linear surrogate
             logger.warning(
                 f"Model algorithm '{self.model.algorithm}' is not directly compatible with GEE. "
-                "Using linear approximation."
+                "Creating linear surrogate model for GEE deployment."
             )
             
-            # Train a simple linear surrogate for GEE deployment
-            # This is a simplified approach
-            raise NotImplementedError(
-                "Non-linear models require special handling for GEE deployment. "
-                "Use 'linear', 'ridge', or 'lasso' algorithm for direct GEE inference."
+            return self._create_linear_surrogate()
+        
+    def _create_linear_surrogate(self) -> list:
+        """
+        Create a linear surrogate model for non-linear models
+        This allows deployment to GEE at the cost of some accuracy
+        """
+        from sklearn.linear_model import Ridge
+        
+        # Get training data from model metadata
+        training_info = self.model.metadata.get('training_info', {})
+        
+        if 'X_sample' not in training_info or 'y_sample' not in training_info:
+            raise ValueError(
+                "Cannot create surrogate: training data not saved in model. "
+                "Please retrain the model or use a linear algorithm."
             )
+        
+        X_sample = np.array(training_info['X_sample'])
+        y_sample = np.array(training_info['y_sample'])
+        
+        logger.info("Training linear surrogate model...")
+        
+        # Predict with original model
+        y_pred_original = self.model.model.predict(X_sample)
+        
+        # Train Ridge regression to approximate the original model
+        surrogate = Ridge(alpha=1.0)
+        surrogate.fit(X_sample, y_pred_original)
+        
+        # Get coefficients
+        coefficients = surrogate.coef_.tolist()
+        intercept = float(surrogate.intercept_)
+        coefficients[0] += intercept
+        
+        # Calculate surrogate accuracy
+        from sklearn.metrics import r2_score, mean_squared_error
+        y_pred_surrogate = surrogate.predict(X_sample)
+        r2 = r2_score(y_pred_original, y_pred_surrogate)
+        rmse = np.sqrt(mean_squared_error(y_pred_original, y_pred_surrogate))
+        
+        logger.info(f"✓ Linear surrogate created:")
+        logger.info(f"  R² (surrogate vs original): {r2:.4f}")
+        logger.info(f"  RMSE (surrogate vs original): {rmse:.2f} Mg/ha")
+        
+        if r2 < 0.8:
+            logger.warning(
+                f"Surrogate R² is low ({r2:.4f}). "
+                "Consider using a linear model for better GEE compatibility."
+            )
+        
+        return coefficients
     
     def get_model_info(self) -> Dict:
         """Get information about the loaded model"""

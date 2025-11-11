@@ -1,0 +1,26 @@
+======================================================================
+CARBON ESTIMATION MODEL - EVALUATION REPORT
+======================================================================
+
+TEST SET PERFORMANCE
+----------------------------------------------------------------------
+Root Mean Squared Error (RMSE): 71.85 Mg/ha
+Mean Absolute Error (MAE):      69.80 Mg/ha
+R² Score:                        -29.1947
+Mean Absolute Percentage Error:  117.80%
+Bias:                            69.80 Mg/ha
+Explained Variance:              -0.7049
+
+RESIDUAL ANALYSIS
+----------------------------------------------------------------------
+Mean Residual:          69.80 Mg/ha
+Std Dev of Residuals:   17.07 Mg/ha
+Max Overestimation:     114.88 Mg/ha
+Max Underestimation:    3.95 Mg/ha
+25th Percentile:        58.73 Mg/ha
+Median (50th):          71.42 Mg/ha
+75th Percentile:        81.27 Mg/ha
+
+======================================================================
+Report generated at: L:\Husni\Penelitian\Hiliriset\Eksperimen\Platform\Rancangan UI\geomoka\backend\evaluation_results\example_1\report.txt
+======================================================================

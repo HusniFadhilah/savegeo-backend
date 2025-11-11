@@ -114,6 +114,7 @@ def sample_training_data(
     n_samples: int = 10000,
     year: int = 2022,
     scale: int = 250,
+    month_range: tuple = (1, 12),
     min_carbon: float = 0.1  # Minimum carbon threshold to avoid zeros
 ) -> Dict:
     """
@@ -137,8 +138,9 @@ def sample_training_data(
     carbon_band = load_carbon_reference_for_training(reference_dataset, roi)
     
     # Load Sentinel-2 (median composite for the year)
-    start_date = f'{year}-01-01'
-    end_date = f'{year}-12-31'
+    start_month, end_month = month_range
+    start_date = f'{year}-{start_month:02d}-01'
+    end_date = f'{year}-{end_month:02d}-28'
     
     logger.info(f"Loading Sentinel-2 imagery ({start_date} to {end_date})...")
     
