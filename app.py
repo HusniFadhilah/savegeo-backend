@@ -1684,7 +1684,7 @@ def analyze_timeseries():
 
 @app.errorhandler(404)
 def not_found(error):
-    return jsonify({'error': f'Endpoint not found {os.path.exists(service_account_path)} {service_account_info}'}), 404
+    return jsonify({'error': f'Endpoint not founds {os.path.exists(service_account_path)} {service_account_info}'}), 404
 
 @app.errorhandler(500)
 def internal_error(error):
