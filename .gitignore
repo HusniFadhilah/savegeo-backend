@@ -1,0 +1,36 @@
+.env
+*.env.local
+
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+.venv/
+venv/
+
+# Local SQLite fallback (never used in prod — Postgres/Supabase only)
+*.db
+*.sqlite
+*.sqlite3
+
+# Generated reports / temp uploads
+var/
+tmp/
+*.docx
+!docs/**/*.docx
+
+# Credential files — must never be committed
+*service-account*.json
+*credentials*.json
+gee-*.json
+
+# Model artifacts pulled in locally for dev (real storage is DB + Supabase Storage / MODEL_DIR)
+saved_models_local/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

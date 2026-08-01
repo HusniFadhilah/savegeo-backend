@@ -1,0 +1,27 @@
+# Local development only. Production database is Supabase Postgres (set DATABASE_URL
+# in .env to your Supabase connection string) - this compose file is just a convenience
+# for running a local Postgres instance when you do not want to depend on Supabase
+# during development, plus the API service itself.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: savegeo
+    ports:
+      - "5433:5432"
+    volumes:
+      - savegeo_pgdata:/var/lib/postgresql/data
+
+  api:
+    build: .
+    ports:
+      - "8086:8086"
+    env_file:
+      - .env
+    depends_on:
+      - db
+
+volumes:
+  savegeo_pgdata:
