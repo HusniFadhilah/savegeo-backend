@@ -1,6 +1,7 @@
 """GeoTIFF download URL generation - /api/download/geotiff. Ported from backend/app.py."""
 from __future__ import annotations
 
+import ee
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -22,6 +23,12 @@ async def download_geotiff(request: Request, db: Session = Depends(get_db)):
         return download_service.download_geotiff(db, data)
     except AnalysisError as e:
         raise HTTPException(status_code=e.status_code, detail=str(e))
+    except ee.EEException as e:
+        # Malformed AOI / geometry input reaching Earth Engine (e.g. a bad
+        # GeoJSON shape from the client) is a client error, not a server fault -
+        # EEException is not a ValueError subclass so it needs its own branch,
+        # otherwise it falls through to the generic 500 handler below.
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:  # noqa: BLE001
         logger.exception("Download GeoTIFF error")
         raise HTTPException(status_code=500, detail=str(e))

@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.security import create_access_token, get_current_admin, hash_password, verify_password
 from app.db.models.admin_user import AdminUser
+from app.db.models.company_boundary import CompanyBoundary
 from app.db.models.gee_credential import GEECredential
 from app.db.models.role import Role
 from app.db.models.system_config import SystemConfig
@@ -31,6 +32,7 @@ from app.schemas.admin import (
     ModelUpdateRequest,
 )
 from app.services import audit_service, config_service, gee_service, storage_service
+from app.services.geo_utils import estimate_area_ha
 from app.services.datatable_service import datatables_response, is_datatables_request
 from app.services.arcgis_service import get_arcgis_client
 
@@ -518,3 +520,245 @@ def admin_user_delete(user_id: int, admin: AdminUser = Depends(get_current_admin
     db.commit()
     audit_service.log_audit(db, admin.id, "user.delete", "admin_user", user_id, detail={"username": username})
     return {"message": "User deleted"}
+
+
+# -- Company boundaries (admin CRUD) --
+INDUSTRY_TYPES = {"mining", "forestry", "plantation", "energy"}
+
+
+@router.get("/companies")
+def admin_companies_list(
+    request: Request,
+    industry_type: Optional[str] = None,
+    province: Optional[str] = None,
+    search: Optional[str] = None,
+    admin: AdminUser = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    query = db.query(CompanyBoundary)
+    if industry_type:
+        query = query.filter_by(industry_type=industry_type)
+    if province:
+        query = query.filter_by(province=province)
+    if search:
+        query = query.filter(CompanyBoundary.name.ilike(f"%{search}%"))
+    query = query.order_by(CompanyBoundary.name)
+
+    if is_datatables_request(request):
+        return datatables_response(
+            request,
+            query,
+            row_mapper=lambda c: c.to_dict(),
+            searchable_columns=[CompanyBoundary.name, CompanyBoundary.company_name, CompanyBoundary.province],
+        )
+
+    companies = query.all()
+    return {"companies": [c.to_dict() for c in companies], "count": len(companies)}
+
+
+@router.get("/companies/provinces")
+def admin_companies_provinces(admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+    rows = (
+        db.query(CompanyBoundary.province)
+        .filter(CompanyBoundary.province.isnot(None))
+        .distinct()
+        .order_by(CompanyBoundary.province)
+        .all()
+    )
+    return {"provinces": [r[0] for r in rows if r[0]]}
+
+
+@router.post("/companies", status_code=201)
+async def admin_company_create(
+    request: Request,
+    admin: AdminUser = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    content_type = request.headers.get("content-type", "")
+    geojson_raw: Optional[str] = None
+
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        name = str(form.get("name") or "").strip()
+        industry_type = str(form.get("industry_type") or "").strip()
+        company_name = str(form.get("company_name") or "").strip()
+        sub_type = str(form.get("sub_type") or "").strip()
+        province = str(form.get("province") or "").strip()
+        district = str(form.get("district") or "").strip()
+        description = str(form.get("description") or "").strip()
+        geojson_file = form.get("geojson_file")
+        if geojson_file is not None and hasattr(geojson_file, "read"):
+            geojson_raw = (await geojson_file.read()).decode("utf-8")
+        elif form.get("geojson_text"):
+            geojson_raw = str(form.get("geojson_text"))
+    else:
+        data = await request.json()
+        name = str(data.get("name") or "").strip()
+        industry_type = str(data.get("industry_type") or "").strip()
+        company_name = str(data.get("company_name") or "").strip()
+        sub_type = str(data.get("sub_type") or "").strip()
+        province = str(data.get("province") or "").strip()
+        district = str(data.get("district") or "").strip()
+        description = str(data.get("description") or "").strip()
+        raw_gj = data.get("geojson")
+        geojson_raw = json.dumps(raw_gj) if raw_gj else (data.get("geojson_text") or None)
+
+    if not name:
+        raise HTTPException(status_code=400, detail="name diperlukan")
+    if industry_type not in INDUSTRY_TYPES:
+        raise HTTPException(status_code=400, detail=f"industry_type harus salah satu dari {sorted(INDUSTRY_TYPES)}")
+    if not geojson_raw:
+        raise HTTPException(status_code=400, detail="geojson diperlukan (file atau teks)")
+
+    try:
+        gj = json.loads(geojson_raw) if isinstance(geojson_raw, str) else geojson_raw
+        if gj.get("type") not in ("Feature", "FeatureCollection", "Polygon", "MultiPolygon", "GeometryCollection"):
+            raise ValueError("unknown geojson type")
+    except Exception:
+        raise HTTPException(status_code=400, detail="GeoJSON tidak valid")
+
+    company = CompanyBoundary(
+        name=name,
+        company_name=company_name or None,
+        industry_type=industry_type,
+        sub_type=sub_type or None,
+        province=province or None,
+        district=district or None,
+        description=description or None,
+        geojson=gj,
+        area_ha=estimate_area_ha(gj),
+        source="manual",
+    )
+    db.add(company)
+    db.commit()
+    db.refresh(company)
+    audit_service.log_audit(db, admin.id, "company.create", "company_boundary", company.id, detail={"name": name})
+    return {"message": "Company boundary berhasil disimpan", "company": company.to_dict()}
+
+
+@router.get("/companies/{cid}")
+def admin_company_detail(cid: int, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+    company = db.get(CompanyBoundary, cid)
+    if not company:
+        raise HTTPException(status_code=404, detail="Company not found")
+    return company.to_dict(include_geojson=True)
+
+
+@router.put("/companies/{cid}")
+async def admin_company_update(
+    cid: int,
+    request: Request,
+    admin: AdminUser = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    company = db.get(CompanyBoundary, cid)
+    if not company:
+        raise HTTPException(status_code=404, detail="Company not found")
+    data = await request.json()
+    for field in ("name", "company_name", "industry_type", "sub_type", "province", "district", "description"):
+        if field in data:
+            setattr(company, field, data[field])
+    if "is_active" in data:
+        company.is_active = bool(data["is_active"])
+    if "geojson" in data:
+        raw = data["geojson"]
+        gj = raw if isinstance(raw, dict) else json.loads(raw)
+        company.geojson = gj
+        company.area_ha = estimate_area_ha(gj)
+    db.commit()
+    db.refresh(company)
+    audit_service.log_audit(db, admin.id, "company.update", "company_boundary", cid)
+    return {"message": "Diperbarui", "company": company.to_dict()}
+
+
+@router.delete("/companies/{cid}")
+def admin_company_delete(cid: int, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+    company = db.get(CompanyBoundary, cid)
+    if not company:
+        raise HTTPException(status_code=404, detail="Company not found")
+    name = company.name
+    db.delete(company)
+    db.commit()
+    audit_service.log_audit(db, admin.id, "company.delete", "company_boundary", cid, detail={"name": name})
+    return {"message": "Dihapus"}
+
+
+# -- Key pool status (config-derived; savegeo/backend has no live LLM-call
+#    rate-limit tracking like the legacy agentic_ai._KeyPool, so every
+#    configured key reports available=True/available_in=0 rather than a
+#    real cooldown - this endpoint's job here is just to show what backup
+#    keys are configured per provider, not runtime rotation state). --
+_KEY_POOL_PROVIDERS = ["gemini", "anthropic", "openai", "openrouter", "deepseek"]
+
+
+def _mask_key_prefix(k: str) -> str:
+    return f"{k[:6]}…{k[-4:]}" if len(k) > 10 else "***"
+
+
+@router.get("/key-pool/status")
+def key_pool_status(admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+    result: dict[str, list[dict]] = {}
+    for provider in _KEY_POOL_PROVIDERS:
+        primary = config_service.get_setting(db, f"ai.{provider}_api_key", "") or ""
+        backup_raw = config_service.get_setting(db, f"ai.backup_keys.{provider}", "") or ""
+        backups = [k.strip() for k in backup_raw.splitlines() if k.strip()]
+        seen: set[str] = set()
+        keys = []
+        for k in [primary.strip(), *backups]:
+            if k and k not in seen:
+                seen.add(k)
+                keys.append(k)
+        if keys:
+            result[provider] = [{"prefix": _mask_key_prefix(k), "available": True, "available_in": 0} for k in keys]
+    return result
+
+
+# -- OpenRouter model catalogue proxy (public API, cached 5 min in-process) --
+_OR_MODEL_CACHE: dict = {"data": None, "ts": 0.0}
+_OR_CACHE_TTL = 300.0
+
+
+@router.get("/openrouter/models")
+def openrouter_models(free: Optional[str] = None, q: Optional[str] = None):
+    import time as _time
+
+    now = _time.time()
+    if not _OR_MODEL_CACHE["data"] or now - _OR_MODEL_CACHE["ts"] > _OR_CACHE_TTL:
+        try:
+            import requests
+
+            r = requests.get(
+                "https://openrouter.ai/api/v1/models",
+                timeout=10,
+                headers={"User-Agent": "SaveGeo/1.0"},
+            )
+            r.raise_for_status()
+            raw = r.json().get("data", [])
+            models = []
+            for m in raw:
+                pricing = m.get("pricing", {})
+                inp = float(pricing.get("prompt", "0") or 0)
+                out = float(pricing.get("completion", "0") or 0)
+                models.append({
+                    "id": m.get("id", ""),
+                    "name": m.get("name", m.get("id", "")),
+                    "is_free": inp == 0 and out == 0,
+                    "context_length": m.get("context_length", 0),
+                    "input_per_m": round(inp * 1_000_000, 4),
+                    "output_per_m": round(out * 1_000_000, 4),
+                })
+            _OR_MODEL_CACHE["data"] = models
+            _OR_MODEL_CACHE["ts"] = now
+        except Exception as e:  # noqa: BLE001
+            if not _OR_MODEL_CACHE["data"]:
+                raise HTTPException(status_code=502, detail=str(e))
+            # else: serve stale cache below
+
+    models = _OR_MODEL_CACHE["data"] or []
+    if free in ("1", "true", "yes"):
+        models = [m for m in models if m["is_free"]]
+    if q:
+        needle = q.lower().strip()
+        models = [m for m in models if needle in m["id"].lower() or needle in m["name"].lower()]
+
+    return {"models": models, "total": len(models)}

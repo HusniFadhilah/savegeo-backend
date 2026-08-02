@@ -17,7 +17,7 @@ class AuditLog(Base):
     __tablename__ = "audit_logs"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    admin_user_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id"))
+    admin_user_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id", ondelete="SET NULL"))
     action: Mapped[str] = mapped_column(String(64), nullable=False)  # e.g. "config.update", "model.delete"
     resource_type: Mapped[str] = mapped_column(String(64), nullable=False)  # e.g. "system_config", "uploaded_model"
     resource_id: Mapped[str | None] = mapped_column(String(128))

@@ -34,12 +34,19 @@ _CACHE_TTL_SECONDS = 3600
 
 def _swap_lat_lng(node):
     """The upstream region API (api.sp3stab.id) returns polygon coordinates as
-    [lat, lng] pairs - confirmed against live data (e.g. Kecamatan Bangli's
-    `meta` center is lat=-8.45/long=115.35, and its ring coordinates come back
-    as [-8.52, 115.33, ...], same order). GeoJSON (RFC 7946) requires
-    [lng, lat]. Recursively swaps every innermost 2-number coordinate pair so
-    every geometry this module returns is spec-compliant for any consumer
-    (Leaflet, this frontend, or anything else)."""
+    [lat, lng] pairs for province/city/district - confirmed against live data
+    (e.g. Kecamatan Bangli's `meta` center is lat=-8.45/long=115.35, and its
+    ring coordinates come back as [-8.52, 115.33, ...], same order). GeoJSON
+    (RFC 7946) requires [lng, lat]. Recursively swaps every innermost 2-number
+    coordinate pair so every geometry this module returns is spec-compliant
+    for any consumer (Leaflet, this frontend, or anything else).
+
+    NOT applied to village/kelurahan geometry - confirmed those already come
+    back as [lng, lat] (e.g. Kelurahan Gedawang's ring coordinates are
+    [110.4379, -7.075, ...], matching its real long=110.43/lat=-7.09). Swapping
+    them would flip already-correct coordinates back into [lat, lng]. See
+    `_fix_geometry_coord_order`'s `level` param.
+    """
     if isinstance(node, list):
         if len(node) == 2 and all(isinstance(n, (int, float)) for n in node):
             return [node[1], node[0]]
@@ -47,19 +54,22 @@ def _swap_lat_lng(node):
     return node
 
 
-def _fix_geometry_coord_order(geometry):
-    """Apply `_swap_lat_lng` to a GeoJSON geometry, Feature, or FeatureCollection dict in place."""
+def _fix_geometry_coord_order(geometry, level: str = ""):
+    """Apply `_swap_lat_lng` to a GeoJSON geometry, Feature, or FeatureCollection
+    dict in place - skipped when `level == "village"` (already [lng, lat])."""
+    if level == "village":
+        return geometry
     if not isinstance(geometry, dict):
         return geometry
     gtype = geometry.get("type")
     if gtype == "FeatureCollection":
         for feature in geometry.get("features", []):
-            _fix_geometry_coord_order(feature)
+            _fix_geometry_coord_order(feature, level)
     elif gtype == "Feature":
-        _fix_geometry_coord_order(geometry.get("geometry"))
+        _fix_geometry_coord_order(geometry.get("geometry"), level)
     elif gtype == "GeometryCollection":
         for geom in geometry.get("geometries", []):
-            _fix_geometry_coord_order(geom)
+            _fix_geometry_coord_order(geom, level)
     elif "coordinates" in geometry:
         geometry["coordinates"] = _swap_lat_lng(geometry["coordinates"])
     return geometry
@@ -152,7 +162,7 @@ def get_region_geometry(endpoint: str = "", code: str = ""):
         data = r.json()
         if data.get("meta", {}).get("code") == 200:
             region = data.get("data", {}).get("region")
-            return _fix_geometry_coord_order(region)
+            return _fix_geometry_coord_order(region, endpoint)
         raise HTTPException(status_code=404, detail="Region not found")
     except HTTPException:
         raise
@@ -196,7 +206,7 @@ def _fetch_region_child_geometry(base_url, child_endpoint, name, code):
     region = payload.get("data", {}).get("region") if isinstance(payload, dict) else None
     if not region:
         return [], {"name": name, "code": code, "reason": "empty geometry"}
-    region = _fix_geometry_coord_order(region)
+    region = _fix_geometry_coord_order(region, child_endpoint)
 
     if region.get("type") == "FeatureCollection":
         region_features = region.get("features", [])
@@ -217,7 +227,7 @@ def _normalize_region_feature_collection(payload, child_endpoint, limit):
     region = payload.get("data", {}).get("region") if isinstance(payload, dict) else None
     if not isinstance(region, dict):
         return None
-    region = _fix_geometry_coord_order(region)
+    region = _fix_geometry_coord_order(region, child_endpoint)
 
     if region.get("type") == "FeatureCollection":
         features = list(region.get("features") or [])

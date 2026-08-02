@@ -1,6 +1,7 @@
 """Carbon analysis endpoints - /api/analyze/carbon*. Ported from backend/app.py."""
 from __future__ import annotations
 
+import ee
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -27,6 +28,12 @@ async def analyze_carbon(request: Request, db: Session = Depends(get_db)):
     except ValueError as e:
         logger.warning(f"Carbon analysis validation error: {e}")
         raise HTTPException(status_code=400, detail=str(e))
+    except ee.EEException as e:
+        # Malformed AOI / geometry input reaching Earth Engine (e.g. a bad
+        # GeoJSON shape from the client) is a client error, not a server fault -
+        # EEException is not a ValueError subclass so it needs its own branch,
+        # otherwise it falls through to the generic 500 handler below.
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:  # noqa: BLE001
         logger.error(f"Carbon analysis error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -43,6 +50,12 @@ async def analyze_carbon_local(request: Request, db: Session = Depends(get_db)):
     except ValueError as e:
         logger.warning(f"Non-GEE carbon analysis validation error: {e}")
         raise HTTPException(status_code=422, detail=str(e))
+    except ee.EEException as e:
+        # Malformed AOI / geometry input reaching Earth Engine (e.g. a bad
+        # GeoJSON shape from the client) is a client error, not a server fault -
+        # EEException is not a ValueError subclass so it needs its own branch,
+        # otherwise it falls through to the generic 500 handler below.
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:  # noqa: BLE001
         logger.error(f"Non-GEE carbon analysis error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -59,6 +72,12 @@ async def analyze_carbon_delta(request: Request, db: Session = Depends(get_db)):
         raise HTTPException(status_code=e.status_code, detail=str(e))
     except ValueError as e:
         logger.warning(f"Carbon delta validation error: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except ee.EEException as e:
+        # Malformed AOI / geometry input reaching Earth Engine (e.g. a bad
+        # GeoJSON shape from the client) is a client error, not a server fault -
+        # EEException is not a ValueError subclass so it needs its own branch,
+        # otherwise it falls through to the generic 500 handler below.
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:  # noqa: BLE001
         logger.error(f"Carbon delta error: {e}")

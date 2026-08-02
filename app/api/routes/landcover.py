@@ -1,6 +1,7 @@
 """Land cover analysis endpoints - /api/analyze/landcover*. Ported from backend/app.py."""
 from __future__ import annotations
 
+import ee
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -20,6 +21,12 @@ async def analyze_landcover(request: Request):
         return landcover_service.analyze_landcover(data)
     except AnalysisError as e:
         raise HTTPException(status_code=e.status_code, detail=str(e))
+    except ee.EEException as e:
+        # Malformed AOI / geometry input reaching Earth Engine (e.g. a bad
+        # GeoJSON shape from the client) is a client error, not a server fault -
+        # EEException is not a ValueError subclass so it needs its own branch,
+        # otherwise it falls through to the generic 500 handler below.
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:  # noqa: BLE001
         logger.error(f"Land cover error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -32,6 +39,12 @@ async def analyze_landcover_transition(request: Request):
         return landcover_service.analyze_landcover_transition(data)
     except AnalysisError as e:
         raise HTTPException(status_code=e.status_code, detail=str(e))
+    except ee.EEException as e:
+        # Malformed AOI / geometry input reaching Earth Engine (e.g. a bad
+        # GeoJSON shape from the client) is a client error, not a server fault -
+        # EEException is not a ValueError subclass so it needs its own branch,
+        # otherwise it falls through to the generic 500 handler below.
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:  # noqa: BLE001
         logger.error(f"Land cover transition error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -44,6 +57,12 @@ async def analyze_landcover_change_map(request: Request):
         return landcover_service.analyze_landcover_change_map(data)
     except AnalysisError as e:
         raise HTTPException(status_code=e.status_code, detail=str(e))
+    except ee.EEException as e:
+        # Malformed AOI / geometry input reaching Earth Engine (e.g. a bad
+        # GeoJSON shape from the client) is a client error, not a server fault -
+        # EEException is not a ValueError subclass so it needs its own branch,
+        # otherwise it falls through to the generic 500 handler below.
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:  # noqa: BLE001
         logger.error(f"Land cover change map error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
