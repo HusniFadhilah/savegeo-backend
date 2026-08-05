@@ -409,13 +409,6 @@ def analyze_carbon(db: Session, data: dict) -> dict:
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Reference tile error: {e}")
 
-    estimated_vis_params = _estimated_carbon_vis_params(
-        vis_params,
-        ref_vis_params,
-        dataset_info,
-        match_reference=match_reference_vis,
-    )
-
     original_area = geometry_area_ha(roi_original)
     calculation_area = geometry_area_ha(roi_for_calculation)
     filtering_area = geometry_area_ha(roi_for_filtering)
@@ -430,16 +423,40 @@ def analyze_carbon(db: Session, data: dict) -> dict:
 
         carbon_estimated_display = carbon_estimated.clip(roi_original) if (clip_to_aoi and has_geojson) else carbon_estimated
 
+        # Default vis_max is a static config value (e.g. 200) that rarely
+        # matches this AOI's actual carbon density range, so the legend
+        # ends up mostly unused (everything crammed into the low end of the
+        # palette) or clipped (everything pegged at the top color). When the
+        # caller hasn't explicitly pinned vis_min/vis_max, stretch the
+        # estimated tile to this AOI's own robust 2nd/98th percentile
+        # instead of the fixed default — same approach already used for the
+        # reference-dataset tile below.
         carbon_stats = carbon_estimated.clip(roi_for_calculation).reduceRegion(
             reducer=ee.Reducer.mean()
                 .combine(ee.Reducer.stdDev(), "", True)
                 .combine(ee.Reducer.min(), "", True)
-                .combine(ee.Reducer.max(), "", True),
+                .combine(ee.Reducer.max(), "", True)
+                .combine(ee.Reducer.percentile([2, 98]), "", True),
             geometry=roi_for_calculation,
             scale=carbon_scale,
             maxPixels=config_service.get_analysis_defaults(db)["max_pixels"],
             bestEffort=True
         ).getInfo()
+
+        _user_pinned_vis = "vis_min" in data or "vis_max" in data
+        _default_vis = vis_params
+        if not _user_pinned_vis:
+            _est_min = carbon_stats.get("carbon_estimated_p2")
+            _est_max = carbon_stats.get("carbon_estimated_p98")
+            if _est_min is not None and _est_max is not None and _est_max > _est_min:
+                _default_vis = {"min": _est_min, "max": _est_max, "palette": vis_palette}
+
+        estimated_vis_params = _estimated_carbon_vis_params(
+            _default_vis,
+            ref_vis_params,
+            dataset_info,
+            match_reference=match_reference_vis,
+        )
 
         mean_carbon = carbon_stats.get("carbon_estimated_mean", 0)
         total_carbon_tons = mean_carbon * calculation_area
@@ -466,6 +483,9 @@ def analyze_carbon(db: Session, data: dict) -> dict:
         mean_carbon = sampled_stats["mean"]
         total_carbon_tons = mean_carbon * calculation_area
         estimated_tile_url = None
+        estimated_vis_params = _estimated_carbon_vis_params(
+            vis_params, ref_vis_params, dataset_info, match_reference=match_reference_vis
+        )
 
         stats_out = {
             "mean": round(sampled_stats["mean"], 2),

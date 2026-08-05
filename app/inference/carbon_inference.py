@@ -7,6 +7,7 @@ import ee
 import numpy as np
 from pathlib import Path
 from typing import Dict, Optional
+from datetime import datetime, timedelta
 import logging
 
 from app.inference.carbon_model import CarbonEstimationModel
@@ -104,11 +105,11 @@ class CarbonInferenceEngine:
 
     def _safe_s2_composite(self, roi: ee.Geometry, start_date: str, end_date: str,
                            cloud_threshold: int = 50) -> ee.Image:
-        def _build_collection(threshold):
+        def _build_collection(threshold, s_date=start_date, e_date=end_date):
             return (
                 ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
                 .filterBounds(roi)
-                .filterDate(start_date, end_date)
+                .filterDate(s_date, e_date)
                 .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', threshold))
                 .map(self._mask_s2_clouds)
             )
@@ -136,7 +137,26 @@ class CarbonInferenceEngine:
 
         self._s2_image_counts.append(int(size))
         self.last_s2_image_count = sum(self._s2_image_counts)
-        return collection.median().multiply(0.0001).select(S2_BANDS)
+        composite = collection.median().multiply(0.0001).select(S2_BANDS)
+
+        # Pixels covered by cloud/shadow/cirrus in every single scene within
+        # [start_date, end_date] stay masked after the median reduction —
+        # they render as a transparent hole in the result tile (the basemap
+        # shows through underneath) and have no carbon estimate at all.
+        # Fill just those null pixels from a wider +/-90 day window with a
+        # relaxed cloud threshold; every pixel the primary composite already
+        # has a valid value for is left untouched.
+        try:
+            wide_start = (datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=90)).strftime("%Y-%m-%d")
+            wide_end = (datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=90)).strftime("%Y-%m-%d")
+            wide_collection = _build_collection(max(cloud_threshold, 70), wide_start, wide_end)
+            if wide_collection.size().getInfo() > 0:
+                wide_composite = wide_collection.median().multiply(0.0001).select(S2_BANDS)
+                composite = composite.unmask(wide_composite)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Gap-fill composite failed, keeping primary composite as-is: {e}")
+
+        return composite
 
     def _add_s2_indices(self, img: ee.Image, prefix: str = '') -> ee.Image:
         p = f'{prefix}_' if prefix else ''

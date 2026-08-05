@@ -115,6 +115,7 @@ def get_analysis_defaults(db: Session) -> dict:
         "carbon_vis_min": float(get_setting(db, "carbon.vis_min", settings.carbon_vis_min)),
         "carbon_vis_max": float(get_setting(db, "carbon.vis_max", settings.carbon_vis_max)),
         "carbon_vis_palette": palette_raw.split(",") if isinstance(palette_raw, str) else list(palette_raw),
+        "carbon_legend_bins": int(get_setting(db, "carbon.legend_bins", settings.carbon_legend_bins)),
         "carbon_co2_factor": float(get_setting(db, "carbon.co2_factor", settings.carbon_co2_factor)),
     }
 

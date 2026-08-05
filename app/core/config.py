@@ -84,6 +84,7 @@ class Settings(BaseSettings):
     carbon_vis_min: float = 0
     carbon_vis_max: float = 250
     carbon_vis_palette: str = "d73027,fee08b,1a9850"
+    carbon_legend_bins: int = 6
 
     @property
     def allowed_origins_list(self) -> list[str]:

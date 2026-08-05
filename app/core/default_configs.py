@@ -49,6 +49,9 @@ DEFAULT_CONFIGS: list[tuple[str, str, str, str, str, str, bool]] = [
     ("carbon.vis_palette", os.getenv("CARBON_VIS_PALETTE", "440154,414487,2a788e,22a884,7ad151,fde725"), "string", "carbon",
      "Carbon palette", "Comma-separated hex colors", False),
 
+    ("carbon.legend_bins", os.getenv("CARBON_LEGEND_BINS", "6"), "int", "carbon",
+     "Carbon legend ranges", "Number of ranges shown in the carbon density legend", True),
+
     ("carbon.co2_factor", os.getenv("CO2_CONVERSION_FACTOR", "3.67"), "float", "carbon",
      "CO₂ conversion factor", "IPCC C→CO₂ factor", True),
 
