@@ -16,3 +16,9 @@ def test_health_endpoint(client, db_available):
 def test_openapi_docs_available(client):
     resp = client.get("/docs")
     assert resp.status_code == 200
+
+
+def test_root_landing_available(client):
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ok"
