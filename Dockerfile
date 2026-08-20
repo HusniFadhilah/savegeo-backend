@@ -6,13 +6,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc g++ libpq-dev gdal-bin libgdal-dev \
     && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml ./
-RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir .
-
+COPY pyproject.toml README.md ./
 COPY app ./app
 COPY alembic ./alembic
 COPY alembic.ini ./
 COPY scripts ./scripts
+
+RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir .
 
 ENV PORT=8086
 EXPOSE 8086

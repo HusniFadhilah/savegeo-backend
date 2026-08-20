@@ -55,6 +55,17 @@ setup_cors(app, settings)
 app.include_router(api_router, prefix=settings.api_prefix)
 
 
+@app.get("/", tags=["system"])
+def root() -> dict[str, str]:
+    """Small public landing response for the backend domain."""
+    return {
+        "name": "SAVEGEO / GEOMOKA API",
+        "status": "ok",
+        "health": f"{settings.api_prefix}/health",
+        "docs": "/docs",
+    }
+
+
 # -- Error envelope: {"error": "..."} for most cases, matching the majority of
 # legacy Flask routes (which return a bare {"error": message} dict). --
 @app.exception_handler(HTTPException)

@@ -1,0 +1,105 @@
+name: Test and deploy SAVEGEO backend
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: savegeo-backend-production
+  cancel-in-progress: false
+
+jobs:
+  test-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install and test
+        env:
+          DEBUG: "false"
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pytest
+
+      - name: Install VPN and deployment tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openvpn sshpass rsync netcat-openbsd
+
+      - name: Connect VPN
+        env:
+          VPN_CONFIG_B64: ${{ secrets.VPN_CONFIG_B64 }}
+          VPN_AUTH_B64: ${{ secrets.VPN_AUTH_B64 }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$VPN_CONFIG_B64" | base64 --decode > "$RUNNER_TEMP/client.ovpn"
+          printf '%s' "$VPN_AUTH_B64" | base64 --decode > "$RUNNER_TEMP/vpn-auth.txt"
+          chmod 600 "$RUNNER_TEMP/client.ovpn" "$RUNNER_TEMP/vpn-auth.txt"
+          sudo openvpn --config "$RUNNER_TEMP/client.ovpn" \
+            --auth-user-pass "$RUNNER_TEMP/vpn-auth.txt" \
+            --daemon --log "$RUNNER_TEMP/openvpn.log"
+          for i in $(seq 1 30); do
+            nc -z -w 3 192.168.17.55 6970 && exit 0
+            sleep 3
+          done
+          sudo cat "$RUNNER_TEMP/openvpn.log" || true
+          exit 1
+
+      - name: Configure SSH host verification
+        env:
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Synchronize backend source
+        env:
+          SSHPASS: ${{ secrets.SSH_PASSWORD }}
+        run: |
+          sshpass -e ssh -p 6970 ubuntu@192.168.17.55 \
+            'mkdir -p /home/ubuntu/savegeo/backend'
+          rsync -az --delete \
+            --exclude '.git/' \
+            --exclude '.env' \
+            --exclude 'var/' \
+            --exclude '__pycache__/' \
+            --exclude '.pytest_cache/' \
+            -e "sshpass -e ssh -p 6970" \
+            ./ ubuntu@192.168.17.55:/home/ubuntu/savegeo/backend/
+
+      - name: Deploy containers
+        env:
+          SSHPASS: ${{ secrets.SSH_PASSWORD }}
+        run: |
+          sshpass -e ssh -p 6970 ubuntu@192.168.17.55 '
+            set -euo pipefail
+            cd /home/ubuntu/savegeo/backend
+            test -s .env
+            mkdir -p var/exports var/uploads var/saved_models var/gee-credentials
+            if docker compose -f docker-compose.prod.yml ps --status running db | grep -q db; then
+              docker compose -f docker-compose.prod.yml exec -T db \
+                pg_dump -U savegeo -Fc savegeo \
+                > "var/exports/predeploy_$(date +%Y%m%d_%H%M%S).dump"
+            fi
+            docker compose -f docker-compose.prod.yml up -d --build
+            for i in $(seq 1 30); do
+              curl --fail --silent http://127.0.0.1:8086/api/health >/dev/null && exit 0
+              sleep 3
+            done
+            docker compose -f docker-compose.prod.yml logs --tail=150 api
+            exit 1
+          '
