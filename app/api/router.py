@@ -7,6 +7,7 @@ from app.api.routes import (
     admin,
     admin_disaster,
     agent,
+    analysis_jobs,
     arcgis,
     carbon,
     chat,
@@ -50,3 +51,4 @@ api_router.include_router(timeseries.router)
 api_router.include_router(download.router)
 api_router.include_router(arcgis.router)
 api_router.include_router(agent.router)
+api_router.include_router(analysis_jobs.router)
