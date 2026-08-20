@@ -12,7 +12,7 @@ import logging
 
 from app.inference.carbon_model import CarbonEstimationModel
 from app.inference.model_registry import ModelRegistry
-from app.services.gee_common import build_date_range
+from app.services.gee_common import build_date_range, build_s2_cloud_masked_collection, resolve_cloud_mask_technique
 
 logger = logging.getLogger(__name__)
 
@@ -26,14 +26,20 @@ class CarbonInferenceEngine:
     Perform carbon estimation inference using pre-trained models
     """
     
-    def __init__(self, model_name: Optional[str] = None, model_path: Optional[str] = None):
+    def __init__(self, model_name: Optional[str] = None, model_path: Optional[str] = None,
+                 cloud_mask_technique: str = "scl"):
         """
         Initialize inference engine
-        
+
         Args:
             model_name: Name of model to use (uses default if None)
+            cloud_mask_technique: "scl" | "qa60" | "s2cloudless" - see
+                gee_common.build_s2_cloud_masked_collection. Set once per
+                engine instance (not per predict_for_region* call) since one
+                engine is reused across a whole analyze_carbon_delta year loop.
         """
         self.registry = ModelRegistry()
+        self.cloud_mask_technique = resolve_cloud_mask_technique(cloud_mask_technique)
         
         if model_name is None:
             model_name = self.registry.registry.get('default')
@@ -113,12 +119,11 @@ class CarbonInferenceEngine:
     def _safe_s2_composite(self, roi: ee.Geometry, start_date: str, end_date: str,
                            cloud_threshold: int = 50) -> ee.Image:
         def _build_collection(threshold, s_date=start_date, e_date=end_date):
-            return (
-                ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
-                .filterBounds(roi)
-                .filterDate(s_date, e_date)
-                .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', threshold))
-                .map(self._mask_s2_clouds)
+            # Cloud-masking technique is selectable (self.cloud_mask_technique,
+            # set once at engine construction) - see gee_common.
+            # build_s2_cloud_masked_collection for scl/qa60/s2cloudless.
+            return build_s2_cloud_masked_collection(
+                roi, s_date, e_date, threshold, technique=self.cloud_mask_technique,
             )
 
         collection = _build_collection(cloud_threshold)
@@ -307,7 +312,7 @@ class CarbonInferenceEngine:
     def _build_s2_dem_landcover_feature_stack(self, roi: ee.Geometry, year: int, start_month: int,
                                               end_month: int, cloud_threshold: int) -> ee.Image:
         """standard_s2 (19 features) + SRTM elevation/slope/aspect + ESA WorldCover
-        landcover/forest_mask = 26 features. Matches
+        landcover/forest_mask + 4 interaction terms = 28 features. Matches
         training/indonesia_wide_carbon_experiments/feature_stacks_gee.py::build_s2_dem_landcover
         exactly (same SRTM/WorldCover sources, same forest_mask = landcover==10 rule) —
         used to serve the Indonesia-wide models trained there (see
@@ -337,7 +342,24 @@ class CarbonInferenceEngine:
         landcover = ee.ImageCollection('ESA/WorldCover/v200').first().select('Map').rename('landcover')
         forest_mask = landcover.eq(10).rename('forest_mask')
 
-        return stack.addBands(elevation).addBands(slope).addBands(aspect).addBands(landcover).addBands(forest_mask)
+        stack = (
+            stack.addBands(elevation).addBands(slope).addBands(aspect)
+            .addBands(landcover).addBands(forest_mask)
+        )
+
+        # Keep GEE inference feature parity with the non-GEE/STAC training
+        # stack (feature_engineering_non_gee.compute_interactions). Previously
+        # the base DEM/land-cover features were present, but these four derived
+        # bands were omitted, so full-stack STAC models failed before prediction.
+        ndvi_x_elevation = stack.select('NDVI').multiply(elevation).rename('NDVI_x_elevation')
+        ndmi_x_slope = stack.select('NDMI').multiply(slope).rename('NDMI_x_slope')
+        forest_mask_x_ndvi = forest_mask.multiply(stack.select('NDVI')).rename('forest_mask_x_NDVI')
+        b8_x_b11 = stack.select('B8').multiply(stack.select('B11')).rename('B8_x_B11')
+
+        return (
+            stack.addBands(ndvi_x_elevation).addBands(ndmi_x_slope)
+            .addBands(forest_mask_x_ndvi).addBands(b8_x_b11)
+        )
 
     _NEIGHBORHOOD_BANDS = ['B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B8', 'B8A', 'B11', 'B12',
                            'NDVI', 'NDWI', 'NDMI', 'NBR', 'NDRE', 'EVI', 'SAVI', 'BSI', 'brightness']
@@ -747,6 +769,13 @@ class CarbonInferenceEngine:
             f"[sampled] Server-side inference for {year}-{start_month:02d} to {year}-{end_month:02d} "
             f"at scale={scale}m, n_samples={n_samples}"
         )
+
+        # Reset per-call (matches predict_for_region) - without this, calling
+        # the same engine instance across multiple years (analyze_carbon_delta's
+        # loop) would accumulate _s2_image_counts cumulatively instead of
+        # reporting each year's own scene count.
+        self._s2_image_counts = []
+        self.last_s2_image_count = None
 
         predictors = self._build_predictors(
             roi=roi,

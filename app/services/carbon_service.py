@@ -48,6 +48,7 @@ from app.services.gee_common import (
     create_geometry_from_payload,
     geojson_to_ee_geometry,
     geometry_area_ha,
+    resolve_cloud_mask_technique,
 )
 
 logger = logging.getLogger(__name__)
@@ -210,6 +211,14 @@ def calculate_carbon_summary_for_year(
         "total_carbon_tons": round(total_carbon, 2),
         "carbon_dioxide_equivalent_tons": round(total_carbon * co2_factor, 2),
         "tile_url": tile_url,
+        # Per-year data quality (P0) - lets a year-over-year swing be checked
+        # against composite quality instead of assumed to be real biomass
+        # change. `images_used` reset per-call in both inference paths (see
+        # CarbonInferenceEngine) so this is this year's own count, not a
+        # cross-year cumulative total.
+        "images_used": inference_engine.last_s2_image_count,
+        "valid_pixel_pct": inference_engine.last_valid_pixel_pct,
+        "gap_filled": inference_engine.last_gap_filled,
     }
 
 
@@ -232,6 +241,7 @@ def analyze_carbon(db: Session, data: dict) -> dict:
     vis_palette = data.get("vis_palette", config_service.get_analysis_defaults(db)["carbon_vis_palette"])
     carbon_scale = int(data.get("scale", config_service.get_analysis_defaults(db)["carbon_scale"]))
     match_reference_vis = bool(data.get("match_reference_vis", True))
+    cloud_mask_technique = resolve_cloud_mask_technique(data.get("cloud_mask_technique"))
 
     year_min, year_max = 2015, datetime.now().year
     if not (year_min <= year <= year_max):
@@ -281,7 +291,7 @@ def analyze_carbon(db: Session, data: dict) -> dict:
 
     # Cari model dari DB
     model_path = get_active_model_path(db, "carbon", model_name)
-    inference_engine = CarbonInferenceEngine(model_name=model_name, model_path=model_path)
+    inference_engine = CarbonInferenceEngine(model_name=model_name, model_path=model_path, cloud_mask_technique=cloud_mask_technique)
     model_info = inference_engine.get_model_info()
 
     # Validate model-dataset compatibility before any expensive GEE work.
@@ -585,6 +595,7 @@ def analyze_carbon(db: Session, data: dict) -> dict:
             "coefficient_of_variation_pct": _cv_pct,
             "model_r2": (model_info.get("cv_metrics") or {}).get("r2_mean"),
             "model_rmse": (model_info.get("cv_metrics") or {}).get("rmse_mean"),
+            "cloud_mask_technique": cloud_mask_technique,
         },
     }
 
@@ -731,6 +742,7 @@ def analyze_carbon_delta(db: Session, data: dict) -> dict:
     cloud_threshold = int(data.get("cloud_threshold", config_service.get_analysis_defaults(db)["cloud_threshold"]))
     carbon_scale = int(data.get("scale", config_service.get_analysis_defaults(db)["carbon_scale"]))
     model_name = data.get("model_name")
+    cloud_mask_technique = resolve_cloud_mask_technique(data.get("cloud_mask_technique"))
 
     if not (1 <= start_month <= 12 and 1 <= end_month <= 12 and start_month <= end_month):
         raise AnalysisError("Rentang bulan tidak valid", 400)
@@ -738,7 +750,7 @@ def analyze_carbon_delta(db: Session, data: dict) -> dict:
     roi = create_geometry_from_payload(data["aoi"])
 
     model_path = get_active_model_path(db, "carbon", model_name)
-    inference_engine = CarbonInferenceEngine(model_name=model_name, model_path=model_path)
+    inference_engine = CarbonInferenceEngine(model_name=model_name, model_path=model_path, cloud_mask_technique=cloud_mask_technique)
     model_info = inference_engine.get_model_info()
 
     # Timelapse tiles are opt-in - each one costs a real getMapId() round trip
@@ -807,5 +819,6 @@ def analyze_carbon_delta(db: Session, data: dict) -> dict:
             "model_name": inference_engine.model_name,
             "algorithm": model_info.get("algorithm"),
             "scale": carbon_scale,
+            "cloud_mask_technique": cloud_mask_technique,
         },
     }

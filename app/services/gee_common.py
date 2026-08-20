@@ -36,6 +36,96 @@ def mask_s2_clouds(image):
     return image.updateMask(cloud.Or(cirrus).Not()).divide(10000)
 
 
+# ─────────────────────────────────────────────
+# Selectable Sentinel-2 cloud-masking technique
+#
+# Before this, three near-duplicate SCL/QA60 maskers were scattered across
+# carbon_inference.py/gee_common.py with no way to pick one - this is the
+# single place all Sentinel-2 pipelines can go through if they want the
+# technique to be a request parameter instead of hardcoded per-file.
+# ─────────────────────────────────────────────
+CLOUD_MASK_TECHNIQUES = ("scl", "qa60", "s2cloudless")
+DEFAULT_CLOUD_MASK_TECHNIQUE = "scl"
+
+CLOUD_MASK_TECHNIQUE_INFO = {
+    "scl": {
+        "label": "SCL (Scene Classification Layer)",
+        "description": "Klasifikasi per-piksel bawaan Sentinel-2 L2A (shadow/cloud-medium/cloud-high/cirrus dibuang). Cepat, standar industri.",
+    },
+    "qa60": {
+        "label": "QA60 Bitmask",
+        "description": "Flag cloud/cirrus level-scene dari band QA60. Lebih kasar dari SCL (resolusi mask lebih rendah) tapi lebih ringan secara komputasi.",
+    },
+    "s2cloudless": {
+        "label": "s2cloudless (probability-based)",
+        "description": "Model probabilitas awan per-piksel (COPERNICUS/S2_CLOUD_PROBABILITY), umumnya lebih akurat di tepi awan/awan tipis dibanding SCL/QA60. Butuh join koleksi tambahan, sedikit lebih lambat.",
+    },
+}
+
+
+def resolve_cloud_mask_technique(technique: Optional[str]) -> str:
+    return technique if technique in CLOUD_MASK_TECHNIQUES else DEFAULT_CLOUD_MASK_TECHNIQUE
+
+
+def build_s2_cloud_masked_collection(
+    aoi,
+    start_date: str,
+    end_date: str,
+    cloud_threshold: int,
+    technique: str = DEFAULT_CLOUD_MASK_TECHNIQUE,
+    cloud_prob_threshold: int = 40,
+    collection_id: str = "COPERNICUS/S2_SR_HARMONIZED",
+):
+    """Scene-filtered (CLOUDY_PIXEL_PERCENTAGE) + per-pixel cloud-masked
+    Sentinel-2 collection for the requested `technique`. Returns MASKED,
+    UNSCALED (raw DN) images - callers apply their own reflectance scaling
+    (divide by 10000) at whatever point in their pipeline they already do,
+    same as before this existed. Masking is the only thing unified here.
+    """
+    technique = resolve_cloud_mask_technique(technique)
+    base = (
+        ee.ImageCollection(collection_id)
+        .filterBounds(aoi)
+        .filterDate(start_date, end_date)
+        .filter(ee.Filter.lte("CLOUDY_PIXEL_PERCENTAGE", cloud_threshold))
+    )
+
+    if technique == "qa60":
+        def _mask_qa60(image):
+            qa = image.select("QA60")
+            cloud = qa.bitwiseAnd(1 << 10).neq(0)
+            cirrus = qa.bitwiseAnd(1 << 11).neq(0)
+            return image.updateMask(cloud.Or(cirrus).Not())
+        return base.map(_mask_qa60)
+
+    if technique == "s2cloudless":
+        prob_col = (
+            ee.ImageCollection("COPERNICUS/S2_CLOUD_PROBABILITY")
+            .filterBounds(aoi)
+            .filterDate(start_date, end_date)
+        )
+        joined = ee.Join.saveFirst("s2cloudless").apply(
+            primary=base,
+            secondary=prob_col,
+            condition=ee.Filter.equals(leftField="system:index", rightField="system:index"),
+        )
+
+        def _mask_s2cloudless(image):
+            image = ee.Image(image)
+            prob = ee.Image(image.get("s2cloudless")).select("probability")
+            return image.updateMask(prob.lt(cloud_prob_threshold))
+
+        return ee.ImageCollection(joined).map(_mask_s2cloudless)
+
+    # "scl" (default)
+    def _mask_scl(image):
+        scl = image.select("SCL")
+        mask = scl.neq(3).And(scl.neq(8)).And(scl.neq(9)).And(scl.neq(10))
+        return image.updateMask(mask)
+
+    return base.map(_mask_scl)
+
+
 def mask_landsat_clouds(image):
     """Cloud/shadow mask + optical scale factor for Landsat Collection 2
     Level-2 surface reflectance (QA_PIXEL bits 3=cloud, 4=cloud shadow).
