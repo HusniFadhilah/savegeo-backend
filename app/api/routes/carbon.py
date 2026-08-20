@@ -4,7 +4,7 @@ from __future__ import annotations
 import ee
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_ee
@@ -17,8 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 @router.post("/analyze/carbon", dependencies=[Depends(require_ee)])
-async def analyze_carbon(request: Request, db: Session = Depends(get_db)):
-    data = await request.json()
+def analyze_carbon(data: dict = Body(...), db: Session = Depends(get_db)):
     if "aoi" not in data:
         raise HTTPException(status_code=400, detail="Missing required field: aoi")
     try:
@@ -40,9 +39,8 @@ async def analyze_carbon(request: Request, db: Session = Depends(get_db)):
 
 
 @router.post("/analyze/carbon-local")
-async def analyze_carbon_local(request: Request, db: Session = Depends(get_db)):
+def analyze_carbon_local(data: dict = Body(...), db: Session = Depends(get_db)):
     """Non-GEE carbon estimation path — does NOT require Earth Engine."""
-    data = await request.json()
     try:
         return carbon_service.analyze_carbon_local(db, data)
     except AnalysisError as e:
@@ -62,8 +60,7 @@ async def analyze_carbon_local(request: Request, db: Session = Depends(get_db)):
 
 
 @router.post("/analyze/carbon-delta", dependencies=[Depends(require_ee)])
-async def analyze_carbon_delta(request: Request, db: Session = Depends(get_db)):
-    data = await request.json()
+def analyze_carbon_delta(data: dict = Body(...), db: Session = Depends(get_db)):
     if "aoi" not in data:
         raise HTTPException(status_code=400, detail="Missing required field: aoi")
     try:

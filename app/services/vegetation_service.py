@@ -32,11 +32,12 @@ from app.repositories.satellite_provider_repo import get_satellite_meta
 from app.services.gee_common import (
     AnalysisError,
     build_date_range,
+    build_s2_cloud_masked_collection,
     calculate_index,
     create_geometry_from_payload,
     get_tile_url,
     mask_landsat_clouds,
-    mask_s2_clouds,
+    resolve_cloud_mask_technique,
     standardize_bands,
 )
 
@@ -128,7 +129,10 @@ def compute_index_histogram(index_image, aoi, scale: int, min_val: float, max_va
         return []
 
 
-def _composite_for_period(db, aoi, year, start_month, end_month, cloud_threshold, satellite: str = "sentinel2"):
+def _composite_for_period(
+    db, aoi, year, start_month, end_month, cloud_threshold, satellite: str = "sentinel2",
+    cloud_mask_technique: str = "scl",
+):
     """Build a cloud-masked median composite for whichever satellite provider
     was requested, then standardize its bands to the canonical Sentinel-2-style
     aliases so every downstream index formula stays sensor-agnostic.
@@ -136,7 +140,11 @@ def _composite_for_period(db, aoi, year, start_month, end_month, cloud_threshold
     `gee_collection`/`band_role_map` come from get_satellite_meta(), which
     merges in any DB override (satellite_providers table) - only the
     sentinel2-vs-landsat cloud-mask *algorithm* choice below stays keyed off
-    the resolved provider key itself (a DB row can't redefine that)."""
+    the resolved provider key itself (a DB row can't redefine that).
+
+    `cloud_mask_technique` ("scl" | "qa60" | "s2cloudless", see gee_common.py)
+    only applies to the Sentinel-2 path - Landsat keeps its own QA_PIXEL mask,
+    there's no equivalent s2cloudless-style product for it in this catalog."""
     settings = get_settings()
     start_date, end_date = build_date_range(year, start_month, end_month)
     resolved_key = resolve_satellite(satellite)
@@ -144,12 +152,10 @@ def _composite_for_period(db, aoi, year, start_month, end_month, cloud_threshold
     collection_id = provider["gee_collection"]
 
     if resolved_key == "sentinel2":
-        collection = (
-            ee.ImageCollection(collection_id)
-            .filterBounds(aoi).filterDate(start_date, end_date)
-            .filter(ee.Filter.lte("CLOUDY_PIXEL_PERCENTAGE", cloud_threshold))
-            .map(mask_s2_clouds)
-        )
+        collection = build_s2_cloud_masked_collection(
+            aoi, start_date, end_date, cloud_threshold,
+            technique=cloud_mask_technique, collection_id=collection_id,
+        ).map(lambda img: img.divide(10000))
     else:  # landsat8 / landsat9 (Collection 2 Level-2 surface reflectance)
         collection = (
             ee.ImageCollection(collection_id)
@@ -238,6 +244,7 @@ def analyze_vegetation(db, data: dict) -> dict:
     want_histogram = bool(data.get("histogram", True))
     periods = data.get("periods")  # optional: [{"year":..,"start_month":..,"end_month":..,"label":..}, ...]
     satellite = resolve_satellite(data.get("satellite"))
+    cloud_mask_technique = resolve_cloud_mask_technique(data.get("cloud_mask_technique"))
 
     aoi = create_geometry_from_payload(data["aoi"])
 
@@ -258,7 +265,7 @@ def analyze_vegetation(db, data: dict) -> dict:
             label = period.get("label") or f"{p_year}-{p_start:02d}_{p_end:02d}"
             period_labels.append(label)
 
-            composite, _, s_date, e_date, size, _valid_pct = _composite_for_period(db, aoi, p_year, p_start, p_end, cloud_threshold, satellite)
+            composite, _, s_date, e_date, size, _valid_pct = _composite_for_period(db, aoi, p_year, p_start, p_end, cloud_threshold, satellite, cloud_mask_technique)
             for idx in valid_indices:
                 if composite is None:
                     time_series[idx].append({"label": label, "date_range": None, "mean": None, "min": None, "max": None, "std_dev": None})
@@ -286,6 +293,7 @@ def analyze_vegetation(db, data: dict) -> dict:
             "cloud_threshold": cloud_threshold,
             "scale": veg_scale,
             "satellite": get_satellite_meta(db, satellite),
+            "cloud_mask_technique": cloud_mask_technique,
             "time_series": time_series,
             "time_series_summary": time_series_summary,
             "skipped_indices": skipped_indices,
@@ -293,7 +301,7 @@ def analyze_vegetation(db, data: dict) -> dict:
 
     # ── Single-period mode (default) ──────────────────────────────
     median_composite, s2_collection, start_date, end_date, size, valid_pixel_pct = _composite_for_period(
-        db, aoi, year, start_month, end_month, cloud_threshold, satellite
+        db, aoi, year, start_month, end_month, cloud_threshold, satellite, cloud_mask_technique
     )
     if median_composite is None:
         raise AnalysisError(
@@ -309,6 +317,7 @@ def analyze_vegetation(db, data: dict) -> dict:
         "scale": veg_scale,
         "data_quality": {"valid_pixel_pct": valid_pixel_pct, "images_used": size},
         "satellite": get_satellite_meta(db, satellite),
+        "cloud_mask_technique": cloud_mask_technique,
         "indices": {},
     }
 
@@ -373,9 +382,10 @@ def analyze_vegetation_compare(db, data: dict) -> dict:
     cloud_threshold = int(data.get("cloud_threshold", config_service.get_analysis_defaults(db)["cloud_threshold"]))
     veg_scale = int(data.get("scale", config_service.get_analysis_defaults(db)["veg_scale"]))
     satellite = resolve_satellite(data.get("satellite"))
+    cloud_mask_technique = resolve_cloud_mask_technique(data.get("cloud_mask_technique"))
 
     aoi = create_geometry_from_payload(data["aoi"])
-    composite, _, start_date, end_date, size, _valid_pct = _composite_for_period(db, aoi, year, start_month, end_month, cloud_threshold, satellite)
+    composite, _, start_date, end_date, size, _valid_pct = _composite_for_period(db, aoi, year, start_month, end_month, cloud_threshold, satellite, cloud_mask_technique)
     if composite is None:
         raise AnalysisError(
             f"Tidak ada citra {get_satellite_meta(db, satellite)['name']} untuk periode ini",
@@ -417,6 +427,7 @@ def analyze_vegetation_compare(db, data: dict) -> dict:
         "threshold_a": thr_a, "threshold_b": thr_b,
         "date_range": {"start": start_date, "end": end_date},
         "satellite": get_satellite_meta(db, satellite),
+        "cloud_mask_technique": cloud_mask_technique,
         "total_area_ha": round(total, 2),
         "quadrants": quadrants,
         "insight": generate_comparison_narrative(index_a, index_b, quadrants),
@@ -434,6 +445,7 @@ def analyze_timeseries(db, data: dict) -> dict:
     cloud_threshold = int(data.get("cloud_threshold", config_service.get_analysis_defaults(db)["cloud_threshold"]))
     veg_scale = int(data.get("scale", config_service.get_analysis_defaults(db)["veg_scale"]))
     satellite = resolve_satellite(data.get("satellite"))
+    cloud_mask_technique = resolve_cloud_mask_technique(data.get("cloud_mask_technique"))
     aoi = create_geometry_from_payload(data["aoi"])
 
     months = list(range(1, 13)) if interval == "monthly" else []
@@ -441,7 +453,7 @@ def analyze_timeseries(db, data: dict) -> dict:
     time_series = []
     for month in months:
         label = f"{year}-{month:02d}"
-        composite, _, _, _, size, _valid_pct = _composite_for_period(db, aoi, year, month, month, cloud_threshold, satellite)
+        composite, _, _, _, size, _valid_pct = _composite_for_period(db, aoi, year, month, month, cloud_threshold, satellite, cloud_mask_technique)
         if composite is not None:
             stats = calculate_index(composite, index_name).reduceRegion(
                 reducer=ee.Reducer.mean(), geometry=aoi, scale=veg_scale,
@@ -452,6 +464,7 @@ def analyze_timeseries(db, data: dict) -> dict:
     return {
         "index": index_name, "year": year, "interval": interval, "scale": veg_scale,
         "satellite": get_satellite_meta(db, satellite),
+        "cloud_mask_technique": cloud_mask_technique,
         "data": time_series,
     }
 
@@ -488,6 +501,7 @@ def analyze_vegetation_change_hotspots(db, data: dict) -> dict:
     end_month = int(data.get("end_month", 9))
     cloud_threshold = int(data.get("cloud_threshold", config_service.get_analysis_defaults(db)["cloud_threshold"]))
     satellite = resolve_satellite(data.get("satellite"))
+    cloud_mask_technique = resolve_cloud_mask_technique(data.get("cloud_mask_technique"))
 
     # decline = index dropped (vegetation loss, the common case); increase = index rose;
     # any = |change| beyond threshold either direction.
@@ -506,10 +520,10 @@ def analyze_vegetation_change_hotspots(db, data: dict) -> dict:
     aoi = create_geometry_from_payload(data["aoi"])
 
     from_composite, _, from_start, from_end, from_size, _from_valid_pct = _composite_for_period(
-        db, aoi, from_year, start_month, end_month, cloud_threshold, satellite
+        db, aoi, from_year, start_month, end_month, cloud_threshold, satellite, cloud_mask_technique
     )
     to_composite, _, to_start, to_end, to_size, _to_valid_pct = _composite_for_period(
-        db, aoi, to_year, start_month, end_month, cloud_threshold, satellite
+        db, aoi, to_year, start_month, end_month, cloud_threshold, satellite, cloud_mask_technique
     )
     if from_composite is None or to_composite is None:
         raise AnalysisError(
@@ -590,6 +604,7 @@ def analyze_vegetation_change_hotspots(db, data: dict) -> dict:
         "date_range_from": {"start": from_start, "end": from_end},
         "date_range_to": {"start": to_start, "end": to_end},
         "satellite": get_satellite_meta(db, satellite),
+        "cloud_mask_technique": cloud_mask_technique,
         "resolution": f"{veg_scale}m",
         "vector_scale": vector_scale,
         "min_area_ha": min_area_ha,

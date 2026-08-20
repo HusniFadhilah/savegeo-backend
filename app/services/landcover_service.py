@@ -14,7 +14,7 @@ so it is reproduced here rather than imported from
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 import ee
@@ -70,6 +70,22 @@ def clamp_landcover_year(dataset: str, year: int) -> int:
 # Core GEE helpers (ported ~verbatim)
 # ─────────────────────────────────────────────
 
+def _reyear_date(date_str: str, year: int) -> str:
+    """Swap only the year portion of an ISO date, keeping month/day - used to
+    reapply a "Mode Tanggal Analisis: Tanggal" day-window (e.g. 01-01 to
+    07-31) picked once in the UI to whichever from_year/to_year is actually
+    being queried in a multi-year comparison (change-map/hotspots) - the
+    literal picked year in the date string itself is never the right year
+    for anything except the single-year `analyze_landcover` case."""
+    d = date.fromisoformat(date_str)
+    return date(year, d.month, d.day).isoformat()
+
+
+def _exclusive_end_date(date_str: str) -> str:
+    """Earth Engine filterDate excludes the end date; UI end dates are inclusive."""
+    return (date.fromisoformat(date_str) + timedelta(days=1)).isoformat()
+
+
 def get_landcover_image(
     dataset: str,
     year: int,
@@ -77,27 +93,42 @@ def get_landcover_image(
     start_month: int = 1,
     end_month: int = 12,
     dw_probability_threshold: Optional[float] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
 ):
     """Return a single class-label image and effective metadata for a LULC dataset.
 
     Args:
         dw_probability_threshold: If set (0-1), mask Dynamic World pixels whose max
             probability across all 9 bands is below the threshold.
+        start_date/end_date: explicit day-level ISO date override ("Mode Tanggal
+            Analisis: Tanggal" in the frontend), takes precedence over
+            start_month/end_month when both given. Only meaningful for
+            Dynamic_World, the only near-real-time product in this catalog -
+            every other dataset below is an annual composite and always uses
+            the full `effective_year` regardless of start_month/end_month/
+            start_date/end_date (matches how they already ignored
+            start_month/end_month before this parameter existed).
     """
     requested_year = int(year)
     effective_year = clamp_landcover_year(dataset, requested_year)
-    start_date, end_date = build_date_range(effective_year, start_month, end_month)
+    display_end_date = None
+    if start_date and end_date:
+        dw_start_date, dw_end_date = start_date, _exclusive_end_date(end_date)
+        display_end_date = end_date
+    else:
+        dw_start_date, dw_end_date = build_date_range(effective_year, start_month, end_month)
 
     if dataset == "Dynamic_World":
         dw_prob_bands = ["water", "trees", "grass", "flooded_vegetation",
                           "crops", "shrub_and_scrub", "built", "bare", "snow_and_ice"]
         dw = (
             ee.ImageCollection("GOOGLE/DYNAMICWORLD/V1")
-            .filterDate(start_date, end_date)
+            .filterDate(dw_start_date, dw_end_date)
             .filterBounds(aoi)
         )
         if dw.size().getInfo() == 0:
-            raise ValueError(f"No Dynamic World data found for {effective_year} ({start_date}-{end_date})")
+            raise ValueError(f"No Dynamic World data found for {effective_year} ({dw_start_date}-{dw_end_date})")
         label_mode = dw.select("label").reduce(ee.Reducer.mode()).rename("landcover")
         if dw_probability_threshold is not None and 0 < dw_probability_threshold < 1:
             max_prob = dw.select(dw_prob_bands).reduce(ee.Reducer.max()).reduce(ee.Reducer.max())
@@ -109,7 +140,7 @@ def get_landcover_image(
             "dataset_name": "Dynamic World",
             "requested_year": requested_year,
             "year": effective_year,
-            "date_range": {"start": start_date, "end": end_date},
+            "date_range": {"start": dw_start_date, "end": display_end_date or dw_end_date},
             "provider_type": "gee_near_real_time",
             "dw_probability_threshold": dw_probability_threshold,
         }
@@ -427,7 +458,8 @@ def analyze_landcover(data: dict) -> dict:
         start_month = sd.month
         end_month = _date.fromisoformat(explicit_end).month
         dw_start_date = explicit_start
-        dw_end_date = explicit_end
+        dw_end_date = _exclusive_end_date(explicit_end)
+        dw_display_end_date = explicit_end
         dw_year = year
     else:
         year = int(data.get("year", 2022))
@@ -435,6 +467,7 @@ def analyze_landcover(data: dict) -> dict:
         end_month = int(data.get("end_month", 12))
         dw_year = clamp_landcover_year("Dynamic_World", year)
         dw_start_date, dw_end_date = build_date_range(dw_year, start_month, end_month)
+        dw_display_end_date = dw_end_date
 
     # Dynamic World (gee_near_real_time - supports current year and beyond)
     if "Dynamic_World" in datasets:
@@ -460,7 +493,7 @@ def analyze_landcover(data: dict) -> dict:
                     "dataset_name": "Dynamic World",
                     "requested_year": year,
                     "year": dw_year,
-                    "date_range": {"start": dw_start_date, "end": dw_end_date},
+                    "date_range": {"start": dw_start_date, "end": dw_display_end_date},
                     "provider_type": "gee_near_real_time",
                     "dw_probability_threshold": dw_probability_threshold,
                 }
@@ -737,8 +770,24 @@ def analyze_landcover_change_map(data: dict) -> dict:
     )
 
     aoi = create_geometry_from_payload(data["aoi"])
-    from_image, from_meta = get_landcover_image(dataset, from_year, aoi, start_month, end_month)
-    to_image, to_meta = get_landcover_image(dataset, to_year, aoi, start_month, end_month)
+
+    # "Mode Tanggal Analisis: Tanggal" - explicit day-level window (Dynamic
+    # World only; other datasets ignore it and use the full from_year/to_year
+    # regardless, same as get_landcover_image's month-range handling).
+    explicit_start = data.get("start_date")
+    explicit_end = data.get("end_date")
+    if explicit_start and explicit_end:
+        from_image, from_meta = get_landcover_image(
+            dataset, from_year, aoi,
+            start_date=_reyear_date(explicit_start, from_year), end_date=_reyear_date(explicit_end, from_year),
+        )
+        to_image, to_meta = get_landcover_image(
+            dataset, to_year, aoi,
+            start_date=_reyear_date(explicit_start, to_year), end_date=_reyear_date(explicit_end, to_year),
+        )
+    else:
+        from_image, from_meta = get_landcover_image(dataset, from_year, aoi, start_month, end_month)
+        to_image, to_meta = get_landcover_image(dataset, to_year, aoi, start_month, end_month)
 
     changed = from_image.neq(to_image).rename("changed").selfMask().clip(aoi)
     stable = from_image.eq(to_image).rename("stable").selfMask().clip(aoi)
@@ -853,8 +902,21 @@ def analyze_landcover_hotspots(data: dict) -> dict:
     top_n = min(max(int(data.get("top_n", 20)), 1), 100)
 
     aoi = create_geometry_from_payload(data["aoi"])
-    from_image, from_meta = get_landcover_image(dataset, from_year, aoi, start_month, end_month)
-    to_image, to_meta = get_landcover_image(dataset, to_year, aoi, start_month, end_month)
+
+    explicit_start = data.get("start_date")
+    explicit_end = data.get("end_date")
+    if explicit_start and explicit_end:
+        from_image, from_meta = get_landcover_image(
+            dataset, from_year, aoi,
+            start_date=_reyear_date(explicit_start, from_year), end_date=_reyear_date(explicit_end, from_year),
+        )
+        to_image, to_meta = get_landcover_image(
+            dataset, to_year, aoi,
+            start_date=_reyear_date(explicit_start, to_year), end_date=_reyear_date(explicit_end, to_year),
+        )
+    else:
+        from_image, from_meta = get_landcover_image(dataset, from_year, aoi, start_month, end_month)
+        to_image, to_meta = get_landcover_image(dataset, to_year, aoi, start_month, end_month)
 
     changed = from_image.neq(to_image)
     transition_band = (

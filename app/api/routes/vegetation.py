@@ -18,7 +18,7 @@ from app.registries.vegetation_index_registry import get_catalog_payload
 from app.registries.satellite_provider_registry import DEFAULT_SATELLITE
 from app.repositories.satellite_provider_repo import list_satellites
 from app.services import vegetation_service
-from app.services.gee_common import AnalysisError
+from app.services.gee_common import AnalysisError, CLOUD_MASK_TECHNIQUE_INFO, DEFAULT_CLOUD_MASK_TECHNIQUE
 
 router = APIRouter(tags=["vegetation"])
 logger = logging.getLogger(__name__)
@@ -37,6 +37,13 @@ def vegetation_satellites(db: Session = Depends(get_db)):
     `satellite_providers` DB overlay when present (see satellite_provider_repo.py),
     falling back to the static registry otherwise - no DB dependency to boot."""
     return {"satellites": list_satellites(db), "default": DEFAULT_SATELLITE}
+
+
+@router.get("/vegetation/cloud-mask-techniques")
+def vegetation_cloud_mask_techniques():
+    """Static (no GEE) catalog of selectable Sentinel-2 cloud-masking
+    techniques (SCL/QA60/s2cloudless) - see gee_common.build_s2_cloud_masked_collection."""
+    return {"techniques": CLOUD_MASK_TECHNIQUE_INFO, "default": DEFAULT_CLOUD_MASK_TECHNIQUE}
 
 
 @router.post("/analyze/vegetation", dependencies=[Depends(require_ee)])

@@ -538,14 +538,38 @@ _OVERPASS_SERVERS = [
     "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
 ]
 
-# Ways only - relations are too heavy for an Indonesia-wide bbox
+# Area-like OSM objects only. The importer stores company boundaries/AOIs, so
+# point-only company offices are intentionally not imported here.
 _OSM_TAGS_MAP = {
-    "mining":     ['way["landuse"="quarry"]["name"]',
-                   'way["man_made"="mine"]["name"]',
-                   'way["industrial"="mine"]["name"]'],
-    "forestry":   ['way["landuse"="forest"]["operator"]'],
-    "plantation": ['way["landuse"="farmland"]["crop"="palm_oil"]["name"]'],
-    "energy":     ['way["power"="plant"]["name"]'],
+    "mining": [
+        '["landuse"="quarry"]',
+        '["man_made"="mine"]',
+        '["industrial"="mine"]',
+        '["landuse"="industrial"]["industrial"="mine"]',
+    ],
+    "forestry": [
+        '["landuse"="forest"]',
+        '["boundary"="forest_compartment"]',
+        '["landuse"="logging"]',
+        '["industrial"="sawmill"]',
+    ],
+    "plantation": [
+        '["landuse"="plantation"]',
+        '["landuse"="farmland"]["crop"="palm_oil"]',
+        '["landuse"="farmland"]["crop"="rubber"]',
+        '["landuse"="farmland"]["crop"="cocoa"]',
+        '["landuse"="farmland"]["crop"="coffee"]',
+        '["landuse"="farmland"]["crop"="tea"]',
+        '["landuse"="farmland"]["crop"="coconut"]',
+        '["landuse"="farmland"]["crop"="sugarcane"]',
+        '["landuse"="orchard"]',
+    ],
+    "energy": [
+        '["power"="plant"]',
+        '["power"="generator"]',
+        '["landuse"="industrial"]["industrial"="oil"]',
+        '["landuse"="industrial"]["industrial"="gas"]',
+    ],
 }
 
 _CARTO_BASE = "https://wri-rw.carto.com/api/v2/sql"
@@ -555,7 +579,7 @@ _GFW_CARTO = {
     "mining": {
         "sql": (
             "SELECT ST_AsGeoJSON(the_geom) AS geojson, gid, name, country, area_km2 "
-            "FROM global_mining_2019_v2 WHERE gid_0='IDN' LIMIT 500"
+            "FROM global_mining_2019_v2 WHERE lower(country) IN ('indonesia', 'idn') LIMIT 500"
         ),
         "industry_type": "mining",
         "name_fields": ["name", "gid"],
@@ -596,6 +620,40 @@ def _first_val(d: dict, fields: list) -> str:
         if v:
             return str(v).strip()
     return ""
+
+
+def _osm_named_boundary_filters(industry_types: list[str]) -> list[str]:
+    filters = []
+    name_selectors = ('["name"]', '["operator"]', '["brand"]', '["ref"]')
+    for itype in industry_types:
+        for tag_selector in _OSM_TAGS_MAP.get(itype, []):
+            for osm_type in ("way", "relation"):
+                for name_selector in name_selectors:
+                    filters.append(f"{osm_type}{tag_selector}{name_selector}(area.searchArea);")
+    return sorted(set(filters))
+
+
+def _classify_osm_industry(tags: dict) -> str:
+    landuse = tags.get("landuse", "")
+    industrial = tags.get("industrial", "")
+    crop = tags.get("crop", "")
+    if tags.get("power") in {"plant", "generator"} or industrial in {"oil", "gas"}:
+        return "energy"
+    if landuse == "quarry" or tags.get("man_made") == "mine" or industrial == "mine":
+        return "mining"
+    if landuse in {"plantation", "farmland", "orchard"} or crop:
+        return "plantation"
+    if landuse in {"forest", "logging"} or tags.get("boundary") == "forest_compartment" or industrial == "sawmill":
+        return "forestry"
+    return "mining"
+
+
+def _osm_sub_type(tags: dict) -> Optional[str]:
+    for key in ("industrial", "crop", "power", "plant:source", "resource", "landuse", "boundary"):
+        value = tags.get(key)
+        if value:
+            return str(value)
+    return None
 
 
 def _osm_element_to_geojson(element: dict) -> Optional[dict]:
@@ -832,22 +890,20 @@ async def admin_companies_import_osm(
     admin: AdminUser = Depends(get_current_admin),
     db: Session = Depends(get_db),
 ):
-    """Import company boundaries from OpenStreetMap Overpass API.
-    Ported from legacy backend/admin_routes.py::import_from_osm - unchanged
-    query building/tag mapping, only the DB write moved to SQLAlchemy 2.x and
-    `geojson` is stored as a native dict (JSONB) instead of a json.dumps string."""
+    """Import company boundaries from OpenStreetMap Overpass API."""
     data = await request.json()
     industry_types = data.get("industry_types") or list(INDUSTRY_TYPES)
 
-    bbox = "-11.0,95.0,6.0,141.0"  # Indonesia S,W,N,E
-    filters = []
-    for itype in industry_types:
-        for tag in _OSM_TAGS_MAP.get(itype, []):
-            filters.append(f"{tag}({bbox});")
+    filters = _osm_named_boundary_filters(industry_types)
     if not filters:
         raise HTTPException(status_code=400, detail="Tidak ada tipe industri yang valid")
 
-    overpass_query = f"[out:json][timeout:300][maxsize:536870912];\n({chr(10).join(filters)});\nout geom qt;"
+    overpass_query = (
+        '[out:json][timeout:300][maxsize:536870912];\n'
+        'area["ISO3166-1"="ID"][admin_level=2]->.searchArea;\n'
+        f"({chr(10).join(filters)});\n"
+        "out geom qt;"
+    )
 
     osm_data = None
     last_error = ""
@@ -871,20 +927,13 @@ async def admin_companies_import_osm(
             skipped += 1
             continue
 
-        itype = "mining"
-        landuse = tags.get("landuse", "")
-        if tags.get("power") == "plant":
-            itype = "energy"
-        elif landuse == "forest":
-            itype = "forestry"
-        elif landuse in ("farmland", "orchard"):
-            itype = "plantation"
-
+        itype = _classify_osm_industry(tags)
         geom = _osm_element_to_geojson(element)
         if not geom:
             skipped += 1
             continue
-        if db.query(CompanyBoundary).filter_by(name=name, source="osm").first():
+        source_url = f"https://www.openstreetmap.org/{element.get('type')}/{element.get('id')}"
+        if db.query(CompanyBoundary).filter_by(source="osm", source_url=source_url).first():
             skipped += 1
             continue
 
@@ -894,14 +943,14 @@ async def admin_companies_import_osm(
                 name=name,
                 company_name=tags.get("operator") or None,
                 industry_type=itype,
-                sub_type=tags.get("industrial") or tags.get("crop") or tags.get("power") or None,
+                sub_type=_osm_sub_type(tags),
                 province=tags.get("is_in:province") or tags.get("addr:province") or None,
                 district=tags.get("addr:city") or tags.get("addr:district") or None,
                 description=f"Diimpor dari OpenStreetMap. OSM ID: {element.get('id')}",
                 geojson=feature,
                 area_ha=estimate_area_ha(feature),
                 source="osm",
-                source_url=f"https://www.openstreetmap.org/{element.get('type')}/{element.get('id')}",
+                source_url=source_url,
                 is_active=True,
             )
             db.add(company)
