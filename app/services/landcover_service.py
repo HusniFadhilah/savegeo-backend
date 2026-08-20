@@ -801,3 +801,147 @@ def analyze_landcover_change_map(data: dict) -> dict:
         "changed_percentage": round((changed_ha / total_ha) * 100, 2) if total_ha else 0,
         "stable_percentage": round((stable_ha / total_ha) * 100, 2) if total_ha else 0,
     }
+
+
+# Multiplier used to pack (from_class, to_class) into one integer band so
+# ee.Image.reduceToVectors can connected-component-label by transition type
+# in a single pass. 1000 is comfortably above every class code seen across
+# LAND_COVER_LEGENDS (max observed ~220, e.g. GLC_FCS30D/MapBiomas raw codes).
+_TRANSITION_CODE_MULTIPLIER = 1000
+
+
+def analyze_landcover_hotspots(data: dict) -> dict:
+    """Vectorize the from_image.neq(to_image) pixel-change mask (same mask
+    analyze_landcover_change_map already computes as a raster) into individual
+    change polygons via ee.Image.reduceToVectors, grouped by (from_class,
+    to_class) connected components - the piece P0 "hotspot" analysis needs on
+    top of the existing pixel-diff raster: per-polygon area, transition
+    label, centroid, and (Dynamic World only) mean classification confidence.
+    Returned polygons are pre-sorted by area descending and capped to top_n -
+    this is a ranked hotspot list, not a full change atlas (reduceToVectors
+    over an entire large AOI at native scale is expensive; `min_area_ha`
+    drops single-pixel/noise slivers before ranking, `scale` can be set
+    coarser than the classification's native resolution to keep it tractable).
+    """
+    if not data.get("aoi"):
+        raise AnalysisError("aoi is required", 400)
+
+    settings = get_settings()
+    dataset = data.get("dataset", "Dynamic_World")
+    if dataset not in LAND_COVER_LEGENDS:
+        raise AnalysisError(f"Unknown dataset: {dataset}", 400)
+
+    ds_opts = LAND_COVER_DATASET_OPTIONS.get(dataset, {})
+    if not ds_opts.get("supports_transition", True):
+        raise AnalysisError(
+            f"Dataset '{dataset}' tidak mendukung analisis perubahan peta.",
+            400,
+            extra={"dataset": dataset, "supports_transition": False},
+        )
+
+    from_year = int(data.get("from_year"))
+    to_year = int(data.get("to_year"))
+    start_month = int(data.get("start_month", 1))
+    end_month = int(data.get("end_month", 12))
+    native_scale = LAND_COVER_NATIVE_SCALE.get(dataset, settings.default_landcover_scale)
+    lc_scale = max(int(data.get("scale", native_scale)), native_scale)
+    # Vectorizing at native pixel resolution over a large AOI can be very slow/
+    # timeout-prone (reduceToVectors is a full connected-component pass, not a
+    # simple reduceRegion) - default to 3x coarser unless the caller overrides it.
+    vector_scale = int(data.get("vector_scale", lc_scale * 3))
+    min_area_ha = max(float(data.get("min_area_ha", 1.0)), 0.0)
+    top_n = min(max(int(data.get("top_n", 20)), 1), 100)
+
+    aoi = create_geometry_from_payload(data["aoi"])
+    from_image, from_meta = get_landcover_image(dataset, from_year, aoi, start_month, end_month)
+    to_image, to_meta = get_landcover_image(dataset, to_year, aoi, start_month, end_month)
+
+    changed = from_image.neq(to_image)
+    transition_band = (
+        from_image.toInt32().multiply(_TRANSITION_CODE_MULTIPLIER)
+        .add(to_image.toInt32())
+        .updateMask(changed)
+        .rename("transition")
+    )
+
+    vectors = transition_band.reduceToVectors(
+        geometry=aoi,
+        scale=vector_scale,
+        geometryType="polygon",
+        eightConnected=True,
+        labelProperty="transition",
+        reducer=ee.Reducer.countEvery(),
+        maxPixels=int(settings.max_pixels),
+        bestEffort=True,
+        tileScale=4,
+    )
+    vectors = vectors.map(lambda f: f.set("area_ha", f.geometry().area(1).divide(10000)))
+    vectors = vectors.filter(ee.Filter.gte("area_ha", min_area_ha)).sort("area_ha", False).limit(top_n)
+
+    # Dynamic World confidence (mean of the winning class's probability band
+    # across each polygon) - the only dataset in this catalog with a native
+    # per-pixel probability surface. Other datasets have no per-pixel
+    # confidence source, so `confidence` stays null for them (not fabricated).
+    if dataset == "Dynamic_World":
+        dw_prob_bands = ["water", "trees", "grass", "flooded_vegetation",
+                          "crops", "shrub_and_scrub", "built", "bare", "snow_and_ice"]
+        to_start, to_end = build_date_range(to_meta.get("year", to_year), start_month, end_month)
+        dw_to = (
+            ee.ImageCollection("GOOGLE/DYNAMICWORLD/V1")
+            .filterDate(to_start, to_end).filterBounds(aoi)
+        )
+        confidence_image = dw_to.select(dw_prob_bands).reduce(ee.Reducer.max()).reduce(ee.Reducer.max()).rename("confidence")
+        vectors = confidence_image.reduceRegions(collection=vectors, reducer=ee.Reducer.mean(), scale=lc_scale, tileScale=4)
+
+    try:
+        raw_features = vectors.getInfo().get("features", [])
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Hotspot vectorization failed: {e}")
+        raise AnalysisError(
+            "Vectorisasi hotspot gagal (kemungkinan AOI terlalu besar untuk skala ini) - coba perbesar `scale`/`vector_scale` atau perkecil AOI.",
+            422,
+        )
+
+    legend = LAND_COVER_LEGENDS.get(dataset, {})
+
+    def class_info(code: int) -> dict:
+        entry = legend.get(str(code), {})
+        return {"value": code, "label": entry.get("label", str(code)), "color": entry.get("color", "#999999")}
+
+    hotspots = []
+    for f in raw_features:
+        props = f.get("properties", {})
+        code = int(props.get("transition", 0))
+        from_class, to_class = divmod(code, _TRANSITION_CODE_MULTIPLIER)
+        geom = f.get("geometry")
+        if not geom:
+            continue
+        centroid = None
+        try:
+            ring = geom["coordinates"][0] if geom["type"] == "Polygon" else geom["coordinates"][0][0]
+            centroid = [round(sum(c[0] for c in ring) / len(ring), 6), round(sum(c[1] for c in ring) / len(ring), 6)]
+        except Exception:  # noqa: BLE001
+            pass
+        hotspots.append({
+            "area_ha": round(float(props.get("area_ha", 0)), 2),
+            "from_class": class_info(from_class),
+            "to_class": class_info(to_class),
+            "centroid": centroid,
+            "geometry": geom,
+            "confidence": round(float(props["mean"]), 3) if "mean" in props and props["mean"] is not None else None,
+        })
+
+    return {
+        "dataset": dataset,
+        "dataset_name": LAND_COVER_DATASET_OPTIONS.get(dataset, {}).get("name", dataset),
+        "from_year": from_year,
+        "to_year": to_year,
+        "from_effective_year": from_meta.get("year"),
+        "to_effective_year": to_meta.get("year"),
+        "resolution": f"{lc_scale}m",
+        "vector_scale": vector_scale,
+        "min_area_ha": min_area_ha,
+        "hotspot_count": len(hotspots),
+        "confidence_available": dataset == "Dynamic_World",
+        "hotspots": hotspots,
+    }

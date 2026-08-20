@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.db.models.admin_user import AdminUser
+from app.db.models.user import User
 from app.db.session import get_db
 
 _bearer_scheme = HTTPBearer(auto_error=False)
@@ -50,6 +51,23 @@ def create_access_token(admin: AdminUser) -> str:
     payload = {
         "sub": str(admin.id),
         "username": admin.username,
+        "typ": "admin",
+        "iat": now,
+        "exp": now + dt.timedelta(minutes=settings.access_token_expire_minutes),
+    }
+    return jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
+
+
+def create_user_access_token(user: User) -> str:
+    """Same shape as `create_access_token`, but for public app-user accounts
+    (Disaster Intelligence Dashboard). `typ: "user"` keeps the two token kinds
+    from being interchangeable - see `get_current_admin`/`get_current_user`."""
+    settings = get_settings()
+    now = dt.datetime.now(dt.timezone.utc)
+    payload = {
+        "sub": str(user.id),
+        "username": user.username,
+        "typ": "user",
         "iat": now,
         "exp": now + dt.timedelta(minutes=settings.access_token_expire_minutes),
     }
@@ -71,10 +89,34 @@ def get_current_admin(
     if credentials is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
     payload = decode_access_token(credentials.credentials)
+    # Tokens minted before the "typ" claim existed have no "typ" key - treated
+    # as admin (legacy). A token explicitly minted as "user" is rejected here
+    # so a User account can never reach an admin route with its own token.
+    if payload.get("typ") not in (None, "admin"):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token type")
     admin = db.get(AdminUser, int(payload["sub"]))
     if admin is None or not admin.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin account not found or inactive")
     return admin
+
+
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+    db: Session = Depends(get_db),
+) -> User:
+    """Auth gate for the public Disaster Intelligence Dashboard. Mirrors
+    `get_current_admin` exactly but resolves against `users`, and only ever
+    accepts a token explicitly minted with `typ: "user"` - an admin token
+    (typ "admin" or legacy typ-less) is rejected, not silently upgraded."""
+    if credentials is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
+    payload = decode_access_token(credentials.credentials)
+    if payload.get("typ") != "user":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token type")
+    user = db.get(User, int(payload["sub"]))
+    if user is None or not user.is_active:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User account not found or inactive")
+    return user
 
 
 def require_permission(code: str):

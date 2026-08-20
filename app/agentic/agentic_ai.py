@@ -1933,3 +1933,406 @@ def get_key_pool_status() -> dict:
         if keys:
             result[p] = _KeyPool.status(p, keys)
     return result
+
+
+# ══════════════════════════════════════════════════════════════════
+# GEO-AI ASSISTANT — tool-calling grounded query/action agent (P0)
+# ══════════════════════════════════════════════════════════════════
+#
+# Unlike CONTROLLER_SYSTEM_PROMPT/plan_with_ai above (a single-shot JSON-mode
+# call that emits UI-automation actions to drive the analysis forms), this is
+# a real multi-round tool-calling loop: the model calls whitelisted functions
+# from app.agentic.geoai_tools to read already-computed results / run hotspot
+# search, then answers grounded in what those tools actually returned. See
+# app/agentic/geoai_tools.py for the tool registry and the "no fabricated
+# numbers" enforcement.
+
+GEOAI_SYSTEM_PROMPT = """You are SAVEGEO Geo-AI Assistant.
+
+You help users analyze geospatial information already available inside SAVEGEO: AOI, active
+layers, analysis period, Sentinel-2 imagery, vegetation indices (NDVI/EVI/SAVI/NDWI/NBR/etc.),
+land use/land cover, carbon estimation, and change detection.
+
+## Hard rules (do not break these)
+- Never invent measurements, statistics, coordinates, classifications, model results, or
+  environmental findings. Every number in your answer must come from a tool result you actually
+  received in this conversation (this turn's tool calls, or an earlier turn's tool result still
+  visible in the conversation history).
+- If a required analysis has not been run, say so explicitly and name the analysis to run - do not
+  guess a plausible-sounding number instead. Use wording like: "Data tersebut belum tersedia untuk
+  AOI ini. Jalankan {analysis} terlebih dahulu agar saya dapat menghitung {metric}."
+- Clearly separate **measured/observed** facts (e.g. an NDVI raster statistic) from
+  **interpretation** (a possible explanation for a change). Never present a possible cause as
+  confirmed fact unless a tool result actually supports it. Example: "Data menunjukkan NDVI turun
+  24%. Penurunan tersebut dapat berkaitan dengan berkurangnya vegetasi, kondisi musiman, gangguan
+  lahan, atau faktor lain - untuk memastikan penyebab, diperlukan validasi tambahan."
+- Carbon figures are always model **estimates**, never raw measurements - say "Estimasi carbon
+  stock ... berdasarkan model ..." and include model_r2/uncertainty when the tool result has it,
+  never a bare number stated as fact.
+- Only call the tools you were given. Never claim to run SQL, code, or any action outside those
+  tools.
+- Respond in Indonesian (the app's working language) unless the user writes in English.
+
+## How to work
+1. If you're not sure what's already open/available, call get_current_context first.
+2. To answer a question about existing results ("berapa luas hutan yang hilang", "apa arti NDVI
+   0.72"), call get_analysis_results / query_vegetation_index / query_landcover / query_carbon /
+   compare_periods - do not call find_hotspots for this, it's a heavier live computation.
+3. Only call find_hotspots when the user actually wants a ranked list of specific *areas*
+   (hotspots) - "cari area dengan kehilangan vegetasi terbesar", "hotspot deforestasi terbesar",
+   "area mana yang berubah paling besar". It requires an AOI; if get_current_context or the tool
+   result shows no AOI, ask the user to set one instead of calling it again.
+4. For follow-ups like "yang kedua carbon loss-nya berapa?" or "detail hotspot pertama", match the
+   ordinal to the hotspot list already returned earlier in this conversation (by id, e.g. "h2" for
+   the 2nd one) - use get_hotspot_detail if you need to re-fetch it, but you usually already have
+   it in the visible tool result from earlier in the conversation.
+5. Once you have enough grounded information, stop calling tools and produce the final answer.
+
+## Final answer format
+When you are done (no more tool calls needed), respond with ONLY one JSON object, no other text,
+no markdown code fence:
+{
+  "message": "<answer text, markdown allowed, follow the structure below>",
+  "warnings": ["<data limitation or caveat, if any>"],
+  "actions": [ ... ],
+  "cards": [ ... ]
+}
+
+Keep "message" short and structured, in this order (use markdown headers only when the answer has
+multiple parts - a one-line factual answer doesn't need headers):
+- **Finding**: the single most important takeaway, 1-2 sentences.
+- **Key Metrics**: at most 3-5 numbers, each with its unit and source analysis.
+- **Location**: which area/hotspot this refers to, if relevant.
+- **Interpretation**: a short, clearly-labeled interpretation, only if it adds value - never
+  invent a cause.
+- **Actions**: implied by the `actions`/`cards` you return, no need to restate as text.
+
+### actions[] - things the map/UI should do (optional, omit if nothing to do)
+- {"type":"zoom_to_location","lat":..,"lng":..,"zoom":12}
+- {"type":"zoom_to_feature","geometry":<GeoJSON geometry>}
+- {"type":"highlight_polygon","geometry":<GeoJSON geometry>,"label":"..."}
+- {"type":"highlight_hotspot","hotspot_id":"h1"}
+- {"type":"show_before_after","hotspot_id":"h1"}  (or omit hotspot_id to compare the whole AOI)
+- {"type":"open_analysis_result","kind":"carbon|vegetation|landcover|landcover_transition"}
+- {"type":"ask_user","question":"..."}  (when you genuinely need more input, e.g. no AOI set)
+Only include an action when it's genuinely useful right now (e.g. auto-zoom to the single most
+relevant hotspot you just found) - hotspot cards already have their own Zoom/Details buttons, you
+don't need to repeat one action per hotspot.
+
+### cards[] - structured result cards (optional, omit if a plain text answer is enough)
+- {"type":"metric","title":"...","metrics":[{"label":"...","value":"...","unit":"..."}],"source":{...}}
+- {"type":"hotspot","id":"h1","title":"Hotspot 1","area_ha":18.7,"metric_label":"NDVI Change","metric_value":"-32%","period":"2024→2026","geometry":<GeoJSON>,"centroid":[lng,lat],"source":{...}}
+  (one card per hotspot you want to show; copy area_ha/geometry/etc. straight from the
+  find_hotspots tool result, do not recompute or round differently)
+- {"type":"comparison","title":"...","before":{...},"after":{...},"source":{...}}
+- {"type":"warning","message":"..."}
+- {"type":"suggested_action","label":"...","message":"<what sendMessage should say if clicked>"}
+Every card should carry the "source" object from the tool result it came from
+({"source": "...", "dataset": "...", "period": "...", "generated_at": "..."}) so the UI can show
+provenance.
+
+If nothing is available for what the user asked, still return valid JSON with an explanatory
+"message" and empty "actions"/"cards" - never leave the JSON incomplete or add prose outside it.
+""".strip()
+
+
+def _extract_json_object(raw: str) -> dict:
+    """Best-effort JSON object extraction from a model's final text turn -
+    same tolerance strategy as plan_with_ai's local _parse (markdown fences,
+    leading/trailing prose, single-quoted dict fallback), factored out so
+    geoai_with_ai doesn't depend on plan_with_ai's closure."""
+    import ast as _ast
+    import json as _json
+    import re as _re
+
+    text = raw.strip()
+    text = _re.sub(r"^```(?:json)?\s*", "", text)
+    text = _re.sub(r"\s*```$", "", text.rstrip()).strip()
+
+    try:
+        return _json.loads(text)
+    except _json.JSONDecodeError:
+        pass
+
+    m = _re.search(r"\{.*\}", text, _re.DOTALL)
+    candidate = m.group(0) if m else text
+    try:
+        return _json.loads(candidate)
+    except _json.JSONDecodeError:
+        pass
+
+    try:
+        obj = _ast.literal_eval(candidate)
+        if isinstance(obj, dict):
+            return obj
+    except Exception:
+        pass
+
+    return {
+        "message": raw.strip() or "Maaf, saya tidak bisa memproses permintaan ini sekarang.",
+        "warnings": [],
+        "actions": [],
+        "cards": [],
+    }
+
+
+def _tool_round_limit_response() -> str:
+    import json as _json
+
+    return _json.dumps({
+        "message": "Pertanyaan ini butuh terlalu banyak langkah untuk dijawab dengan aman. Coba pertanyaan yang lebih spesifik, misalnya sebutkan metrik dan periode yang ingin dicek.",
+        "warnings": ["tool_round_limit_exceeded"],
+        "actions": [],
+        "cards": [],
+    }, ensure_ascii=False)
+
+
+def _tool_schema_for_anthropic() -> List[dict]:
+    from app.agentic.geoai_tools import GEOAI_TOOLS
+
+    return [
+        {"name": t["name"], "description": t["description"], "input_schema": t["parameters"]}
+        for t in GEOAI_TOOLS
+    ]
+
+
+def _tool_schema_for_openai() -> List[dict]:
+    from app.agentic.geoai_tools import GEOAI_TOOLS
+
+    return [
+        {"type": "function", "function": {"name": t["name"], "description": t["description"], "parameters": t["parameters"]}}
+        for t in GEOAI_TOOLS
+    ]
+
+
+def _call_anthropic_tools(api_key: str, model: str, user_input: str,
+                          history: Optional[List[dict]], tool_ctx: dict,
+                          max_rounds: int = 6) -> str:
+    import json as _json
+
+    if not api_key:
+        raise ValueError("ai.anthropic_api_key tidak dikonfigurasi.")
+    try:
+        import anthropic
+    except ImportError:
+        raise ImportError("Jalankan: pip install anthropic")
+
+    from app.agentic.geoai_tools import execute_geoai_tool
+
+    client = anthropic.Anthropic(api_key=api_key)
+    messages: list = [{"role": h["role"], "content": h["content"]} for h in (history or [])]
+    messages.append({"role": "user", "content": user_input})
+    tools = _tool_schema_for_anthropic()
+
+    for _ in range(max_rounds):
+        resp = client.messages.create(
+            model=model, max_tokens=4096, system=GEOAI_SYSTEM_PROMPT, tools=tools, messages=messages,
+        )
+        tool_uses = [b for b in resp.content if getattr(b, "type", None) == "tool_use"]
+        if not tool_uses:
+            text_blocks = [b.text for b in resp.content if getattr(b, "type", None) == "text"]
+            return "\n".join(text_blocks)
+
+        messages.append({"role": "assistant", "content": resp.content})
+        tool_results = []
+        for tu in tool_uses:
+            result = execute_geoai_tool(tu.name, tu.input or {}, tool_ctx)
+            tool_results.append({
+                "type": "tool_result", "tool_use_id": tu.id,
+                "content": _json.dumps(result, ensure_ascii=False, default=str),
+            })
+        messages.append({"role": "user", "content": tool_results})
+
+    return _tool_round_limit_response()
+
+
+def _call_openai_compat_tools(api_key: str, model: str, user_input: str,
+                              base_url: Optional[str], history: Optional[List[dict]],
+                              tool_ctx: dict, max_rounds: int = 6) -> str:
+    import json as _json
+
+    _LOCAL_DUMMY_KEYS = {"ollama", "opencode"}
+    if not api_key or (api_key not in _LOCAL_DUMMY_KEYS and not api_key.strip()):
+        raise ValueError("API key tidak dikonfigurasi untuk provider ini.")
+    try:
+        from openai import OpenAI
+    except ImportError:
+        raise ImportError("Jalankan: pip install openai")
+
+    from app.agentic.geoai_tools import execute_geoai_tool
+
+    kwargs: dict = {"api_key": api_key}
+    if base_url:
+        kwargs["base_url"] = base_url
+    client = OpenAI(**kwargs)
+
+    messages: list = [{"role": "system", "content": GEOAI_SYSTEM_PROMPT}]
+    for h in (history or []):
+        messages.append({"role": h["role"], "content": h["content"]})
+    messages.append({"role": "user", "content": user_input})
+    tools = _tool_schema_for_openai()
+
+    for _ in range(max_rounds):
+        resp = client.chat.completions.create(
+            model=model, max_tokens=4096, temperature=0.2, messages=messages, tools=tools,
+        )
+        choice = resp.choices[0]
+        msg = choice.message
+        tool_calls = getattr(msg, "tool_calls", None)
+        if not tool_calls:
+            return msg.content or ""
+
+        messages.append({
+            "role": "assistant",
+            "content": msg.content,
+            "tool_calls": [
+                {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                for tc in tool_calls
+            ],
+        })
+        for tc in tool_calls:
+            try:
+                args = _json.loads(tc.function.arguments or "{}")
+            except Exception:
+                args = {}
+            result = execute_geoai_tool(tc.function.name, args, tool_ctx)
+            messages.append({"role": "tool", "tool_call_id": tc.id, "content": _json.dumps(result, ensure_ascii=False, default=str)})
+
+    return _tool_round_limit_response()
+
+
+def _call_gemini_tools(api_key: str, model: str, user_input: str,
+                       history: Optional[List[dict]], tool_ctx: dict,
+                       max_rounds: int = 6) -> str:
+    if not api_key:
+        raise ValueError("ai.gemini_api_key tidak dikonfigurasi.")
+    try:
+        from google import genai
+        from google.genai import types
+    except ImportError:
+        raise ImportError("Jalankan: pip install google-genai")
+
+    from app.agentic.geoai_tools import GEOAI_TOOLS, execute_geoai_tool
+
+    client = genai.Client(api_key=api_key)
+
+    contents: list = []
+    for h in (history or []):
+        role = "model" if h["role"] == "assistant" else "user"
+        contents.append(types.Content(role=role, parts=[types.Part(text=h["content"])]))
+    contents.append(types.Content(role="user", parts=[types.Part(text=user_input)]))
+
+    tool_decls = [
+        types.FunctionDeclaration(name=t["name"], description=t["description"], parameters=t["parameters"])
+        for t in GEOAI_TOOLS
+    ]
+    gemini_tools = [types.Tool(function_declarations=tool_decls)]
+
+    for _ in range(max_rounds):
+        resp = client.models.generate_content(
+            model=model, contents=contents,
+            config=types.GenerateContentConfig(
+                system_instruction=GEOAI_SYSTEM_PROMPT, max_output_tokens=4096, temperature=0.2, tools=gemini_tools,
+            ),
+        )
+        candidate = resp.candidates[0]
+        parts = candidate.content.parts or []
+        fn_calls = [p.function_call for p in parts if getattr(p, "function_call", None)]
+        if not fn_calls:
+            return resp.text or ""
+
+        contents.append(candidate.content)
+        response_parts = []
+        for fc in fn_calls:
+            args = dict(fc.args) if fc.args else {}
+            result = execute_geoai_tool(fc.name, args, tool_ctx)
+            response_parts.append(types.Part(function_response=types.FunctionResponse(name=fc.name, response={"result": result})))
+        contents.append(types.Content(role="user", parts=response_parts))
+
+    return _tool_round_limit_response()
+
+
+def geoai_with_ai(message: str, context: dict, db, history: Optional[List[dict]] = None) -> dict:
+    """Tool-calling Geo-AI Assistant loop (P0). See GEOAI_SYSTEM_PROMPT and
+    app/agentic/geoai_tools.py for the grounding/whitelist contract.
+
+    `context` is the richer client-held state (AOI geometry, period, active
+    layer, and already-computed analysis results) - see
+    windowBridge.ts buildGeoAiContext() on the frontend. `db` is passed
+    through to tools that need a DB session (vegetation hotspot search reads
+    satellite-provider config the same way analyze_vegetation does).
+    """
+    import json as _json
+
+    cfg = _get_ai_config()
+    provider = (cfg["provider"] or "anthropic").lower()
+    model = cfg["model"] or _PROVIDER_DEFAULT_MODELS.get(provider, "")
+
+    tool_ctx: dict = {"context": context or {}, "db": db, "last_hotspots": {}}
+    user_input = _json.dumps({"message": message, "context": context or {}}, ensure_ascii=False, default=str)
+
+    def _call_with_key(key: str) -> str:
+        if provider == "anthropic":
+            return _call_anthropic_tools(key, model, user_input, history, tool_ctx)
+        elif provider in ("openai", "openrouter", "deepseek"):
+            base_url = cfg["custom_base_url"] or _PROVIDER_BASE_URLS.get(provider)
+            return _call_openai_compat_tools(key, model, user_input, base_url, history, tool_ctx)
+        elif provider == "gemini":
+            return _call_gemini_tools(key, model, user_input, history, tool_ctx)
+        else:
+            raise ValueError(f"Provider '{provider}' tidak mendukung Geo-AI tool-calling.")
+
+    try:
+        if provider == "ollama":
+            base_url = cfg.get("ollama_base_url") or cfg["custom_base_url"] or _PROVIDER_BASE_URLS["ollama"]
+            raw = _call_openai_compat_tools("ollama", model, user_input, base_url, history, tool_ctx)
+        elif provider == "opencode":
+            base_url = cfg.get("opencode_base_url") or cfg["custom_base_url"] or _PROVIDER_BASE_URLS["opencode"]
+            key = cfg.get("opencode_api_key") or "opencode"
+            if not model:
+                return _geoai_fallback("OpenCode: nama model wajib diisi di field 'ai.model'.")
+            raw = _call_openai_compat_tools(key, model, user_input, base_url, history, tool_ctx)
+        elif provider not in ("anthropic", "openai", "openrouter", "deepseek", "gemini"):
+            return _geoai_fallback(f"Provider tidak dikenal: '{provider}'.")
+        else:
+            keys = _get_keys_for_provider(cfg, provider)
+            raw = ""
+            last_exc: Optional[Exception] = None
+            for key in keys:
+                if not _KeyPool.is_available(provider, key):
+                    continue
+                try:
+                    raw = _call_with_key(key)
+                    last_exc = None
+                    break
+                except Exception as exc:
+                    if _is_rate_limit_error(exc):
+                        _KeyPool.mark_limited(provider, key, retry_after=60)
+                        last_exc = exc
+                        continue
+                    raise
+            else:
+                if last_exc:
+                    raise last_exc
+                raise RuntimeError(f"Tidak ada API key yang tersedia untuk provider '{provider}'.")
+
+        if not raw:
+            return _geoai_fallback("Model mengembalikan respons kosong.")
+
+        result = _extract_json_object(raw)
+        result.setdefault("message", "")
+        result.setdefault("warnings", [])
+        result.setdefault("actions", [])
+        result.setdefault("cards", [])
+        return result
+    except Exception as exc:
+        raise RuntimeError(f"{provider} API error: {exc}") from exc
+
+
+def _geoai_fallback(reason: str) -> dict:
+    return {
+        "message": "Geo-AI Assistant tidak dapat digunakan saat ini. Gunakan panel analisis secara manual.",
+        "warnings": [reason],
+        "actions": [],
+        "cards": [],
+    }

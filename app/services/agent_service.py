@@ -22,7 +22,7 @@ from fastapi import Request
 from sqlalchemy.orm import Session
 
 from app.agentic import rate_limiter
-from app.agentic.agentic_ai import execute_agent_plan, plan_agent_request, plan_with_ai, build_agent_capabilities
+from app.agentic.agentic_ai import execute_agent_plan, plan_agent_request, plan_with_ai, geoai_with_ai, build_agent_capabilities
 from app.db.models.chat_message import ChatMessage
 from app.db.models.chat_session import ChatSession
 from app.db.models.uploaded_model import UploadedModel
@@ -133,8 +133,10 @@ def run_agent_control(db: Session, request: Request, payload: dict) -> tuple[dic
         )
 
     # ── Parse payload ────────────────────────────────────────────
+    mode = str(payload.get("mode") or "control").strip().lower()
     message = str(payload.get("message") or "").strip()
     page_state = payload.get("page_state") or {}
+    geoai_context = payload.get("context") or {}
     image_b64 = payload.get("image") or None
     attachment = payload.get("attachment") or None
     session_id = payload.get("session_id") or None
@@ -176,7 +178,13 @@ def run_agent_control(db: Session, request: Request, payload: dict) -> tuple[dic
 
     # ── AI call ──────────────────────────────────────────────────
     try:
-        result = plan_with_ai(message, page_state, image_b64, attachment, history)
+        if mode == "geoai":
+            # Geo-AI Assistant: grounded tool-calling loop over already-computed
+            # results + live hotspot search (see agentic_ai.geoai_with_ai). Screenshot/
+            # attachment inputs are UI-automation-mode-only and not passed through here.
+            result = geoai_with_ai(message, geoai_context, db, history)
+        else:
+            result = plan_with_ai(message, page_state, image_b64, attachment, history)
     except Exception as e:  # noqa: BLE001
         logger.error("agent_control error: %s", e)
         err_str = str(e)
@@ -230,6 +238,7 @@ def run_agent_control(db: Session, request: Request, payload: dict) -> tuple[dic
             "message": result.get("message", ""),
             "actions": result.get("actions", []),
             "warnings": result.get("warnings", []),
+            "cards": result.get("cards", []),
         }, ensure_ascii=False)
         db.add(ChatMessage(
             session_id=session.id,

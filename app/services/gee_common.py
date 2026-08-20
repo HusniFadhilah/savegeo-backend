@@ -13,6 +13,7 @@ import ee
 
 from app.core.config import get_settings
 from app.registries.vegetation_index_registry import VEGETATION_INDEX_CATALOG
+from app.registries.satellite_provider_registry import CANONICAL_ALIAS
 
 
 class AnalysisError(Exception):
@@ -33,6 +34,38 @@ def mask_s2_clouds(image):
     cloud = qa.bitwiseAnd(1 << 10).neq(0)
     cirrus = qa.bitwiseAnd(1 << 11).neq(0)
     return image.updateMask(cloud.Or(cirrus).Not()).divide(10000)
+
+
+def mask_landsat_clouds(image):
+    """Cloud/shadow mask + optical scale factor for Landsat Collection 2
+    Level-2 surface reflectance (QA_PIXEL bits 3=cloud, 4=cloud shadow).
+    Mirrors mask_s2_clouds's role for the Sentinel-2 path."""
+    qa = image.select("QA_PIXEL")
+    cloud = qa.bitwiseAnd(1 << 3).neq(0)
+    shadow = qa.bitwiseAnd(1 << 4).neq(0)
+    mask = cloud.Or(shadow).Not()
+    optical = image.select("SR_B.*").multiply(0.0000275).add(-0.2)
+    return image.addBands(optical, overwrite=True).updateMask(mask)
+
+
+def standardize_bands(image, role_map: dict):
+    """Rename a composite's sensor-native bands to the canonical
+    Sentinel-2-style aliases (B2/B3/B4/B8/B11/...) so calculate_index() and
+    available_bands_for_index() work identically regardless of which
+    satellite produced the composite. Roles the sensor doesn't have (e.g.
+    Landsat has no red-edge) are simply left out of the renamed image.
+
+    `role_map` (role -> native band id, e.g. {"red": "SR_B4"}) comes from the
+    caller already resolved with any DB override applied - see
+    satellite_provider_repo.get_satellite_meta(). This function stays a pure
+    ee-only helper with no DB/registry dependency of its own."""
+    present = image.bandNames().getInfo()
+    src_names, dst_names = [], []
+    for role, native_band in role_map.items():
+        if native_band in present:
+            src_names.append(native_band)
+            dst_names.append(CANONICAL_ALIAS[role])
+    return image.select(src_names, dst_names)
 
 
 def _calculate_evi(image):

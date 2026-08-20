@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import requests
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from sqlalchemy.orm import Session
 
@@ -30,7 +31,11 @@ from app.schemas.admin import (
     ChangePasswordRequest,
     LoginRequest,
     ModelUpdateRequest,
+    SatelliteProviderUpdateRequest,
 )
+from app.db.models.satellite_provider_entry import SatelliteProviderEntry
+from app.registries.satellite_provider_registry import SATELLITE_PROVIDERS
+from app.repositories.satellite_provider_repo import apply_override, get_overrides_by_key
 from app.services import audit_service, config_service, gee_service, storage_service
 from app.services.geo_utils import estimate_area_ha
 from app.services.datatable_service import datatables_response, is_datatables_request
@@ -525,6 +530,144 @@ def admin_user_delete(user_id: int, admin: AdminUser = Depends(get_current_admin
 # -- Company boundaries (admin CRUD) --
 INDUSTRY_TYPES = {"mining", "forestry", "plantation", "energy"}
 
+# -- Company boundary import (OSM/GFW) - constants + helpers ported verbatim
+#    from legacy backend/admin_routes.py --
+_OVERPASS_SERVERS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+]
+
+# Ways only - relations are too heavy for an Indonesia-wide bbox
+_OSM_TAGS_MAP = {
+    "mining":     ['way["landuse"="quarry"]["name"]',
+                   'way["man_made"="mine"]["name"]',
+                   'way["industrial"="mine"]["name"]'],
+    "forestry":   ['way["landuse"="forest"]["operator"]'],
+    "plantation": ['way["landuse"="farmland"]["crop"="palm_oil"]["name"]'],
+    "energy":     ['way["power"="plant"]["name"]'],
+}
+
+_CARTO_BASE = "https://wri-rw.carto.com/api/v2/sql"
+
+# CARTO table names used by WRI/GFW for Indonesia concessions.
+_GFW_CARTO = {
+    "mining": {
+        "sql": (
+            "SELECT ST_AsGeoJSON(the_geom) AS geojson, gid, name, country, area_km2 "
+            "FROM global_mining_2019_v2 WHERE gid_0='IDN' LIMIT 500"
+        ),
+        "industry_type": "mining",
+        "name_fields": ["name", "gid"],
+        "company_field": None,
+        "province_field": None,
+    },
+    "palm_oil": {
+        "sql": (
+            "SELECT ST_AsGeoJSON(the_geom) AS geojson, group_name, company_name, "
+            "area_ha, prov_name, kab_name "
+            "FROM idn_oil_palm_concessions LIMIT 500"
+        ),
+        "industry_type": "plantation",
+        "name_fields": ["group_name", "company_name"],
+        "company_field": "company_name",
+        "province_field": "prov_name",
+        "district_field": "kab_name",
+    },
+    "timber": {
+        "sql": (
+            "SELECT ST_AsGeoJSON(the_geom) AS geojson, nama, perusahaan, "
+            "propinsi, kabupaten, luas_ha "
+            "FROM idn_hph_concessions LIMIT 500"
+        ),
+        "industry_type": "forestry",
+        "name_fields": ["nama", "perusahaan"],
+        "company_field": "perusahaan",
+        "province_field": "propinsi",
+        "district_field": "kabupaten",
+    },
+}
+
+
+def _first_val(d: dict, fields: list) -> str:
+    """Return first non-empty string from dict d for a list of field names."""
+    for f in fields:
+        v = d.get(f)
+        if v:
+            return str(v).strip()
+    return ""
+
+
+def _osm_element_to_geojson(element: dict) -> Optional[dict]:
+    etype = element.get("type")
+    if etype == "way":
+        geom = element.get("geometry", [])
+        if not geom:
+            return None
+        coords = [[pt["lon"], pt["lat"]] for pt in geom]
+        if coords[0] != coords[-1]:
+            coords.append(coords[0])
+        return {"type": "Polygon", "coordinates": [coords]} if len(coords) >= 4 else None
+    if etype == "relation":
+        outer_rings = []
+        for member in element.get("members", []):
+            if member.get("role") == "outer" and member.get("type") == "way":
+                geom = member.get("geometry", [])
+                if geom:
+                    coords = [[pt["lon"], pt["lat"]] for pt in geom]
+                    if coords[0] != coords[-1]:
+                        coords.append(coords[0])
+                    if len(coords) >= 4:
+                        outer_rings.append(coords)
+        if not outer_rings:
+            return None
+        if len(outer_rings) == 1:
+            return {"type": "Polygon", "coordinates": outer_rings}
+        return {"type": "MultiPolygon", "coordinates": [[ring] for ring in outer_rings]}
+    return None
+
+
+def _import_gfw_rows(db: Session, admin: AdminUser, rows: list, ds: dict, dataset_key: str) -> dict:
+    """Parse GFW CARTO rows (non-GeoJSON fallback format) - each row has a
+    `geojson` string field instead of a real GeoJSON FeatureCollection."""
+    imported, skipped = 0, 0
+    for row in rows:
+        name = _first_val(row, ds["name_fields"])
+        if not name:
+            skipped += 1
+            continue
+        if db.query(CompanyBoundary).filter_by(name=name, source="gfw").first():
+            skipped += 1
+            continue
+        geojson_str = row.get("geojson")
+        if not geojson_str:
+            skipped += 1
+            continue
+        try:
+            geom = json.loads(geojson_str)
+        except Exception:  # noqa: BLE001
+            skipped += 1
+            continue
+        feature_obj = {"type": "Feature", "geometry": geom, "properties": row}
+        company = CompanyBoundary(
+            name=name,
+            company_name=row.get(ds.get("company_field") or "") or None,
+            industry_type=ds["industry_type"],
+            province=row.get(ds.get("province_field") or "") or None,
+            district=row.get(ds.get("district_field") or "") or None,
+            description=f"Diimpor dari GFW/WRI CARTO. Dataset: {dataset_key}",
+            geojson=feature_obj,
+            area_ha=row.get("area_ha") or row.get("luas_ha") or (row.get("area_km2", 0) or 0) * 100 or estimate_area_ha(feature_obj),
+            source="gfw",
+            source_url="https://www.globalforestwatch.org/",
+            is_active=True,
+        )
+        db.add(company)
+        imported += 1
+    db.commit()
+    audit_service.log_audit(db, admin.id, "company.import_gfw", "company_boundary", None, detail={"dataset": dataset_key, "imported": imported, "skipped": skipped})
+    return {"imported": imported, "skipped": skipped}
+
 
 @router.get("/companies")
 def admin_companies_list(
@@ -681,6 +824,208 @@ def admin_company_delete(cid: int, admin: AdminUser = Depends(get_current_admin)
     db.commit()
     audit_service.log_audit(db, admin.id, "company.delete", "company_boundary", cid, detail={"name": name})
     return {"message": "Dihapus"}
+
+
+@router.post("/companies/import/osm")
+async def admin_companies_import_osm(
+    request: Request,
+    admin: AdminUser = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """Import company boundaries from OpenStreetMap Overpass API.
+    Ported from legacy backend/admin_routes.py::import_from_osm - unchanged
+    query building/tag mapping, only the DB write moved to SQLAlchemy 2.x and
+    `geojson` is stored as a native dict (JSONB) instead of a json.dumps string."""
+    data = await request.json()
+    industry_types = data.get("industry_types") or list(INDUSTRY_TYPES)
+
+    bbox = "-11.0,95.0,6.0,141.0"  # Indonesia S,W,N,E
+    filters = []
+    for itype in industry_types:
+        for tag in _OSM_TAGS_MAP.get(itype, []):
+            filters.append(f"{tag}({bbox});")
+    if not filters:
+        raise HTTPException(status_code=400, detail="Tidak ada tipe industri yang valid")
+
+    overpass_query = f"[out:json][timeout:300][maxsize:536870912];\n({chr(10).join(filters)});\nout geom qt;"
+
+    osm_data = None
+    last_error = ""
+    for server in _OVERPASS_SERVERS:
+        try:
+            resp = requests.post(server, data={"data": overpass_query}, timeout=320)
+            if resp.status_code == 200:
+                osm_data = resp.json()
+                break
+            last_error = f"HTTP {resp.status_code} dari {server}"
+        except Exception as e:  # noqa: BLE001
+            last_error = f"{server}: {e}"
+    if osm_data is None:
+        raise HTTPException(status_code=502, detail=f"Semua server Overpass gagal. Error terakhir: {last_error}")
+
+    imported, skipped, errors = 0, 0, []
+    for element in osm_data.get("elements", []):
+        tags = element.get("tags", {})
+        name = tags.get("name") or tags.get("operator") or tags.get("ref")
+        if not name:
+            skipped += 1
+            continue
+
+        itype = "mining"
+        landuse = tags.get("landuse", "")
+        if tags.get("power") == "plant":
+            itype = "energy"
+        elif landuse == "forest":
+            itype = "forestry"
+        elif landuse in ("farmland", "orchard"):
+            itype = "plantation"
+
+        geom = _osm_element_to_geojson(element)
+        if not geom:
+            skipped += 1
+            continue
+        if db.query(CompanyBoundary).filter_by(name=name, source="osm").first():
+            skipped += 1
+            continue
+
+        feature = {"type": "Feature", "geometry": geom, "properties": {"name": name, "osm_id": element.get("id"), "tags": tags}}
+        try:
+            company = CompanyBoundary(
+                name=name,
+                company_name=tags.get("operator") or None,
+                industry_type=itype,
+                sub_type=tags.get("industrial") or tags.get("crop") or tags.get("power") or None,
+                province=tags.get("is_in:province") or tags.get("addr:province") or None,
+                district=tags.get("addr:city") or tags.get("addr:district") or None,
+                description=f"Diimpor dari OpenStreetMap. OSM ID: {element.get('id')}",
+                geojson=feature,
+                area_ha=estimate_area_ha(feature),
+                source="osm",
+                source_url=f"https://www.openstreetmap.org/{element.get('type')}/{element.get('id')}",
+                is_active=True,
+            )
+            db.add(company)
+            imported += 1
+        except Exception as e:  # noqa: BLE001
+            errors.append(str(e))
+
+    db.commit()
+    audit_service.log_audit(db, admin.id, "company.import_osm", "company_boundary", None, detail={"imported": imported, "skipped": skipped})
+    return {"imported": imported, "skipped": skipped, "errors": errors[:10]}
+
+
+@router.post("/companies/import/gfw")
+async def admin_companies_import_gfw(
+    request: Request,
+    admin: AdminUser = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """Import Indonesia concession boundaries from Global Forest Watch via
+    CARTO SQL API. Ported from legacy backend/admin_routes.py::import_from_gfw."""
+    data = await request.json()
+    dataset_key = data.get("dataset", "mining")
+    if dataset_key not in _GFW_CARTO:
+        raise HTTPException(status_code=400, detail=f"Dataset tidak dikenal. Pilih: {list(_GFW_CARTO)}")
+    ds = _GFW_CARTO[dataset_key]
+
+    try:
+        resp = requests.get(_CARTO_BASE, params={"q": ds["sql"], "format": "GeoJSON"}, timeout=60)
+        if resp.status_code in (400, 404):
+            resp2 = requests.get(_CARTO_BASE, params={"q": ds["sql"]}, timeout=60)
+            resp2.raise_for_status()
+            raw = resp2.json()
+            return _import_gfw_rows(db, admin, raw.get("rows", []), ds, dataset_key)
+        resp.raise_for_status()
+        fc = resp.json()
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"GFW/CARTO API error: {e}")
+
+    imported, skipped = 0, 0
+    for feat in fc.get("features", []):
+        props = feat.get("properties") or {}
+        name = _first_val(props, ds["name_fields"])
+        if not name:
+            skipped += 1
+            continue
+        if db.query(CompanyBoundary).filter_by(name=name, source="gfw").first():
+            skipped += 1
+            continue
+        geom = feat.get("geometry")
+        if not geom:
+            skipped += 1
+            continue
+        feature_obj = {"type": "Feature", "geometry": geom, "properties": props}
+        company = CompanyBoundary(
+            name=name,
+            company_name=props.get(ds.get("company_field") or "") or None,
+            industry_type=ds["industry_type"],
+            province=props.get(ds.get("province_field") or "") or None,
+            district=props.get(ds.get("district_field") or "") or None,
+            description=f"Diimpor dari GFW/WRI CARTO. Dataset: {dataset_key}",
+            geojson=feature_obj,
+            area_ha=props.get("area_ha") or props.get("luas_ha") or (props.get("area_km2", 0) or 0) * 100 or estimate_area_ha(feature_obj),
+            source="gfw",
+            source_url="https://www.globalforestwatch.org/",
+            is_active=True,
+        )
+        db.add(company)
+        imported += 1
+
+    db.commit()
+    audit_service.log_audit(db, admin.id, "company.import_gfw", "company_boundary", None, detail={"dataset": dataset_key, "imported": imported, "skipped": skipped})
+    return {"imported": imported, "skipped": skipped}
+
+
+# -- Satellite provider overlay (admin CRUD on top of the static registry) --
+@router.get("/satellite-providers")
+def admin_satellite_providers_list(admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+    """Merged registry+override view for the admin editor - unlike the public
+    GET /vegetation/satellites picker, this includes admin-deactivated
+    providers too (so there's something to toggle back on)."""
+    overrides = get_overrides_by_key(db)
+    out = []
+    for key, meta in SATELLITE_PROVIDERS.items():
+        override = overrides.get(key)
+        merged = dict(apply_override(meta, override) or meta)
+        merged["is_active"] = override.is_active if override else True
+        merged["has_override"] = override is not None
+        out.append(merged)
+    return {"satellites": out}
+
+
+@router.put("/satellite-providers/{key}")
+def admin_satellite_provider_upsert(
+    key: str,
+    payload: SatelliteProviderUpdateRequest,
+    admin: AdminUser = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    if key not in SATELLITE_PROVIDERS:
+        raise HTTPException(status_code=400, detail=f"Unknown provider key '{key}' - harus salah satu dari {list(SATELLITE_PROVIDERS)}")
+    row = db.query(SatelliteProviderEntry).filter_by(key=key).first()
+    if row is None:
+        row = SatelliteProviderEntry(key=key)
+        db.add(row)
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        setattr(row, field, value)
+    db.commit()
+    db.refresh(row)
+    audit_service.log_audit(db, admin.id, "satellite_provider.update", "satellite_provider", key, detail={"key": key})
+    return {"message": "Provider satelit diperbarui", "provider": row.to_dict()}
+
+
+@router.delete("/satellite-providers/{key}")
+def admin_satellite_provider_reset(key: str, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+    """Remove the override row - reverts this provider back to its static registry default."""
+    row = db.query(SatelliteProviderEntry).filter_by(key=key).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Tidak ada override untuk provider ini")
+    db.delete(row)
+    db.commit()
+    audit_service.log_audit(db, admin.id, "satellite_provider.reset", "satellite_provider", key)
+    return {"message": "Override dihapus, kembali ke default registry"}
 
 
 # -- Key pool status (config-derived; savegeo/backend has no live LLM-call

@@ -27,13 +27,17 @@ from app.registries.vegetation_index_registry import (
     generate_comparison_narrative,
     generate_index_narrative,
 )
+from app.registries.satellite_provider_registry import resolve_satellite
+from app.repositories.satellite_provider_repo import get_satellite_meta
 from app.services.gee_common import (
     AnalysisError,
     build_date_range,
     calculate_index,
     create_geometry_from_payload,
     get_tile_url,
+    mask_landsat_clouds,
     mask_s2_clouds,
+    standardize_bands,
 )
 
 logger = logging.getLogger(__name__)
@@ -124,19 +128,54 @@ def compute_index_histogram(index_image, aoi, scale: int, min_val: float, max_va
         return []
 
 
-def _s2_composite_for_period(aoi, year, start_month, end_month, cloud_threshold):
+def _composite_for_period(db, aoi, year, start_month, end_month, cloud_threshold, satellite: str = "sentinel2"):
+    """Build a cloud-masked median composite for whichever satellite provider
+    was requested, then standardize its bands to the canonical Sentinel-2-style
+    aliases so every downstream index formula stays sensor-agnostic.
+
+    `gee_collection`/`band_role_map` come from get_satellite_meta(), which
+    merges in any DB override (satellite_providers table) - only the
+    sentinel2-vs-landsat cloud-mask *algorithm* choice below stays keyed off
+    the resolved provider key itself (a DB row can't redefine that)."""
     settings = get_settings()
     start_date, end_date = build_date_range(year, start_month, end_month)
-    collection = (
-        ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
-        .filterBounds(aoi).filterDate(start_date, end_date)
-        .filter(ee.Filter.lte("CLOUDY_PIXEL_PERCENTAGE", cloud_threshold))
-        .map(mask_s2_clouds)
-    )
+    resolved_key = resolve_satellite(satellite)
+    provider = get_satellite_meta(db, satellite)
+    collection_id = provider["gee_collection"]
+
+    if resolved_key == "sentinel2":
+        collection = (
+            ee.ImageCollection(collection_id)
+            .filterBounds(aoi).filterDate(start_date, end_date)
+            .filter(ee.Filter.lte("CLOUDY_PIXEL_PERCENTAGE", cloud_threshold))
+            .map(mask_s2_clouds)
+        )
+    else:  # landsat8 / landsat9 (Collection 2 Level-2 surface reflectance)
+        collection = (
+            ee.ImageCollection(collection_id)
+            .filterBounds(aoi).filterDate(start_date, end_date)
+            .filter(ee.Filter.lte("CLOUD_COVER", cloud_threshold))
+            .map(mask_landsat_clouds)
+        )
+
     size = collection.size().getInfo()
     if size == 0:
-        return None, None, start_date, end_date, 0
-    return collection.median().clip(aoi), collection, start_date, end_date, size
+        return None, None, start_date, end_date, 0, None
+    composite = standardize_bands(collection.median(), provider["band_role_map"]).clip(aoi)
+
+    # Data-quality signal: % of AOI actually covered by a cloud-free pixel in
+    # this composite (same technique as CarbonInferenceEngine._safe_s2_composite).
+    valid_pixel_pct = None
+    try:
+        first_band = composite.bandNames().get(0)
+        coverage = composite.select([first_band]).mask().reduceRegion(
+            reducer=ee.Reducer.mean(), geometry=aoi, scale=100, bestEffort=True, maxPixels=int(1e8), tileScale=4,
+        ).getInfo()
+        valid_pixel_pct = round(float(list(coverage.values())[0] or 0) * 100, 1) if coverage else None
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Valid-pixel coverage check failed: {e}")
+
+    return composite, collection, start_date, end_date, size, valid_pixel_pct
 
 
 def _index_stats(index_image, idx, aoi, veg_scale):
@@ -198,6 +237,7 @@ def analyze_vegetation(db, data: dict) -> dict:
     want_classify = bool(data.get("classify", True))
     want_histogram = bool(data.get("histogram", True))
     periods = data.get("periods")  # optional: [{"year":..,"start_month":..,"end_month":..,"label":..}, ...]
+    satellite = resolve_satellite(data.get("satellite"))
 
     aoi = create_geometry_from_payload(data["aoi"])
 
@@ -218,7 +258,7 @@ def analyze_vegetation(db, data: dict) -> dict:
             label = period.get("label") or f"{p_year}-{p_start:02d}_{p_end:02d}"
             period_labels.append(label)
 
-            composite, _, s_date, e_date, size = _s2_composite_for_period(aoi, p_year, p_start, p_end, cloud_threshold)
+            composite, _, s_date, e_date, size, _valid_pct = _composite_for_period(db, aoi, p_year, p_start, p_end, cloud_threshold, satellite)
             for idx in valid_indices:
                 if composite is None:
                     time_series[idx].append({"label": label, "date_range": None, "mean": None, "min": None, "max": None, "std_dev": None})
@@ -245,23 +285,32 @@ def analyze_vegetation(db, data: dict) -> dict:
             "periods": period_labels,
             "cloud_threshold": cloud_threshold,
             "scale": veg_scale,
+            "satellite": get_satellite_meta(db, satellite),
             "time_series": time_series,
             "time_series_summary": time_series_summary,
             "skipped_indices": skipped_indices,
         }
 
     # ── Single-period mode (default) ──────────────────────────────
-    median_composite, s2_collection, start_date, end_date, size = _s2_composite_for_period(
-        aoi, year, start_month, end_month, cloud_threshold
+    median_composite, s2_collection, start_date, end_date, size, valid_pixel_pct = _composite_for_period(
+        db, aoi, year, start_month, end_month, cloud_threshold, satellite
     )
     if median_composite is None:
         raise AnalysisError(
-            "Tidak ada citra Sentinel-2 untuk periode ini",
+            f"Tidak ada citra {get_satellite_meta(db, satellite)['name']} untuk periode ini",
             404,
-            extra={"suggestion": "Coba ubah rentang tanggal atau cloud threshold"},
+            extra={"suggestion": "Coba ubah rentang tanggal, cloud threshold, atau ganti provider satelit"},
         )
 
-    results = {"collection_size": size, "date_range": {"start": start_date, "end": end_date}, "cloud_threshold": cloud_threshold, "scale": veg_scale, "indices": {}}
+    results = {
+        "collection_size": size,
+        "date_range": {"start": start_date, "end": end_date},
+        "cloud_threshold": cloud_threshold,
+        "scale": veg_scale,
+        "data_quality": {"valid_pixel_pct": valid_pixel_pct, "images_used": size},
+        "satellite": get_satellite_meta(db, satellite),
+        "indices": {},
+    }
 
     rgb_tile = get_tile_url(median_composite, {"bands": ["B4", "B3", "B2"], "min": 0, "max": 0.3}, "RGB")
     if rgb_tile:
@@ -323,14 +372,15 @@ def analyze_vegetation_compare(db, data: dict) -> dict:
     end_month = int(data.get("end_month", 9))
     cloud_threshold = int(data.get("cloud_threshold", config_service.get_analysis_defaults(db)["cloud_threshold"]))
     veg_scale = int(data.get("scale", config_service.get_analysis_defaults(db)["veg_scale"]))
+    satellite = resolve_satellite(data.get("satellite"))
 
     aoi = create_geometry_from_payload(data["aoi"])
-    composite, _, start_date, end_date, size = _s2_composite_for_period(aoi, year, start_month, end_month, cloud_threshold)
+    composite, _, start_date, end_date, size, _valid_pct = _composite_for_period(db, aoi, year, start_month, end_month, cloud_threshold, satellite)
     if composite is None:
         raise AnalysisError(
-            "Tidak ada citra Sentinel-2 untuk periode ini",
+            f"Tidak ada citra {get_satellite_meta(db, satellite)['name']} untuk periode ini",
             404,
-            extra={"suggestion": "Coba ubah rentang tanggal atau cloud threshold"},
+            extra={"suggestion": "Coba ubah rentang tanggal, cloud threshold, atau ganti provider satelit"},
         )
 
     available_bands = composite.bandNames().getInfo()
@@ -366,6 +416,7 @@ def analyze_vegetation_compare(db, data: dict) -> dict:
         "index_a": index_a, "index_b": index_b,
         "threshold_a": thr_a, "threshold_b": thr_b,
         "date_range": {"start": start_date, "end": end_date},
+        "satellite": get_satellite_meta(db, satellite),
         "total_area_ha": round(total, 2),
         "quadrants": quadrants,
         "insight": generate_comparison_narrative(index_a, index_b, quadrants),
@@ -382,27 +433,166 @@ def analyze_timeseries(db, data: dict) -> dict:
     interval = data.get("interval", "monthly")
     cloud_threshold = int(data.get("cloud_threshold", config_service.get_analysis_defaults(db)["cloud_threshold"]))
     veg_scale = int(data.get("scale", config_service.get_analysis_defaults(db)["veg_scale"]))
+    satellite = resolve_satellite(data.get("satellite"))
     aoi = create_geometry_from_payload(data["aoi"])
 
-    date_ranges = []
-    if interval == "monthly":
-        for month in range(1, 13):
-            s, e = build_date_range(year, month, month)
-            date_ranges.append({"start": s, "end": e, "label": f"{year}-{month:02d}"})
+    months = list(range(1, 13)) if interval == "monthly" else []
 
     time_series = []
-    for period in date_ranges:
-        s2 = (
-            ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
-            .filterBounds(aoi).filterDate(period["start"], period["end"])
-            .filter(ee.Filter.lte("CLOUDY_PIXEL_PERCENTAGE", cloud_threshold))
-            .map(mask_s2_clouds)
-        )
-        if s2.size().getInfo() > 0:
-            stats = calculate_index(s2.median(), index_name).reduceRegion(
+    for month in months:
+        label = f"{year}-{month:02d}"
+        composite, _, _, _, size, _valid_pct = _composite_for_period(db, aoi, year, month, month, cloud_threshold, satellite)
+        if composite is not None:
+            stats = calculate_index(composite, index_name).reduceRegion(
                 reducer=ee.Reducer.mean(), geometry=aoi, scale=veg_scale,
                 maxPixels=config_service.get_analysis_defaults(db)["max_pixels"], bestEffort=True
             ).getInfo()
-            time_series.append({"period": period["label"], "value": stats.get(index_name)})
+            time_series.append({"period": label, "value": stats.get(index_name)})
 
-    return {"index": index_name, "year": year, "interval": interval, "scale": veg_scale, "data": time_series}
+    return {
+        "index": index_name, "year": year, "interval": interval, "scale": veg_scale,
+        "satellite": get_satellite_meta(db, satellite),
+        "data": time_series,
+    }
+
+
+def analyze_vegetation_change_hotspots(db, data: dict) -> dict:
+    """Vectorize significant vegetation-index change between two periods into
+    ranked polygons - the vegetation-side counterpart to
+    landcover_service.analyze_landcover_hotspots, needed for the Geo-AI
+    Assistant's `find_hotspots(metric="vegetation_change")` tool (P0 hotspot
+    search, spec section 4).
+
+    Unlike the landcover version (categorical class-transition labels packed
+    into an integer band), this is a continuous index difference: build the
+    index for both periods, threshold the (to - from) delta, and vectorize
+    the resulting binary mask directly via reduceToVectors - no label-packing
+    trick needed since there's only one "changed" class here. Per-polygon
+    mean index change is attached afterwards via reduceRegions, same pattern
+    analyze_landcover_hotspots uses for its Dynamic World confidence band.
+    """
+    if not data.get("aoi"):
+        raise AnalysisError("aoi is required", 400)
+
+    index_name = data.get("index", "NDVI")
+    if index_name not in VEGETATION_INDICES:
+        raise AnalysisError(f"Unknown vegetation index: {index_name}", 400)
+
+    from_year = data.get("from_year", data.get("start_year"))
+    to_year = data.get("to_year", data.get("end_year"))
+    if from_year is None or to_year is None:
+        raise AnalysisError("from_year and to_year are required", 400)
+    from_year, to_year = int(from_year), int(to_year)
+
+    start_month = int(data.get("start_month", 6))
+    end_month = int(data.get("end_month", 9))
+    cloud_threshold = int(data.get("cloud_threshold", config_service.get_analysis_defaults(db)["cloud_threshold"]))
+    satellite = resolve_satellite(data.get("satellite"))
+
+    # decline = index dropped (vegetation loss, the common case); increase = index rose;
+    # any = |change| beyond threshold either direction.
+    direction = data.get("direction", "decline")
+    default_threshold = 0.2 if direction != "decline" else -0.2
+    threshold = float(data.get("threshold", default_threshold))
+
+    veg_scale = int(data.get("scale", config_service.get_analysis_defaults(db)["veg_scale"]))
+    # reduceToVectors is a full connected-component pass (not a simple reduceRegion) -
+    # default to coarser-than-native scale unless the caller overrides it, same
+    # tractability reasoning as analyze_landcover_hotspots's vector_scale default.
+    vector_scale = int(data.get("vector_scale", veg_scale * 5))
+    min_area_ha = max(float(data.get("min_area_ha", 1.0)), 0.0)
+    top_n = min(max(int(data.get("top_n", 20)), 1), 100)
+
+    aoi = create_geometry_from_payload(data["aoi"])
+
+    from_composite, _, from_start, from_end, from_size, _from_valid_pct = _composite_for_period(
+        db, aoi, from_year, start_month, end_month, cloud_threshold, satellite
+    )
+    to_composite, _, to_start, to_end, to_size, _to_valid_pct = _composite_for_period(
+        db, aoi, to_year, start_month, end_month, cloud_threshold, satellite
+    )
+    if from_composite is None or to_composite is None:
+        raise AnalysisError(
+            f"Tidak ada citra {get_satellite_meta(db, satellite)['name']} untuk salah satu periode.",
+            404,
+            extra={"suggestion": "Coba ubah rentang bulan atau cloud threshold."},
+        )
+
+    from_bands = from_composite.bandNames().getInfo()
+    to_bands = to_composite.bandNames().getInfo()
+    if not available_bands_for_index(index_name, from_bands) or not available_bands_for_index(index_name, to_bands):
+        raise AnalysisError(f"Band untuk {index_name} tidak tersedia pada sumber citra ini", 422)
+
+    from_index = calculate_index(from_composite, index_name)
+    to_index = calculate_index(to_composite, index_name)
+    change = to_index.subtract(from_index).rename("change")
+
+    if direction == "decline":
+        changed_mask = change.lte(threshold)
+    elif direction == "increase":
+        changed_mask = change.gte(threshold)
+    else:
+        changed_mask = change.abs().gte(abs(threshold))
+
+    changed = changed_mask.selfMask().rename("changed")
+
+    vectors = changed.reduceToVectors(
+        geometry=aoi,
+        scale=vector_scale,
+        geometryType="polygon",
+        eightConnected=True,
+        reducer=ee.Reducer.countEvery(),
+        maxPixels=int(get_settings().max_pixels),
+        bestEffort=True,
+        tileScale=4,
+    )
+    vectors = vectors.map(lambda f: f.set("area_ha", f.geometry().area(1).divide(10000)))
+    vectors = vectors.filter(ee.Filter.gte("area_ha", min_area_ha)).sort("area_ha", False).limit(top_n)
+    vectors = change.reduceRegions(collection=vectors, reducer=ee.Reducer.mean(), scale=veg_scale, tileScale=4)
+
+    try:
+        raw_features = vectors.getInfo().get("features", [])
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Vegetation hotspot vectorization failed: {e}")
+        raise AnalysisError(
+            "Vectorisasi hotspot vegetasi gagal (kemungkinan AOI terlalu besar untuk skala ini) - coba perbesar `scale`/`vector_scale` atau perkecil AOI.",
+            422,
+        )
+
+    hotspots = []
+    for f in raw_features:
+        props = f.get("properties", {})
+        geom = f.get("geometry")
+        if not geom:
+            continue
+        centroid = None
+        try:
+            ring = geom["coordinates"][0] if geom["type"] == "Polygon" else geom["coordinates"][0][0]
+            centroid = [round(sum(c[0] for c in ring) / len(ring), 6), round(sum(c[1] for c in ring) / len(ring), 6)]
+        except Exception:  # noqa: BLE001
+            pass
+        mean_change = props.get("mean")
+        hotspots.append({
+            "area_ha": round(float(props.get("area_ha", 0)), 2),
+            "index": index_name,
+            "index_change": round(float(mean_change), 4) if mean_change is not None else None,
+            "index_change_percent": round(float(mean_change) * 100, 1) if mean_change is not None else None,
+            "centroid": centroid,
+            "geometry": geom,
+        })
+
+    return {
+        "index": index_name,
+        "direction": direction,
+        "threshold": threshold,
+        "from_year": from_year,
+        "to_year": to_year,
+        "date_range_from": {"start": from_start, "end": from_end},
+        "date_range_to": {"start": to_start, "end": to_end},
+        "satellite": get_satellite_meta(db, satellite),
+        "resolution": f"{veg_scale}m",
+        "vector_scale": vector_scale,
+        "min_area_ha": min_area_ha,
+        "hotspot_count": len(hotspots),
+        "hotspots": hotspots,
+    }

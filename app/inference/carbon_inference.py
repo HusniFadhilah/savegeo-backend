@@ -12,6 +12,7 @@ import logging
 
 from app.inference.carbon_model import CarbonEstimationModel
 from app.inference.model_registry import ModelRegistry
+from app.services.gee_common import build_date_range
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,12 @@ class CarbonInferenceEngine:
         self.model = CarbonEstimationModel.load(model_path)
         self.last_s2_image_count = None
         self._s2_image_counts = []
+        # Data-quality signals for the last composite built (see _safe_s2_composite):
+        # valid_pct = % of AOI covered by cloud-free pixels in the *primary* date-range
+        # composite, before any gap-fill; gap_filled = whether the wider +/-90 day
+        # fallback window actually had to patch holes left by the primary composite.
+        self.last_valid_pixel_pct = None
+        self.last_gap_filled = None
         logger.info("Inference engine ready")
 
     def _get_expected_features(self) -> list:
@@ -139,6 +146,21 @@ class CarbonInferenceEngine:
         self.last_s2_image_count = sum(self._s2_image_counts)
         composite = collection.median().multiply(0.0001).select(S2_BANDS)
 
+        # Data-quality signal: what fraction of the AOI actually has a
+        # cloud-free pixel in the *primary* date-range composite, before any
+        # gap-fill patches holes with a wider window/looser threshold. A low
+        # number here means most of the final result came from the fallback
+        # window, not the requested date range - worth surfacing even though
+        # the pixel itself won't look "missing" after unmask() below.
+        try:
+            coverage = composite.select(S2_BANDS[0]).mask().reduceRegion(
+                reducer=ee.Reducer.mean(), geometry=roi, scale=100, bestEffort=True, maxPixels=int(1e8), tileScale=4,
+            ).getInfo()
+            self.last_valid_pixel_pct = round(float(coverage.get(S2_BANDS[0], 0) or 0) * 100, 1)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Valid-pixel coverage check failed: {e}")
+            self.last_valid_pixel_pct = None
+
         # Pixels covered by cloud/shadow/cirrus in every single scene within
         # [start_date, end_date] stay masked after the median reduction —
         # they render as a transparent hole in the result tile (the basemap
@@ -146,6 +168,7 @@ class CarbonInferenceEngine:
         # Fill just those null pixels from a wider +/-90 day window with a
         # relaxed cloud threshold; every pixel the primary composite already
         # has a valid value for is left untouched.
+        self.last_gap_filled = False
         try:
             wide_start = (datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=90)).strftime("%Y-%m-%d")
             wide_end = (datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=90)).strftime("%Y-%m-%d")
@@ -153,6 +176,7 @@ class CarbonInferenceEngine:
             if wide_collection.size().getInfo() > 0:
                 wide_composite = wide_collection.median().multiply(0.0001).select(S2_BANDS)
                 composite = composite.unmask(wide_composite)
+                self.last_gap_filled = self.last_valid_pixel_pct is not None and self.last_valid_pixel_pct < 99.5
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Gap-fill composite failed, keeping primary composite as-is: {e}")
 
@@ -183,8 +207,12 @@ class CarbonInferenceEngine:
 
     def _build_standard_feature_stack(self, roi: ee.Geometry, year: int, start_month: int,
                                       end_month: int, cloud_threshold: int) -> ee.Image:
-        start_date = f'{year}-{start_month:02d}-01'
-        end_date = f'{year}-{end_month:02d}-28'
+        # Exclusive end date (first day of the month after end_month) so the
+        # full end_month is included regardless of whether it has 28-31 days -
+        # ee.ImageCollection.filterDate()'s upper bound is exclusive, and the
+        # old `f'{end_month:02d}-28'` silently dropped the last 0-3 days of
+        # any longer month from every composite (found via user audit).
+        start_date, end_date = build_date_range(year, start_month, end_month)
         sen2 = self._safe_s2_composite(roi, start_date, end_date, cloud_threshold)
         return sen2.addBands(self._add_s2_indices(sen2))
 
@@ -243,8 +271,12 @@ class CarbonInferenceEngine:
         _build_s2_dem_landcover_feature_stack (no TPI/TRI/local-stats/landcover there) by
         the TPI/TRI/elevation_local_mean markers checked in _build_predictors.
         """
-        start_date = f'{year}-{start_month:02d}-01'
-        end_date = f'{year}-{end_month:02d}-28'
+        # Exclusive end date (first day of the month after end_month) so the
+        # full end_month is included regardless of whether it has 28-31 days -
+        # ee.ImageCollection.filterDate()'s upper bound is exclusive, and the
+        # old `f'{end_month:02d}-28'` silently dropped the last 0-3 days of
+        # any longer month from every composite (found via user audit).
+        start_date, end_date = build_date_range(year, start_month, end_month)
         sen2 = self._safe_s2_composite(roi, start_date, end_date, cloud_threshold)
         stack = sen2.addBands(self._add_s2_indices(sen2))
 
@@ -288,8 +320,12 @@ class CarbonInferenceEngine:
         Cloud masking should only improve pixel quality relative to training, not harm
         it, but is worth knowing if scores look off for very cloudy AOIs/periods.
         """
-        start_date = f'{year}-{start_month:02d}-01'
-        end_date = f'{year}-{end_month:02d}-28'
+        # Exclusive end date (first day of the month after end_month) so the
+        # full end_month is included regardless of whether it has 28-31 days -
+        # ee.ImageCollection.filterDate()'s upper bound is exclusive, and the
+        # old `f'{end_month:02d}-28'` silently dropped the last 0-3 days of
+        # any longer month from every composite (found via user audit).
+        start_date, end_date = build_date_range(year, start_month, end_month)
         sen2 = self._safe_s2_composite(roi, start_date, end_date, cloud_threshold)
         stack = sen2.addBands(self._add_s2_indices(sen2))
 
@@ -538,9 +574,9 @@ class CarbonInferenceEngine:
         #    - scene-level filter removes obviously cloudy acquisitions fast
         #    - SCL pixel mask then removes residual cloud / shadow pixels
         # ------------------------------------------------------------------
-        start_date = f'{year}-{start_month:02d}-01'
-        end_date   = f'{year}-{end_month:02d}-28'
-    
+        # Exclusive end date - see _build_standard_feature_stack for why.
+        start_date, end_date = build_date_range(year, start_month, end_month)
+
         sen2_collection = (
             ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
             .filterBounds(roi)

@@ -19,6 +19,17 @@ PERMISSIONS = [
     ("dataset.read", "View dataset catalog overrides"),
     ("dataset.write", "Toggle/edit dataset catalog overrides"),
     ("audit.read", "View audit log"),
+    ("disaster.create", "Create disaster events"),
+    ("disaster.update", "Edit disaster event metadata"),
+    ("disaster.delete", "Delete disaster events"),
+    ("disaster.aoi.write", "Create/update disaster event AOI"),
+    ("disaster.imagery.write", "Configure pre/post satellite imagery"),
+    ("disaster.analysis.configure", "Attach analysis models to a disaster event"),
+    ("disaster.analysis.run", "Run/re-run an analysis"),
+    ("disaster.analysis.publish", "Publish an analysis result"),
+    ("disaster.analysis.unpublish", "Unpublish an analysis result"),
+    ("disaster.result.write", "Edit analysis result metadata"),
+    ("disaster.result.delete", "Delete an analysis result"),
 ]
 
 ROLES = [

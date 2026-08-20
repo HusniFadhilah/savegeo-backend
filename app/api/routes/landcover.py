@@ -66,3 +66,19 @@ async def analyze_landcover_change_map(request: Request):
     except Exception as e:  # noqa: BLE001
         logger.error(f"Land cover change map error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/analyze/landcover-hotspots", dependencies=[Depends(require_ee)])
+async def analyze_landcover_hotspots(request: Request):
+    """Ranked, vectorized pixel-change polygons (P0 hotspot detection) - see
+    landcover_service.analyze_landcover_hotspots for the full contract."""
+    data = await request.json()
+    try:
+        return landcover_service.analyze_landcover_hotspots(data)
+    except AnalysisError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e))
+    except ee.EEException as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Land cover hotspot error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

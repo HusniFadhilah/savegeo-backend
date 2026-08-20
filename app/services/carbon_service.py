@@ -134,7 +134,10 @@ def get_carbon_dataset_list(
 # GEE-heavy analysis helpers / route-body logic
 # ─────────────────────────────────────────────
 
-def calculate_carbon_summary_for_year(db, inference_engine, roi, year, start_month, end_month, cloud_threshold, carbon_scale):
+def calculate_carbon_summary_for_year(
+    db, inference_engine, roi, year, start_month, end_month, cloud_threshold, carbon_scale,
+    include_tile: bool = False, vis_params: Optional[dict] = None,
+):
     settings = get_settings()
     analysis_defaults = config_service.get_analysis_defaults(db)
     meta = inference_engine.model.metadata
@@ -145,14 +148,15 @@ def calculate_carbon_summary_for_year(db, inference_engine, roi, year, start_mon
 
     area_ha = geometry_area_ha(roi)
     co2_factor = analysis_defaults["carbon_co2_factor"]
+    tile_url = None
 
     if gee_algo_type in ("linear_expression", "native_classifier"):
         carbon_image = inference_engine.predict_for_region(
             roi=roi, year=year,
             start_month=start_month, end_month=end_month,
             cloud_threshold=cloud_threshold,
-        )
-        stats = carbon_image.clip(roi).reduceRegion(
+        ).clip(roi)
+        stats = carbon_image.reduceRegion(
             reducer=ee.Reducer.mean()
                 .combine(ee.Reducer.stdDev(), "", True)
                 .combine(ee.Reducer.min(), "", True)
@@ -167,6 +171,21 @@ def calculate_carbon_summary_for_year(db, inference_engine, roi, year, start_mon
         std_dev = stats.get("carbon_estimated_stdDev", 0) or 0
         min_carbon = stats.get("carbon_estimated_min", 0) or 0
         max_carbon = stats.get("carbon_estimated_max", 0) or 0
+
+        # Timelapse playback needs a tile per year, not just scalars - only
+        # generated on request (include_tile) since getMapId has real latency
+        # and a chart-only caller (analyze_carbon_delta's default) doesn't need it.
+        if include_tile:
+            _vis = vis_params or {
+                "min": analysis_defaults["carbon_vis_min"],
+                "max": analysis_defaults["carbon_vis_max"],
+                "palette": analysis_defaults["carbon_vis_palette"],
+            }
+            try:
+                map_id = carbon_image.visualize(**_gee_visualize_params(_vis)).getMapId()
+                tile_url = map_id["tile_fetcher"].url_format
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"Timelapse tile generation failed for year {year}: {e}")
     else:
         sampled = inference_engine.predict_for_region_sampled(
             roi=roi, year=year,
@@ -178,6 +197,7 @@ def calculate_carbon_summary_for_year(db, inference_engine, roi, year, start_mon
         std_dev = sampled["std"]
         min_carbon = sampled["min"]
         max_carbon = sampled["max"]
+        # No raster to tile for sampled/server-side-only models (point predictions only).
 
     total_carbon = mean_carbon * area_ha
     return {
@@ -189,6 +209,7 @@ def calculate_carbon_summary_for_year(db, inference_engine, roi, year, start_mon
         "area_ha": round(area_ha, 2),
         "total_carbon_tons": round(total_carbon, 2),
         "carbon_dioxide_equivalent_tons": round(total_carbon * co2_factor, 2),
+        "tile_url": tile_url,
     }
 
 
@@ -497,6 +518,10 @@ def analyze_carbon(db: Session, data: dict) -> dict:
 
     target_unit = _compat_meta.get("target_unit", "Mg/ha")
 
+    _stat_mean = stats_out.get("mean") or 0
+    _stat_std = stats_out.get("std_dev") or 0
+    _cv_pct = round((_stat_std / _stat_mean) * 100, 1) if _stat_mean else None
+
     return {
         "carbon_estimated": {
             "tile_url": estimated_tile_url,
@@ -533,6 +558,7 @@ def analyze_carbon(db: Session, data: dict) -> dict:
         },
         "model_info": {
             "model_name": inference_engine.model_name,
+            "model_version": _db_model.version if _db_model else None,
             "algorithm": model_info["algorithm"],
             "trained_at": model_info.get("trained_at"),
             "training_samples": model_info.get("n_samples"),
@@ -544,6 +570,21 @@ def analyze_carbon(db: Session, data: dict) -> dict:
             "images_used": inference_engine.last_s2_image_count,
             "co2_conversion_factor": co2_factor,
             "gee_deployable": is_gee_deployable,
+        },
+        # P0 "confidence & data quality": cv_metrics above is the model's own
+        # training-time accuracy (R²/RMSE, static per model); this block is
+        # per-run signal about *this specific* AOI/date-range composite.
+        # `coefficient_of_variation_pct` describes spatial variability inside
+        # the AOI, not a statistical confidence interval - reporting a formal
+        # CI would falsely assume spatially independent pixels, which isn't
+        # true for imagery (neighboring pixels are strongly correlated).
+        "data_quality": {
+            "valid_pixel_pct": inference_engine.last_valid_pixel_pct,
+            "gap_filled": inference_engine.last_gap_filled,
+            "images_used": inference_engine.last_s2_image_count,
+            "coefficient_of_variation_pct": _cv_pct,
+            "model_r2": (model_info.get("cv_metrics") or {}).get("r2_mean"),
+            "model_rmse": (model_info.get("cv_metrics") or {}).get("rmse_mean"),
         },
     }
 
@@ -700,6 +741,16 @@ def analyze_carbon_delta(db: Session, data: dict) -> dict:
     inference_engine = CarbonInferenceEngine(model_name=model_name, model_path=model_path)
     model_info = inference_engine.get_model_info()
 
+    # Timelapse tiles are opt-in - each one costs a real getMapId() round trip
+    # per year, unnecessary for a chart-only caller.
+    include_tiles = bool(data.get("include_tiles", False))
+    analysis_defaults = config_service.get_analysis_defaults(db)
+    tile_vis_params = {
+        "min": int(data.get("vis_min", analysis_defaults["carbon_vis_min"])),
+        "max": int(data.get("vis_max", analysis_defaults["carbon_vis_max"])),
+        "palette": data.get("vis_palette", analysis_defaults["carbon_vis_palette"]),
+    }
+
     years = list(range(start_year, end_year + 1, interval))
     if years[-1] != end_year:
         years.append(end_year)
@@ -715,6 +766,8 @@ def analyze_carbon_delta(db: Session, data: dict) -> dict:
             end_month=end_month,
             cloud_threshold=cloud_threshold,
             carbon_scale=carbon_scale,
+            include_tile=include_tiles,
+            vis_params=tile_vis_params,
         ))
 
     deltas = []

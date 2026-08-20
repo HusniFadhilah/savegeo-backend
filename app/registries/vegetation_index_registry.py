@@ -36,10 +36,14 @@ INDEX_CATEGORIES: Dict[str, Dict[str, str]] = {
 # classification: ascending bins, last bin's "max" is None (open-ended)
 # polarity: "positive" = higher value is healthier/better; "negative" = higher is worse
 # comparison_threshold: value used by the compare endpoint to split "baik/tinggi" vs "rendah"
-# landsat_compatible: whether an equivalent formula exists on Landsat OLI bands
-#                      (informational only — this backend currently only computes from
-#                      Sentinel-2 S2_SR_HARMONIZED; used for the "sensor tidak punya band
-#                      ini" fallback message, not to actually switch sensors)
+# landsat_compatible: whether an equivalent formula exists on Landsat OLI bands.
+#                      Sensor selection IS live (see satellite_provider_registry.py +
+#                      vegetation_service._composite_for_period / gee_common.standardize_bands) —
+#                      every composite gets renamed to these canonical Sentinel-2-style band
+#                      ids regardless of source sensor, so this flag is now mostly documentation;
+#                      the actual per-index gate is available_bands_for_index() below, which
+#                      checks the real (post-rename) band list and correctly skips indices a
+#                      sensor can't support (e.g. red-edge indices on Landsat, which has none).
 # ─────────────────────────────────────────────
 VEGETATION_INDEX_CATALOG: Dict[str, Dict[str, Any]] = {
     "NDVI": {

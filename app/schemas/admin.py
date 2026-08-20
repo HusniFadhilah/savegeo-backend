@@ -31,6 +31,26 @@ class ConfigResetRequest(BaseModel):
     key: Optional[str] = None
 
 
+class SatelliteProviderUpdateRequest(BaseModel):
+    """Every field optional - PUT is a partial upsert onto the satellite_providers
+    overlay row (app/db/models/satellite_provider_entry.py). A null/omitted
+    field leaves that field falling back to the static registry default."""
+    name: Optional[str] = None
+    provider: Optional[str] = None
+    resolution_label: Optional[str] = None
+    description: Optional[str] = None
+    is_active: Optional[bool] = None
+    display_order: Optional[int] = None
+    gee_collection: Optional[str] = None
+    band_role_map: Optional[dict] = None
+    resolution_m: Optional[int] = None
+    revisit_days: Optional[int] = None
+    swath_km: Optional[int] = None
+    launch: Optional[str] = None
+    start_year: Optional[int] = None
+    bands_available: Optional[list] = None
+
+
 class ModelUpdateRequest(BaseModel):
     display_name: Optional[str] = None
     algorithm: Optional[str] = None

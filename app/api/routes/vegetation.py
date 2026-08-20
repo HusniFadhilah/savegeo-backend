@@ -15,6 +15,8 @@ from sqlalchemy.orm import Session
 from app.api.deps import require_ee
 from app.db.session import get_db
 from app.registries.vegetation_index_registry import get_catalog_payload
+from app.registries.satellite_provider_registry import DEFAULT_SATELLITE
+from app.repositories.satellite_provider_repo import list_satellites
 from app.services import vegetation_service
 from app.services.gee_common import AnalysisError
 
@@ -25,6 +27,16 @@ logger = logging.getLogger(__name__)
 @router.get("/vegetation/catalog")
 def vegetation_catalog():
     return get_catalog_payload()
+
+
+@router.get("/vegetation/satellites")
+def vegetation_satellites(db: Session = Depends(get_db)):
+    """Catalog of selectable satellite imagery providers - resolution/revisit/
+    spec metadata for the frontend's satellite picker. GEE collection ids stay
+    hardcoded (algorithmic); display metadata + is_active come from the
+    `satellite_providers` DB overlay when present (see satellite_provider_repo.py),
+    falling back to the static registry otherwise - no DB dependency to boot."""
+    return {"satellites": list_satellites(db), "default": DEFAULT_SATELLITE}
 
 
 @router.post("/analyze/vegetation", dependencies=[Depends(require_ee)])
@@ -60,4 +72,21 @@ async def analyze_vegetation_compare(request: Request, db: Session = Depends(get
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:  # noqa: BLE001
         logger.error(f"Vegetation compare error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/analyze/vegetation/change-hotspots", dependencies=[Depends(require_ee)])
+async def analyze_vegetation_change_hotspots(request: Request, db: Session = Depends(get_db)):
+    """Ranked, vectorized vegetation-index change polygons (P0 hotspot detection,
+    Geo-AI Assistant's `find_hotspots(metric="vegetation_change")`) - see
+    vegetation_service.analyze_vegetation_change_hotspots for the full contract."""
+    data = await request.json()
+    try:
+        return vegetation_service.analyze_vegetation_change_hotspots(db, data)
+    except AnalysisError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e))
+    except ee.EEException as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Vegetation change hotspot error: {e}")
         raise HTTPException(status_code=500, detail=str(e))

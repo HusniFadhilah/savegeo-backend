@@ -72,6 +72,70 @@ def geocode(q: str = ""):
     }
 
 
+@router.get("/geocode/search")
+def geocode_search(q: str = "", limit: int = 8):
+    """Multi-result geocoding for the async region/address search box (AOI
+    'Seluruh Indonesia' tab) - distinct from /geocode above, which returns a
+    single best match + up to 2 alternatives for the chatbot's "fly to this
+    place" flow. This one returns up to `limit` candidates as the user types,
+    restricted to Indonesia, each carrying `geojson` (the real admin-boundary
+    polygon, when Nominatim has one) so the frontend can use actual
+    boundaries instead of just a bounding-box rectangle for a picked region."""
+    q = q.strip()
+    if not q or len(q) < 3:
+        return {"results": []}
+
+    limit = max(1, min(limit, 10))
+    try:
+        r = requests.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={
+                "q": q,
+                "format": "json",
+                "limit": limit,
+                "addressdetails": 1,
+                "polygon_geojson": 1,
+                "countrycodes": "id",
+            },
+            headers={"User-Agent": _UA},
+            timeout=10,
+        )
+        r.raise_for_status()
+        results = r.json()
+    except Exception as e:
+        logger.warning("Nominatim search error: %s", e)
+        raise HTTPException(status_code=502, detail="Layanan pencarian lokasi tidak tersedia. Coba lagi.")
+
+    out = []
+    for d in results:
+        bb = d.get("boundingbox", [])  # [south, north, west, east]
+        bbox = [float(bb[2]), float(bb[0]), float(bb[3]), float(bb[1])] if len(bb) == 4 else None
+        addr = d.get("address", {})
+        # Nominatim's `geojson` can be a Point/LineString for a POI/road, not just
+        # a Polygon/MultiPolygon for an admin area - only pass through the shapes
+        # the frontend can actually use as an AOI, let it fall back to bbox otherwise.
+        gj = d.get("geojson")
+        if gj and gj.get("type") not in ("Polygon", "MultiPolygon"):
+            gj = None
+        out.append({
+            "osm_id": d.get("osm_id"),
+            "lat": float(d["lat"]),
+            "lng": float(d["lon"]),
+            "display_name": d.get("display_name", q),
+            "type": d.get("type", ""),
+            "class_": d.get("class", ""),
+            "bbox": bbox,
+            "geojson": gj,
+            "address_info": {
+                "province": addr.get("state") or addr.get("province") or addr.get("region") or "",
+                "city": addr.get("city") or addr.get("county") or addr.get("municipality") or addr.get("town") or "",
+                "district": addr.get("suburb") or addr.get("city_district") or "",
+                "village": addr.get("village") or addr.get("neighbourhood") or addr.get("quarter") or "",
+            },
+        })
+    return {"results": out}
+
+
 class ParseAoiRequest(BaseModel):
     text: str = ""
     name: Optional[str] = "Custom AOI"
