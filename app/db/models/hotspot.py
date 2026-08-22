@@ -27,7 +27,7 @@ class Hotspot(Base):
     stats: Mapped[dict | None] = mapped_column(JSONB)
     is_published: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
     created_by: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id", ondelete="SET NULL"))
-    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc))
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.UTC))
 
     def to_dict(self) -> dict:
         return {

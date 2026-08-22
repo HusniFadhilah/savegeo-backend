@@ -15,18 +15,16 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Dict, Optional, Tuple
 
 import numpy as np
 
-from app.inference.model_registry import ModelRegistry
 from app.inference.carbon_model import CarbonEstimationModel
+from app.inference.model_registry import ModelRegistry
 from app.providers.feature_engineering_non_gee import build_feature_stack
-from app.providers.local_raster_provider import GridSpec
 
 logger = logging.getLogger(__name__)
 
-BBox = Tuple[float, float, float, float]
+BBox = tuple[float, float, float, float]
 
 
 class LocalCarbonInferenceEngine:
@@ -35,7 +33,7 @@ class LocalCarbonInferenceEngine:
     gee_deployable=False — feature building here never touches ee.Image.
     """
 
-    def __init__(self, model_name: Optional[str] = None, model_path: Optional[str] = None):
+    def __init__(self, model_name: str | None = None, model_path: str | None = None):
         self.registry = ModelRegistry()
         if model_name is None:
             model_name = self.registry.registry.get("default")
@@ -77,7 +75,7 @@ class LocalCarbonInferenceEngine:
         n_samples: int = 2000,
         provider: str = "stac_pc",
         seed: int = 42,
-    ) -> Dict:
+    ) -> dict:
         """Non-GEE analogue of CarbonInferenceEngine.predict_for_region_sampled().
         Same return shape: {mean, std, min, max, n_pixels, unit}."""
         stack = self._build_stack(bbox_lonlat, start_date, end_date, scale, provider)
@@ -147,11 +145,11 @@ class LocalCarbonInferenceEngine:
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        profile = dict(
-            driver="GTiff", height=h, width=w, count=1, dtype="float32",
-            crs=stack.crs, transform=stack.transform, nodata=np.nan,
-            tiled=True, blockxsize=256, blockysize=256, compress="deflate",
-        )
+        profile = {
+            "driver": "GTiff", "height": h, "width": w, "count": 1, "dtype": "float32",
+            "crs": stack.crs, "transform": stack.transform, "nodata": np.nan,
+            "tiled": True, "blockxsize": 256, "blockysize": 256, "compress": "deflate",
+        }
         with rasterio.open(output_path, "w", **profile) as dst:
             for row0 in range(0, h, window_size_px):
                 for col0 in range(0, w, window_size_px):

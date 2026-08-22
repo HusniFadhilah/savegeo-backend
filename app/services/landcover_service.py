@@ -13,9 +13,9 @@ so it is reproduced here rather than imported from
 """
 from __future__ import annotations
 
+import itertools
 import logging
-from datetime import date, datetime, timedelta
-from typing import Optional
+from datetime import UTC, date, datetime, timedelta
 
 import ee
 
@@ -52,7 +52,7 @@ _ESRI_COLLECTION_ID = LAND_COVER_DATASET_OPTIONS.get("ESRI_LandCover", {}).get(
 
 
 def _default_year_max() -> int:
-    return datetime.now().year
+    return datetime.now(UTC).year
 
 
 def clamp_landcover_year(dataset: str, year: int) -> int:
@@ -79,7 +79,7 @@ DW_PROB_BANDS = ["water", "trees", "grass", "flooded_vegetation", "crops", "shru
 _DW_DIAGNOSTIC_CONFIDENCE_THRESHOLD = 0.5
 
 
-def _dw_confidence_stats(dw_collection, aoi, scale: int, threshold: Optional[float]) -> dict:
+def _dw_confidence_stats(dw_collection, aoi, scale: int, threshold: float | None) -> dict:
     """Mean/min confidence + % of pixels below `threshold` (or the 0.5
     diagnostic default) for a Dynamic World collection's per-pixel max class
     probability - computed over the FULL collection before any threshold
@@ -125,7 +125,7 @@ DW_COLLECTION_START_DATE = "2015-06-27"
 _DW_SPARSE_IMAGE_COUNT_THRESHOLD = 5
 
 
-def _dw_coverage_note(start_date: str, end_date_display: str, image_count: Optional[int] = None) -> Optional[str]:
+def _dw_coverage_note(start_date: str, end_date_display: str, image_count: int | None = None) -> str | None:
     """User-facing note when the requested Dynamic World window only
     partially overlaps real image coverage - either it starts before the
     collection's first image (2015-06-27), it extends past today (current-
@@ -140,7 +140,7 @@ def _dw_coverage_note(start_date: str, end_date_display: str, image_count: Optio
         req_end = date.fromisoformat(end_date_display)
     except ValueError:
         return None
-    today = datetime.utcnow().date()
+    today = datetime.now(UTC).date()
     notes = []
     collection_start = date.fromisoformat(DW_COLLECTION_START_DATE)
     is_partial_start = req_start < collection_start
@@ -185,9 +185,9 @@ def get_landcover_image(
     aoi,
     start_month: int = 1,
     end_month: int = 12,
-    dw_probability_threshold: Optional[float] = None,
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
+    dw_probability_threshold: float | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ):
     """Return a single class-label image and effective metadata for a LULC dataset.
 
@@ -431,7 +431,7 @@ def get_landcover_image(
             raise ValueError(
                 f"GLAD_GLCLUC: ee.Image.loadGeoTIFF failed for URI '{uri}'. "
                 f"Verify GCS path is a public COG. Original error: {load_err}"
-            )
+            ) from load_err
         return image, {
             "dataset": dataset,
             "dataset_name": "GLAD Annual Global Land Use/Land Cover",
@@ -481,7 +481,7 @@ def summarize_landcover_classes(dataset: str, image, aoi, lc_scale: int, include
             "area": round(area_ha, 2),
             "percentage": round(area_ha / total_area_ha * 100, 1),
             "color": LAND_COVER_LEGENDS[dataset][class_key]["color"],
-            "pixel_count": int(round(area_ha * 10000 / (lc_scale ** 2))),
+            "pixel_count": round(area_ha * 10000 / (lc_scale ** 2)),
             "class_value": int(class_key),
         }
 
@@ -493,7 +493,7 @@ def landcover_visual_image(dataset: str, image):
     if not legend:
         return image, LAND_COVER_VIS.get(dataset, {"min": 0, "max": 255})
 
-    class_values = [int(value) for value in legend.keys()]
+    class_values = [int(value) for value in legend]
     palette = [legend[str(value)]["color"].replace("#", "") for value in class_values]
     visual_values = list(range(len(class_values)))
     visual = image.select(0).remap(class_values, visual_values).rename("landcover_visual")
@@ -709,8 +709,8 @@ def analyze_landcover_transition(data: dict) -> dict:
             extra={"dataset": dataset, "supports_transition": False},
         )
 
-    start_year = int(data.get("start_year", data.get("year", datetime.now().year - 1)))
-    end_year = int(data.get("end_year", data.get("year", datetime.now().year)))
+    start_year = int(data.get("start_year", data.get("year", datetime.now(UTC).year - 1)))
+    end_year = int(data.get("end_year", data.get("year", datetime.now(UTC).year)))
     if start_year >= end_year:
         raise AnalysisError("start_year harus lebih kecil dari end_year", 400)
 
@@ -735,7 +735,7 @@ def analyze_landcover_transition(data: dict) -> dict:
 
     pairs = []
     class_totals: dict = {}
-    for prev_year, next_year in zip(years[:-1], years[1:]):
+    for prev_year, next_year in itertools.pairwise(years):
         transition_image = images[prev_year].toInt16().multiply(1000).add(images[next_year].toInt16()).rename("transition")
         area_by_transition = (
             ee.Image.pixelArea().divide(10000).rename("area_ha")
@@ -792,7 +792,7 @@ def analyze_landcover_transition(data: dict) -> dict:
                 "to_class": int(to_class),
                 "area": round(area_ha, 2),
                 "percentage": 0,
-                "pixel_count": int(round(area_ha * 10000 / (lc_scale ** 2))),
+                "pixel_count": round(area_ha * 10000 / (lc_scale ** 2)),
                 "from_color": legend[from_class]["color"],
                 "to_color": legend[to_class]["color"],
                 "changed": from_class != to_class,
@@ -1078,7 +1078,7 @@ def analyze_landcover_hotspots(data: dict) -> dict:
         try:
             ring = geom["coordinates"][0] if geom["type"] == "Polygon" else geom["coordinates"][0][0]
             centroid = [round(sum(c[0] for c in ring) / len(ring), 6), round(sum(c[1] for c in ring) / len(ring), 6)]
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001, S110 - centroid is a display nicety; hotspot is still reported without it
             pass
         hotspots.append({
             "area_ha": round(float(props.get("area_ha", 0)), 2),

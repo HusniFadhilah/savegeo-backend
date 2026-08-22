@@ -1,8 +1,6 @@
 """Dataset discovery endpoints: /api/landcover/datasets, /api/datasets, /api/carbon/datasets."""
 from __future__ import annotations
 
-from typing import Optional
-
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
@@ -33,8 +31,8 @@ def list_landcover_datasets():
 
 @router.get("/datasets")
 def list_datasets(
-    module: Optional[str] = None,
-    provider: Optional[str] = None,
+    module: str | None = None,
+    provider: str | None = None,
     include_unavailable: bool = False,
     db: Session = Depends(get_db),
 ):
@@ -47,7 +45,7 @@ def list_datasets(
 
 @router.get("/carbon/datasets")
 def list_carbon_datasets(
-    provider: Optional[str] = None,
+    provider: str | None = None,
     include_unavailable: bool = False,
     db: Session = Depends(get_db),
 ):

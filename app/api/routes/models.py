@@ -1,8 +1,6 @@
 """Public model registry read endpoints (no auth) — /api/models*."""
 from __future__ import annotations
 
-from typing import Optional
-
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -22,10 +20,10 @@ def models_list_legacy(model_type: str = "carbon", db: Session = Depends(get_db)
 
 @router.get("/models")
 def models_list(
-    model_type: Optional[str] = None,
+    model_type: str | None = None,
     include_inactive: bool = False,
-    target_dataset: Optional[str] = None,
-    gee_deployable: Optional[bool] = None,
+    target_dataset: str | None = None,
+    gee_deployable: bool | None = None,
     db: Session = Depends(get_db),
 ):
     query = db.query(UploadedModel)

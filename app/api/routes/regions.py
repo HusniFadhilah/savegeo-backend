@@ -11,7 +11,6 @@ import json
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Optional
 
 import requests
 from fastapi import APIRouter, HTTPException
@@ -99,7 +98,7 @@ def _classify_province_island(name: str) -> str:
 
 
 @router.get("/provinces")
-def get_provinces(island: Optional[str] = None):
+def get_provinces(island: str | None = None):
     try:
         r = requests.get(f"{_base_url()}/province", params={"is_for_dropdown": 1}, timeout=20)
         r.raise_for_status()
@@ -113,7 +112,7 @@ def get_provinces(island: Optional[str] = None):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/cities")
@@ -125,7 +124,7 @@ def get_cities(province_code: str = ""):
         r.raise_for_status()
         return r.json()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/districts")
@@ -137,7 +136,7 @@ def get_districts(city_code: str = ""):
         r.raise_for_status()
         return r.json()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/villages")
@@ -149,7 +148,7 @@ def get_villages(district_code: str = ""):
         r.raise_for_status()
         return r.json()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/geometry")
@@ -167,7 +166,7 @@ def get_region_geometry(endpoint: str = "", code: str = ""):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 def _extract_region_dropdown_items(payload):
@@ -265,7 +264,7 @@ _ENDPOINT_TO_COLUMN = {
 def get_region_children_geometries(
     parent_code: str = "",
     child_endpoint: str = "",
-    parent_endpoint: Optional[str] = None,
+    parent_endpoint: str | None = None,
     limit: int = 10000,
 ):
     if not parent_code or not child_endpoint:
@@ -335,7 +334,7 @@ def get_region_children_geometries(
                     features.extend(child_features)
                     if child_failed:
                         failed.append(child_failed)
-                except Exception as child_error:
+                except Exception as child_error:  # noqa: BLE001 - one child failing shouldn't abort the batch; collected in `failed`
                     failed.append({"name": "unknown", "code": "unknown", "reason": str(child_error)})
 
         response_payload = {
@@ -356,7 +355,7 @@ def get_region_children_geometries(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/islands")

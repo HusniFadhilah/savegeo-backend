@@ -6,7 +6,6 @@ import io
 import json
 import logging
 import zipfile
-from typing import Optional
 
 import requests
 from fastapi import APIRouter, HTTPException, Request
@@ -35,7 +34,7 @@ def geocode(q: str = ""):
         results = r.json()
     except Exception as e:
         logger.warning("Nominatim error: %s", e)
-        raise HTTPException(status_code=502, detail="Layanan geocoding tidak tersedia. Coba lagi.")
+        raise HTTPException(status_code=502, detail="Layanan geocoding tidak tersedia. Coba lagi.") from e
 
     if not results:
         raise HTTPException(status_code=404, detail=f"Lokasi {q!r} tidak ditemukan.")
@@ -104,7 +103,7 @@ def geocode_search(q: str = "", limit: int = 8):
         results = r.json()
     except Exception as e:
         logger.warning("Nominatim search error: %s", e)
-        raise HTTPException(status_code=502, detail="Layanan pencarian lokasi tidak tersedia. Coba lagi.")
+        raise HTTPException(status_code=502, detail="Layanan pencarian lokasi tidak tersedia. Coba lagi.") from e
 
     out = []
     for d in results:
@@ -138,7 +137,7 @@ def geocode_search(q: str = "", limit: int = 8):
 
 class ParseAoiRequest(BaseModel):
     text: str = ""
-    name: Optional[str] = "Custom AOI"
+    name: str | None = "Custom AOI"
 
 
 @router.post("/parse_aoi")
@@ -186,7 +185,7 @@ async def convert_shp(request: Request):
     except ImportError:
         raise HTTPException(status_code=500, detail="pyshp tidak terinstall. Jalankan: pip install pyshp")
 
-    zip_bytes: Optional[bytes] = None
+    zip_bytes: bytes | None = None
     original_name = "shapefile"
     content_type = request.headers.get("content-type", "")
 
@@ -205,8 +204,8 @@ async def convert_shp(request: Request):
         original_name = data.get("name", "shapefile")
         try:
             zip_bytes = base64.b64decode(b64)
-        except Exception:
-            raise HTTPException(status_code=400, detail="zip_b64 tidak valid base64.")
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="zip_b64 tidak valid base64.") from exc
 
     if len(zip_bytes) > 50 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="File terlalu besar (maks 50 MB).")
@@ -248,7 +247,7 @@ async def convert_shp(request: Request):
             kwargs["shx"] = shx_buf
         sf = shapefile.Reader(**kwargs)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Gagal membaca shapefile: {e}")
+        raise HTTPException(status_code=400, detail=f"Gagal membaca shapefile: {e}") from e
 
     try:
         fields = [f[0] for f in sf.fields[1:]]
@@ -259,7 +258,7 @@ async def convert_shp(request: Request):
             props = {k: (v.decode("utf-8", "replace") if isinstance(v, bytes) else v) for k, v in props.items()}
             features.append({"type": "Feature", "geometry": geom, "properties": props})
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Gagal konversi ke GeoJSON: {e}")
+        raise HTTPException(status_code=500, detail=f"Gagal konversi ke GeoJSON: {e}") from e
 
     if not features:
         raise HTTPException(status_code=400, detail="Shapefile tidak memiliki feature.")

@@ -8,22 +8,19 @@ Discovery helpers ported from legacy `app.py::get_carbon_dataset_list` /
 """
 from __future__ import annotations
 
-from app.services import config_service
+import itertools
 import json
 import logging
-from datetime import datetime
-from typing import Optional
+from datetime import UTC, datetime
 
 import ee
 from sqlalchemy.orm import Session
 
-from app.core.config import get_settings
 from app.db.models.uploaded_model import UploadedModel
 from app.inference.carbon_inference import CarbonInferenceEngine
 from app.inference.carbon_inference_local import LocalCarbonInferenceEngine
 from app.providers.external_carbon_provider import ExternalRasterProvider
 from app.registries import model_compatibility
-from app.repositories import dataset_repo
 from app.registries.carbon_dataset_registry import (
     CARBON_ARCGIS_REGISTRY,
     CARBON_DATASET_REGISTRY,
@@ -37,7 +34,9 @@ from app.registries.carbon_dataset_registry import (
     load_carbon_reference_ee,
     load_external_carbon_reference_ee,
 )
+from app.repositories import dataset_repo
 from app.repositories.uploaded_model_repo import get_active_model_path
+from app.services import config_service
 from app.services.arcgis_helpers import (
     _arcgis_carbon_reference_stats,
     _estimated_carbon_vis_params,
@@ -67,7 +66,7 @@ def active_carbon_model_compatibility(db: Session) -> dict[str, list[str]]:
 
 
 def get_carbon_dataset_list(
-    db: Session, provider: Optional[str] = None, require_model: bool = True
+    db: Session, provider: str | None = None, require_model: bool = True
 ) -> list[dict]:
     """Return carbon reference datasets suitable for analysis dropdowns.
 
@@ -137,9 +136,8 @@ def get_carbon_dataset_list(
 
 def calculate_carbon_summary_for_year(
     db, inference_engine, roi, year, start_month, end_month, cloud_threshold, carbon_scale,
-    include_tile: bool = False, vis_params: Optional[dict] = None,
+    include_tile: bool = False, vis_params: dict | None = None,
 ):
-    settings = get_settings()
     analysis_defaults = config_service.get_analysis_defaults(db)
     meta = inference_engine.model.metadata
     gee_algo_type = meta.get("gee_algorithm_type") or (
@@ -226,8 +224,6 @@ def analyze_carbon(db: Session, data: dict) -> dict:
     if "aoi" not in data:
         raise AnalysisError("Missing required field: aoi", 400)
 
-    settings = get_settings()
-
     year = int(data.get("year"))
     start_month = int(data.get("start_month"))
     end_month = int(data.get("end_month"))
@@ -250,7 +246,7 @@ def analyze_carbon(db: Session, data: dict) -> dict:
     # live: requesting 2015/2016 returns zero images for every AOI tried.
     # 2015/2016 used to pass this check and fail confusingly deep inside GEE
     # processing instead; reject upfront with a clear reason.
-    year_min, year_max = 2017, datetime.now().year
+    year_min, year_max = 2017, datetime.now(UTC).year
     if not (year_min <= year <= year_max):
         raise AnalysisError(
             f"Year harus antara {year_min}-{year_max} (Sentinel-2 Surface Reflectance belum tersedia sebelum {year_min})",
@@ -636,7 +632,6 @@ def analyze_carbon_local(db: Session, data: dict) -> dict:
     import time as _time
 
     _t0 = _time.perf_counter()
-    settings = get_settings()
 
     if "aoi" not in data:
         raise AnalysisError("Missing required field: aoi", 400)
@@ -740,11 +735,10 @@ def analyze_carbon_local(db: Session, data: dict) -> dict:
 
 
 def analyze_carbon_delta(db: Session, data: dict) -> dict:
-    settings = get_settings()
     if "aoi" not in data:
         raise AnalysisError("Missing required field: aoi", 400)
 
-    year_max_default = datetime.now().year
+    year_max_default = datetime.now(UTC).year
     start_year = int(data.get("start_year", year_max_default - 1))
     end_year = int(data.get("end_year", year_max_default))
     interval = max(1, int(data.get("interval", 1)))
@@ -802,7 +796,7 @@ def analyze_carbon_delta(db: Session, data: dict) -> dict:
         ))
 
     deltas = []
-    for previous, current in zip(series[:-1], series[1:]):
+    for previous, current in itertools.pairwise(series):
         total_delta = current["total_carbon_tons"] - previous["total_carbon_tons"]
         density_delta = current["mean_density"] - previous["mean_density"]
         co2_delta = current["carbon_dioxide_equivalent_tons"] - previous["carbon_dioxide_equivalent_tons"]

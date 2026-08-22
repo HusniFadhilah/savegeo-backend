@@ -3,8 +3,6 @@ model_compatibility.py — Model-dataset compatibility helpers.
 
 See: backend/docs/model-registry-strategy.md
 """
-from typing import Dict, List, Optional
-
 
 # Conservative fallback for legacy models whose name clearly indicates WCMC training.
 WCMC_FALLBACK_METADATA = {
@@ -25,7 +23,7 @@ UNKNOWN_FALLBACK_METADATA = {
 }
 
 
-def backfill_legacy_metadata(metadata: Optional[Dict], model_name: str = "") -> Dict:
+def backfill_legacy_metadata(metadata: dict | None, model_name: str = "") -> dict:
     """
     Conservatively patch metadata for models missing target_dataset_key.
 
@@ -49,7 +47,7 @@ def backfill_legacy_metadata(metadata: Optional[Dict], model_name: str = "") -> 
     return {**patch, **metadata}
 
 
-def get_compatible_datasets(model_metadata: Dict) -> List[str]:
+def get_compatible_datasets(model_metadata: dict) -> list[str]:
     """
     Return list of reference dataset keys this model is compatible with.
 
@@ -68,7 +66,7 @@ def get_compatible_datasets(model_metadata: Dict) -> List[str]:
 
 
 def validate_model_dataset_compatibility(
-    model_metadata: Dict,
+    model_metadata: dict,
     reference_dataset: str,
     require_gee: bool = False,
 ) -> None:

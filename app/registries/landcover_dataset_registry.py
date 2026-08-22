@@ -7,8 +7,7 @@ and helper functions. Supports GEE and ArcGIS providers.
 Imported by app.py; no Flask or GEE dependency allowed here.
 """
 import logging
-from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from datetime import UTC, datetime
 
 import requests
 
@@ -18,7 +17,7 @@ logger = logging.getLogger(__name__)
 # Legend: class value → color + label
 # ─────────────────────────────────────────────
 
-LAND_COVER_LEGENDS: Dict[str, Dict] = {
+LAND_COVER_LEGENDS: dict[str, dict] = {
     "Dynamic_World": {
         "0": {"color": "#419BDF", "label": "Water"},
         "1": {"color": "#397D49", "label": "Trees"},
@@ -261,7 +260,7 @@ LAND_COVER_LEGENDS: Dict[str, Dict] = {
 # Visualization parameters per dataset
 # ─────────────────────────────────────────────
 
-LAND_COVER_VIS: Dict[str, Dict] = {
+LAND_COVER_VIS: dict[str, dict] = {
     "Dynamic_World":        {"min": 0,  "max": 8,   "palette": ["#419BDF","#397D49","#88B053","#7A87C6","#E49635","#DFC35A","#C4281B","#A59B8F","#B39FE1"]},
     "ESA_WorldCover":       {"min": 10, "max": 100, "palette": ["006400","ffbb22","ffff4c","f096ff","fa0000","b4b4b4","f0f0f0","0032c8","0096a0","00cf75","fae6a0"]},
     "ESRI_LandCover":       {"min": 1,  "max": 11,  "palette": ["1A5BAB","358221","87D19E","FFDB5C","ED022A","EDE9E4","F2FAFF","C8C8C8","C6AD8D"]},
@@ -284,7 +283,7 @@ LAND_COVER_VIS: Dict[str, Dict] = {
 # Native scale (metres) per dataset
 # ─────────────────────────────────────────────
 
-LAND_COVER_NATIVE_SCALE: Dict[str, int] = {
+LAND_COVER_NATIVE_SCALE: dict[str, int] = {
     "Dynamic_World":         10,
     "ESA_WorldCover":        10,
     "ESRI_LandCover":        10,
@@ -314,7 +313,7 @@ LAND_COVER_NATIVE_SCALE: Dict[str, int] = {
 #   model (method description), accuracy
 # ─────────────────────────────────────────────
 
-LAND_COVER_DATASET_OPTIONS: Dict[str, Dict] = {
+LAND_COVER_DATASET_OPTIONS: dict[str, dict] = {
     "ESA_WorldCover": {
         "name":                "ESA WorldCover",
         "source":              "ESA",
@@ -713,14 +712,14 @@ def should_skip_lulc_class(label: str, include_improbable_classes: bool = False)
 
 def _landcover_year_bound(value) -> int:
     if isinstance(value, int):
-        return min(value, datetime.now().year)
+        return min(value, datetime.now(UTC).year)
     text = str(value or "").strip().lower()
     if text in {"present", "now", "latest"}:
-        return datetime.now().year
+        return datetime.now(UTC).year
     try:
-        return min(int(text), datetime.now().year)
+        return min(int(text), datetime.now(UTC).year)
     except (TypeError, ValueError):
-        return datetime.now().year
+        return datetime.now(UTC).year
 
 
 def supported_glc_fcs30d_year(year: int) -> int:
@@ -729,7 +728,7 @@ def supported_glc_fcs30d_year(year: int) -> int:
     return min(supported, key=lambda item: (abs(item - requested), item))
 
 
-def mapbiomas_indonesia_geotiff_uri(year: int) -> Tuple[str, dict]:
+def mapbiomas_indonesia_geotiff_uri(year: int) -> tuple[str, dict]:
     requested_year = int(year)
     candidates = [
         {
@@ -764,7 +763,7 @@ def mapbiomas_indonesia_geotiff_uri(year: int) -> Tuple[str, dict]:
     )
 
 
-def glad_glcluc_geotiff_uri(year: int) -> Tuple[str, dict]:
+def glad_glcluc_geotiff_uri(year: int) -> tuple[str, dict]:
     """Resolve Cloud GeoTIFF URI for GLAD Annual Global Land Use/Land Cover (Potapov et al. 2022).
 
     Loads via ee.Image.loadGeoTIFF() in app.py. Year clamped to 2000–2020.
@@ -777,9 +776,9 @@ def glad_glcluc_geotiff_uri(year: int) -> Tuple[str, dict]:
 
 
 def get_dataset_list(
-    module: Optional[str] = None,
-    provider: Optional[str] = None,
-) -> List[Dict]:
+    module: str | None = None,
+    provider: str | None = None,
+) -> list[dict]:
     """Return filtered list of datasets for /api/datasets endpoint.
 
     Each entry contains a compact summary suitable for discovery responses.
@@ -791,12 +790,12 @@ def get_dataset_list(
         if module is not None and module != "landcover":
             continue
 
-        if provider is not None:
-            # Match provider_type prefix or 'arcgis' shorthand
-            if provider == "arcgis" and not dataset_provider.startswith("arcgis"):
-                continue
-            elif provider not in ("arcgis",) and provider != dataset_provider:
-                continue
+        # Match provider_type prefix or 'arcgis' shorthand
+        if provider is not None and (
+            (provider == "arcgis" and not dataset_provider.startswith("arcgis"))
+            or (provider not in ("arcgis",) and provider != dataset_provider)
+        ):
+            continue
 
         year_max_raw = info.get("year_max")
         year_max = _landcover_year_bound(year_max_raw) if year_max_raw else None

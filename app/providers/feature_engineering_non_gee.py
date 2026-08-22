@@ -14,22 +14,21 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
 # Matches CarbonInferenceEngine.STANDARD_S2_FEATURES band order exactly.
-S2_BAND_ORDER: List[str] = ["B2", "B3", "B4", "B5", "B6", "B7", "B8", "B8A", "B11", "B12"]
-INDEX_NAMES: List[str] = ["NDVI", "NDWI", "NDMI", "NBR", "NDRE", "EVI", "SAVI", "BSI", "brightness"]
-STANDARD_S2_NON_GEE_FEATURES: List[str] = S2_BAND_ORDER + INDEX_NAMES
+S2_BAND_ORDER: list[str] = ["B2", "B3", "B4", "B5", "B6", "B7", "B8", "B8A", "B11", "B12"]
+INDEX_NAMES: list[str] = ["NDVI", "NDWI", "NDMI", "NBR", "NDRE", "EVI", "SAVI", "BSI", "brightness"]
+STANDARD_S2_NON_GEE_FEATURES: list[str] = S2_BAND_ORDER + INDEX_NAMES
 
-TERRAIN_NAMES: List[str] = ["elevation", "slope", "aspect"]
-LANDCOVER_NAMES: List[str] = ["landcover", "forest_mask"]
-INTERACTION_NAMES: List[str] = ["NDVI_x_elevation", "NDMI_x_slope", "forest_mask_x_NDVI", "B8_x_B11"]
+TERRAIN_NAMES: list[str] = ["elevation", "slope", "aspect"]
+LANDCOVER_NAMES: list[str] = ["landcover", "forest_mask"]
+INTERACTION_NAMES: list[str] = ["NDVI_x_elevation", "NDMI_x_slope", "forest_mask_x_NDVI", "B8_x_B11"]
 
-FEATURE_STACKS: Dict[str, List[str]] = {
+FEATURE_STACKS: dict[str, list[str]] = {
     "s2_bands_only_non_gee": list(S2_BAND_ORDER),
     "standard_s2_non_gee": STANDARD_S2_NON_GEE_FEATURES,
     "standard_s2_non_gee_dem_landcover": (
@@ -45,11 +44,11 @@ class NonGeeStack:
     bands: dict of band-name -> 2D float array, all same shape, aligned to
            the same grid (same transform/crs/shape).
     """
-    bands: Dict[str, np.ndarray]
+    bands: dict[str, np.ndarray]
     transform: object  # affine.Affine
     crs: object         # rasterio.crs.CRS
-    shape: Tuple[int, int]  # (H, W)
-    provenance: Dict = field(default_factory=dict)
+    shape: tuple[int, int]  # (H, W)
+    provenance: dict = field(default_factory=dict)
 
     def pixel_size_m(self) -> float:
         """Approximate pixel size in meters from the affine transform.
@@ -60,7 +59,7 @@ class NonGeeStack:
         return float(abs(self.transform.a))
 
 
-def compute_indices(bands: Dict[str, np.ndarray], prefix: str = "") -> Dict[str, np.ndarray]:
+def compute_indices(bands: dict[str, np.ndarray], prefix: str = "") -> dict[str, np.ndarray]:
     """Exact numpy replication of the 9 GEE spectral index formulas.
 
     Expects reflectance-scale (0-1 float) bands B2,B3,B4,B5,B6,B7,B8,B8A,B11,B12.
@@ -75,7 +74,7 @@ def compute_indices(bands: Dict[str, np.ndarray], prefix: str = "") -> Dict[str,
             out = np.where(denom == 0, np.nan, (a - b) / denom)
         return out
 
-    indices: Dict[str, np.ndarray] = {}
+    indices: dict[str, np.ndarray] = {}
     indices[f"{prefix}NDVI"] = _safe_nd(b8, b4)
     indices[f"{prefix}NDWI"] = _safe_nd(b3, b8)
     indices[f"{prefix}NDMI"] = _safe_nd(b8, b11)
@@ -102,7 +101,7 @@ def compute_indices(bands: Dict[str, np.ndarray], prefix: str = "") -> Dict[str,
     return indices
 
 
-def compute_terrain(elevation: np.ndarray, pixel_size_m: float) -> Dict[str, np.ndarray]:
+def compute_terrain(elevation: np.ndarray, pixel_size_m: float) -> dict[str, np.ndarray]:
     """Slope (degrees) and aspect (degrees, 0-360, 0=N clockwise, GEE convention).
 
     Uses numpy.gradient central differences — a documented, dependency-free
@@ -121,11 +120,11 @@ def compute_terrain(elevation: np.ndarray, pixel_size_m: float) -> Dict[str, np.
 
 
 def compute_interactions(
-    bands: Dict[str, np.ndarray],
-    indices: Dict[str, np.ndarray],
-    terrain: Optional[Dict[str, np.ndarray]],
-    forest_mask: Optional[np.ndarray],
-) -> Dict[str, np.ndarray]:
+    bands: dict[str, np.ndarray],
+    indices: dict[str, np.ndarray],
+    terrain: dict[str, np.ndarray] | None,
+    forest_mask: np.ndarray | None,
+) -> dict[str, np.ndarray]:
     """NDVI x elevation, NDMI x slope, forest_mask x NDVI, B8 x B11.
 
     Any missing input (no terrain or no forest_mask) yields an all-zero array
@@ -155,7 +154,7 @@ def compute_interactions(
     }
 
 
-def compute_temporal_stats(band_timeseries: np.ndarray) -> Dict[str, np.ndarray]:
+def compute_temporal_stats(band_timeseries: np.ndarray) -> dict[str, np.ndarray]:
     """median/p25/p75/min/max along axis 0 of a (n_times, H, W) stack."""
     with np.errstate(invalid="ignore"):
         return {
@@ -168,7 +167,7 @@ def compute_temporal_stats(band_timeseries: np.ndarray) -> Dict[str, np.ndarray]
 
 
 def compute_seasonal_delta(
-    stack_a: "NonGeeStack", stack_b: "NonGeeStack", index_name: str = "NDVI"
+    stack_a: NonGeeStack, stack_b: NonGeeStack, index_name: str = "NDVI"
 ) -> np.ndarray:
     """Generic 'period A minus period B' delta for one index.
 
@@ -185,9 +184,9 @@ def compute_seasonal_delta(
 
 
 def build_feature_stack(
-    stack: "NonGeeStack",
+    stack: NonGeeStack,
     feature_stack_key: str,
-) -> Tuple[np.ndarray, List[str]]:
+) -> tuple[np.ndarray, list[str]]:
     """Top-level dispatcher: NonGeeStack -> (feature_array[n_features,H,W], feature_names).
 
     feature_names ordering matches CarbonInferenceEngine.STANDARD_S2_FEATURES
@@ -213,7 +212,7 @@ def build_feature_stack(
     forest_mask = stack.bands.get("forest_mask")
     interactions = compute_interactions(stack.bands, indices, terrain, forest_mask)
 
-    available: Dict[str, np.ndarray] = {}
+    available: dict[str, np.ndarray] = {}
     available.update(stack.bands)
     available.update(indices)
     if terrain is not None:

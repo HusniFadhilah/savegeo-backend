@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 import datetime as dt
+from typing import TYPE_CHECKING
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
+
+if TYPE_CHECKING:
+    # Only for the `Mapped["Role | None"]` type hint below - the actual
+    # relationship is resolved by SQLAlchemy's mapper registry via the
+    # "Role" string, not this import, so it's guarded to avoid a runtime
+    # circular import between the two model modules.
+    from app.db.models.role import Role
 
 
 class AdminUser(Base):
@@ -22,10 +30,10 @@ class AdminUser(Base):
     # explicitly assigned a role get the narrower, permission-checked path -
     # see app/core/security.py::require_permission.
     role_id: Mapped[int | None] = mapped_column(ForeignKey("roles.id"))
-    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc))
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.UTC))
     last_login: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
 
-    role: Mapped["Role | None"] = relationship("Role")
+    role: Mapped[Role | None] = relationship("Role")
 
     def to_dict(self) -> dict:
         return {

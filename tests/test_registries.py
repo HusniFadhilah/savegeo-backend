@@ -1,9 +1,9 @@
 """Registry/discovery tests - pure Python, no database or GEE required."""
 from __future__ import annotations
 
-from app.registries.map_layer_registry import get_basemaps, get_all_layers
-from app.registries.vegetation_index_registry import get_catalog_payload
 from app.registries.landcover_dataset_registry import get_dataset_list
+from app.registries.map_layer_registry import get_all_layers, get_basemaps
+from app.registries.vegetation_index_registry import get_catalog_payload
 
 
 def test_satellite_is_default_basemap():

@@ -9,7 +9,6 @@ See: backend/docs/carbon-datasets.md
      backend/docs/model-registry-strategy.md
 """
 import logging
-from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +17,7 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────
 
 # fmt: off
-CARBON_DATASET_REGISTRY: Dict[str, Dict] = {
+CARBON_DATASET_REGISTRY: dict[str, dict] = {
     "WCMC": {
         "key":         "WCMC",
         "name":        "WCMC Carbon Density",
@@ -199,7 +198,7 @@ CARBON_DATASET_REGISTRY: Dict[str, Dict] = {
 # tiles via /api/arcgis/tiles/<key>/{z}/{y}/{x}
 # ─────────────────────────────────────────────
 # fmt: off
-CARBON_ARCGIS_REGISTRY: Dict[str, Dict] = {
+CARBON_ARCGIS_REGISTRY: dict[str, dict] = {
     "WCMC_Carbon_ArcGIS": {
         "key":              "WCMC_Carbon_ArcGIS",
         "provider_type":    "arcgis_living_atlas",
@@ -277,7 +276,7 @@ CARBON_ARCGIS_REGISTRY: Dict[str, Dict] = {
 # tiles NOT available in current implementation (explicit error returned).
 # ─────────────────────────────────────────────
 # fmt: off
-CARBON_EXTERNAL_REGISTRY: Dict[str, Dict] = {
+CARBON_EXTERNAL_REGISTRY: dict[str, dict] = {
     "SOILGRIDS_SOC_30CM": {
         "key":              "SOILGRIDS_SOC_30CM",
         "provider_type":    "external_raster",
@@ -445,8 +444,8 @@ CARBON_EXTERNAL_REGISTRY: Dict[str, Dict] = {
         ),
         "attribution":      "ESA Climate Change Initiative (CCI) Biomass project / CEDA",
         "limitations": [
-            "Tile naming is SW-corner-based (e.g. N00E000, S10E110) — ocean/no-data tiles simply "
-            "don't exist server-side (404), handled as a missing tile, not an error.",
+            ("Tile naming is SW-corner-based (e.g. N00E000, S10E110) — ocean/no-data tiles simply "
+             "don't exist server-side (404), handled as a missing tile, not an error."),
             "Available years: 2010, 2017, 2018, 2019, 2020 only (no continuous annual coverage).",
             "No tile rendering; sampled/gridded statistics only via this non-GEE pipeline.",
         ],
@@ -461,7 +460,7 @@ CARBON_EXTERNAL_REGISTRY: Dict[str, Dict] = {
 # fmt: on
 
 # Keys exposed for training CLI choices (excludes deprecated Simard)
-TRAINING_DATASET_KEYS: List[str] = [
+TRAINING_DATASET_KEYS: list[str] = [
     "WCMC",
     "ESA_CCI",
     "GEDI",
@@ -497,7 +496,7 @@ TEMPORAL_DATASET_KEYS = {
 
 def load_external_carbon_reference_ee(
     key: str,
-    dataset_year: Optional[int] = None,
+    dataset_year: int | None = None,
     roi=None,
 ):
     """Load an external cloud GeoTIFF carbon reference via ee.Image.loadGeoTIFF().
@@ -511,8 +510,9 @@ def load_external_carbon_reference_ee(
 
     Raises ValueError if key unknown, ingestion_method mismatch, or URL not configured.
     """
-    import ee
     import os
+
+    import ee
 
     meta = CARBON_EXTERNAL_REGISTRY.get(key)
     if meta is None:
@@ -544,7 +544,7 @@ def load_external_carbon_reference_ee(
         raise ValueError(
             f"ee.Image.loadGeoTIFF failed for '{key}' (URL: {raster_url}). "
             f"Verify the URI is a public Cloud-Optimized GeoTIFF. Original error: {load_err}"
-        )
+        ) from load_err
 
     if roi is not None:
         img = img.clip(roi)
@@ -569,7 +569,7 @@ def is_arcgis_carbon_dataset(key: str) -> bool:
     return key in CARBON_ARCGIS_REGISTRY
 
 
-def get_arcgis_carbon_meta(key: str) -> Optional[Dict]:
+def get_arcgis_carbon_meta(key: str) -> dict | None:
     """Return ArcGIS carbon dataset metadata, or None if not found."""
     return CARBON_ARCGIS_REGISTRY.get(key)
 
@@ -579,12 +579,12 @@ def is_external_carbon_dataset(key: str) -> bool:
     return key in CARBON_EXTERNAL_REGISTRY
 
 
-def get_external_carbon_meta(key: str) -> Optional[Dict]:
+def get_external_carbon_meta(key: str) -> dict | None:
     """Return external raster carbon dataset metadata, or None if not found."""
     return CARBON_EXTERNAL_REGISTRY.get(key)
 
 
-def get_dataset_meta(key: str, dataset_year: Optional[int] = None) -> Dict:
+def get_dataset_meta(key: str, dataset_year: int | None = None) -> dict:
     """
     Return metadata dict for a dataset key.
 
@@ -644,7 +644,7 @@ def get_dataset_meta(key: str, dataset_year: Optional[int] = None) -> Dict:
     return meta
 
 
-def list_dataset_keys(include_legacy: bool = False) -> List[str]:
+def list_dataset_keys(include_legacy: bool = False) -> list[str]:
     """Return all registered dataset keys. Excludes 'Simard' by default."""
     keys = list(CARBON_DATASET_REGISTRY.keys())
     if not include_legacy:

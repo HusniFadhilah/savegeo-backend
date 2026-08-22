@@ -11,7 +11,6 @@ Endpoint consumers:
     GET /api/map-layers         → get_all_layers()
     GET /api/map-layers?module= → get_all_layers(module=)
 """
-from typing import Dict, List, Optional
 
 TYPE_BASEMAP   = "basemap"
 TYPE_ANALYSIS  = "analysis"
@@ -23,7 +22,7 @@ LEGEND_CLASSES  = "classes"
 LEGEND_NONE     = "none"
 
 # fmt: off
-MAP_LAYER_REGISTRY: List[Dict] = [
+MAP_LAYER_REGISTRY: list[dict] = [
 
     # ── Basemaps ──────────────────────────────────────────────────────
     # Satellite is intentionally `order=1` (default basemap) — the frontend
@@ -190,9 +189,9 @@ MAP_LAYER_REGISTRY: List[Dict] = [
 
 
 def get_all_layers(
-    module: Optional[str] = None,
+    module: str | None = None,
     enabled_only: bool = True,
-) -> List[Dict]:
+) -> list[dict]:
     layers = list(MAP_LAYER_REGISTRY)
     if enabled_only:
         layers = [l for l in layers if l.get("enabled", True)]
@@ -201,14 +200,14 @@ def get_all_layers(
     return sorted(layers, key=lambda l: l.get("order", 999))
 
 
-def get_basemaps(enabled_only: bool = True) -> List[Dict]:
+def get_basemaps(enabled_only: bool = True) -> list[dict]:
     layers = [l for l in MAP_LAYER_REGISTRY if l["type"] == TYPE_BASEMAP]
     if enabled_only:
         layers = [l for l in layers if l.get("enabled", True)]
     return sorted(layers, key=lambda l: l.get("order", 999))
 
 
-def get_layer(key: str) -> Optional[Dict]:
+def get_layer(key: str) -> dict | None:
     for layer in MAP_LAYER_REGISTRY:
         if layer["key"] == key:
             return dict(layer)

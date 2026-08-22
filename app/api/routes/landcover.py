@@ -1,9 +1,9 @@
 """Land cover analysis endpoints - /api/analyze/landcover*. Ported from backend/app.py."""
 from __future__ import annotations
 
-import ee
 import logging
 
+import ee
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.api.deps import require_ee

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import datetime as dt
-import json
 
 from sqlalchemy import Boolean, DateTime, Float, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
@@ -27,9 +26,9 @@ class CompanyBoundary(Base):
     source_url: Mapped[str | None] = mapped_column(String(500))
     description: Mapped[str | None] = mapped_column(Text)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc))
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.UTC))
     updated_at: Mapped[dt.datetime] = mapped_column(
-        DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc)
+        DateTime(timezone=True), default=lambda: dt.datetime.now(dt.UTC), onupdate=lambda: dt.datetime.now(dt.UTC)
     )
 
     def to_dict(self, include_geojson: bool = False) -> dict:

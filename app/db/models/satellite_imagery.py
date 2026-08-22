@@ -28,7 +28,7 @@ class SatelliteImagery(Base):
     data_source: Mapped[str | None] = mapped_column(String(100))
     is_primary: Mapped[bool] = mapped_column(Boolean, default=False)
     preview_tile_url: Mapped[str | None] = mapped_column(String(1000))
-    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc))
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.UTC))
 
     def to_dict(self) -> dict:
         return {

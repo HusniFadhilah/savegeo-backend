@@ -6,7 +6,6 @@ stored on `app.state.ee_initialized` (see app/main.py's lifespan) and read via t
 """
 from __future__ import annotations
 
-import json
 import logging
 import tempfile
 from pathlib import Path

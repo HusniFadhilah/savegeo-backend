@@ -47,7 +47,7 @@ def verify_password(plain: str, hashed: str) -> bool:
 
 def create_access_token(admin: AdminUser) -> str:
     settings = get_settings()
-    now = dt.datetime.now(dt.timezone.utc)
+    now = dt.datetime.now(dt.UTC)
     payload = {
         "sub": str(admin.id),
         "username": admin.username,
@@ -63,7 +63,7 @@ def create_user_access_token(user: User) -> str:
     (Disaster Intelligence Dashboard). `typ: "user"` keeps the two token kinds
     from being interchangeable - see `get_current_admin`/`get_current_user`."""
     settings = get_settings()
-    now = dt.datetime.now(dt.timezone.utc)
+    now = dt.datetime.now(dt.UTC)
     payload = {
         "sub": str(user.id),
         "username": user.username,

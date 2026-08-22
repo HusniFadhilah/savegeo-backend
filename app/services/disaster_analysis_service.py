@@ -294,7 +294,7 @@ def run_analysis(db: Session, run_id: int) -> dict:
     post_date = post_img.acquisition_date if post_img else None
 
     run.status = "processing"
-    run.started_at = dt.datetime.now(dt.timezone.utc)
+    run.started_at = dt.datetime.now(dt.UTC)
     db.commit()
 
     try:
@@ -313,19 +313,19 @@ def run_analysis(db: Session, run_id: int) -> dict:
     except AnalysisError as exc:
         run.status = "failed"
         run.error_message = str(exc)
-        run.completed_at = dt.datetime.now(dt.timezone.utc)
+        run.completed_at = dt.datetime.now(dt.UTC)
         db.commit()
         raise
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.exception("Disaster analysis run %s failed", run_id)
         run.status = "failed"
         run.error_message = str(exc)
-        run.completed_at = dt.datetime.now(dt.timezone.utc)
+        run.completed_at = dt.datetime.now(dt.UTC)
         db.commit()
         raise AnalysisError(str(exc), 500) from exc
 
     run.status = "completed"
-    run.completed_at = dt.datetime.now(dt.timezone.utc)
+    run.completed_at = dt.datetime.now(dt.UTC)
     db.commit()
 
     result = disaster_repo.upsert_result(db, run.id, output)

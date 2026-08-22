@@ -28,7 +28,7 @@ DEFAULT_CONFIGS: list[tuple[str, str, str, str, str, str, bool]] = [
     ("year.min", os.getenv("DEFAULT_YEAR_MIN", "2015"), "int", "year",
      "Min year", "Oldest year available", True),
 
-    ("year.max", os.getenv("DEFAULT_YEAR_MAX", str(dt.datetime.now().year)), "int", "year",
+    ("year.max", os.getenv("DEFAULT_YEAR_MAX", str(dt.datetime.now(dt.UTC).year)), "int", "year",
      "Max year", "Latest year available", True),
 
     ("year.esri_min", os.getenv("ESRI_YEAR_MIN", "2017"), "int", "year",

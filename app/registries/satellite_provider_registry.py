@@ -16,8 +16,7 @@ consumers (standardize_bands, mask_landsat_clouds) live in gee_common.py and
 take the resolved band-role map as a plain dict argument, never importing
 this registry themselves.
 """
-from typing import Any, Dict
-
+from typing import Any
 
 # ─────────────────────────────────────────────
 # Provider catalog (frontend-facing specs + band-role map)
@@ -30,7 +29,7 @@ from typing import Any, Dict
 # available_bands_for_index() already treats a missing band as "skip this
 # index for this composite".
 # ─────────────────────────────────────────────
-SATELLITE_PROVIDERS: Dict[str, Dict[str, Any]] = {
+SATELLITE_PROVIDERS: dict[str, dict[str, Any]] = {
     "sentinel2": {
         "key": "sentinel2",
         "name": "Sentinel-2 (MSI)",

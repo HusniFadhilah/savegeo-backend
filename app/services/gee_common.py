@@ -6,14 +6,13 @@ Ported verbatim (business logic unchanged) from legacy `backend/app.py` lines
 """
 from __future__ import annotations
 
-from datetime import date, datetime
-from typing import Optional
+from datetime import date
 
 import ee
 
 from app.core.config import get_settings
-from app.registries.vegetation_index_registry import VEGETATION_INDEX_CATALOG
 from app.registries.satellite_provider_registry import CANONICAL_ALIAS
+from app.registries.vegetation_index_registry import VEGETATION_INDEX_CATALOG
 
 
 class AnalysisError(Exception):
@@ -23,7 +22,7 @@ class AnalysisError(Exception):
     Route handlers catch this and re-raise as `HTTPException(status_code, detail)`.
     """
 
-    def __init__(self, message: str, status_code: int = 400, extra: Optional[dict] = None):
+    def __init__(self, message: str, status_code: int = 400, extra: dict | None = None):
         super().__init__(message)
         self.status_code = status_code
         self.extra = extra or {}
@@ -63,7 +62,7 @@ CLOUD_MASK_TECHNIQUE_INFO = {
 }
 
 
-def resolve_cloud_mask_technique(technique: Optional[str]) -> str:
+def resolve_cloud_mask_technique(technique: str | None) -> str:
     return technique if technique in CLOUD_MASK_TECHNIQUES else DEFAULT_CLOUD_MASK_TECHNIQUE
 
 
@@ -203,7 +202,10 @@ def calculate_index(image, index_name):
 
 def create_geometry_from_payload(aoi_payload: dict) -> ee.Geometry:
     if not isinstance(aoi_payload, dict):
-        raise ValueError("AOI payload must be an object")
+        # ValueError (not TypeError) is deliberate: every API route around this
+        # function catches ValueError specifically to turn it into a 400 client
+        # error (see routes/carbon.py etc.) - TypeError here would 500 instead.
+        raise ValueError("AOI payload must be an object")  # noqa: TRY004
     if "geojson" in aoi_payload:
         return geojson_to_ee_geometry(aoi_payload["geojson"])
     required = {"west", "south", "east", "north"}
@@ -273,8 +275,8 @@ def _event_area_ha(mask_image, aoi, scale) -> float:
     return round(float(stats.get("area", 0) or 0), 2)
 
 
-def _date_or_default(value: Optional[str], default_date: date) -> str:
+def _date_or_default(value: str | None, default_date: date) -> str:
     if not value:
         return default_date.strftime("%Y-%m-%d")
-    datetime.strptime(value, "%Y-%m-%d")
+    date.fromisoformat(value)
     return value

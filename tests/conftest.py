@@ -12,7 +12,7 @@ def _db_reachable() -> bool:
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
         return True
-    except Exception:
+    except Exception:  # noqa: BLE001 - any connectivity/config failure means "DB not available" for the skip check
         return False
 
 

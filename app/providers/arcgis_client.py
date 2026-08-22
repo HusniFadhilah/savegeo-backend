@@ -6,8 +6,8 @@ All access to ArcGIS REST APIs goes through this module.
 """
 import logging
 import os
-from datetime import datetime
-from typing import Any, Dict, Optional
+from datetime import UTC, datetime
+from typing import Any
 from urllib.parse import urlparse
 
 import requests
@@ -35,7 +35,7 @@ def _is_allowed_domain(url: str) -> bool:
         # strip port if present
         host = host.split(":")[0]
         return any(host == d or host.endswith("." + d) for d in _SERVICE_ALLOWLIST_DOMAINS)
-    except Exception:
+    except Exception:  # noqa: BLE001 - malformed URL: fail closed (not on the allowlist), not a crash
         return False
 
 
@@ -63,14 +63,14 @@ class ArcGISClient:
     def is_enabled(self) -> bool:
         return self._enabled
 
-    def get_status(self) -> Dict[str, Any]:
+    def get_status(self) -> dict[str, Any]:
         """Return public-safe status dict (no token/key values)."""
-        status: Dict[str, Any] = {
+        status: dict[str, Any] = {
             "enabled": self._enabled,
             "portal_url": self._portal_url,
             "auth_mode": self._auth_mode,
             "configured": self._is_configured(),
-            "checked_at": datetime.utcnow().isoformat() + "Z",
+            "checked_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         }
 
         if not self._enabled:
@@ -87,13 +87,13 @@ class ArcGISClient:
             status["portal_name"] = portal_info.get("portalName") or portal_info.get("name")
             status["portal_version"] = portal_info.get("currentVersion")
             status["can_reach_portal"] = True
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - connectivity check; any failure surfaces in the status response
             status["can_reach_portal"] = False
             status["portal_error"] = str(exc)
 
         return status
 
-    def get_item_metadata(self, item_id: str) -> Dict[str, Any]:
+    def get_item_metadata(self, item_id: str) -> dict[str, Any]:
         """Fetch item metadata from ArcGIS portal.
 
         Raises ValueError if item_id looks malformed.
@@ -129,7 +129,7 @@ class ArcGISClient:
             "portal_url":     self._portal_url,
         }
 
-    def get_service_metadata(self, service_url: str) -> Dict[str, Any]:
+    def get_service_metadata(self, service_url: str) -> dict[str, Any]:
         """Fetch ArcGIS REST service metadata (ImageServer, MapServer, etc.).
 
         Only allows URLs on the domain allowlist.
@@ -174,12 +174,12 @@ class ArcGISClient:
             return bool(self._api_key)
         return False
 
-    def _get_auth_params(self) -> Dict[str, str]:
+    def _get_auth_params(self) -> dict[str, str]:
         if self._auth_mode == "api_key" and self._api_key:
             return {"token": self._api_key}
         return {}
 
-    def _fetch_portal_info(self) -> Dict[str, Any]:
+    def _fetch_portal_info(self) -> dict[str, Any]:
         url = f"{self._portal_url}/sharing/rest/portals/self"
         params = {"f": "json"}
         params.update(self._get_auth_params())
@@ -190,7 +190,7 @@ class ArcGISClient:
 
 # ── Module-level singleton ───────────────────────────────────────────────
 
-_client_instance: Optional[ArcGISClient] = None
+_client_instance: ArcGISClient | None = None
 
 
 def get_arcgis_client() -> ArcGISClient:

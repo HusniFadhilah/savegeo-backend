@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import datetime as dt
+from typing import TYPE_CHECKING
 
 from sqlalchemy import Boolean, DateTime, Float, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
+
+if TYPE_CHECKING:
+    from app.db.models.admin_user import AdminUser
 
 
 class UploadedModel(Base):
@@ -31,12 +35,12 @@ class UploadedModel(Base):
     # this codebase reads the raw column, so switching representation is safe.
     metadata_json: Mapped[dict | None] = mapped_column(JSONB)
     uploaded_by: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id"))
-    uploaded_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc))
+    uploaded_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.UTC))
     updated_at: Mapped[dt.datetime] = mapped_column(
-        DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc)
+        DateTime(timezone=True), default=lambda: dt.datetime.now(dt.UTC), onupdate=lambda: dt.datetime.now(dt.UTC)
     )
 
-    uploader: Mapped["AdminUser | None"] = relationship("AdminUser", backref="uploaded_models")
+    uploader: Mapped[AdminUser | None] = relationship("AdminUser", backref="uploaded_models")
 
     def _base_dict(self) -> dict:
         return {

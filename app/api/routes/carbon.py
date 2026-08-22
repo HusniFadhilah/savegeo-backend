@@ -1,9 +1,9 @@
 """Carbon analysis endpoints - /api/analyze/carbon*. Ported from backend/app.py."""
 from __future__ import annotations
 
-import ee
 import logging
 
+import ee
 from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlalchemy.orm import Session
 

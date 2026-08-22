@@ -12,7 +12,7 @@ the client actually sent DataTables' `draw` param.
 """
 from __future__ import annotations
 
-from typing import Callable, Sequence
+from collections.abc import Callable, Sequence
 
 from fastapi import Request
 from sqlalchemy import or_

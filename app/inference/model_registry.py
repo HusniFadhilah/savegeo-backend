@@ -3,10 +3,10 @@ Model Registry for managing multiple trained models
 """
 
 import json
-from pathlib import Path
-from typing import Dict, List, Optional, Any
-from datetime import datetime
 import logging
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +16,7 @@ class ModelRegistry:
     Manage multiple trained models with versioning
     """
 
-    def __init__(self, models_dir: str = None):
+    def __init__(self, models_dir: str | None = None):
         """Initialize model registry"""
         if models_dir:
             self.models_dir = Path(models_dir)
@@ -32,7 +32,7 @@ class ModelRegistry:
         self.registry = self._load_registry()
         self._migrate_registry_paths()  # Sekarang self.registry sudah ada
 
-    def _load_registry(self) -> Dict:
+    def _load_registry(self) -> dict:
         """Load registry from file"""
         if self.registry_file.exists():
             try:
@@ -77,7 +77,7 @@ class ModelRegistry:
         self,
         model_name: str,
         model_path: str,
-        metadata: Dict[str, Any],
+        metadata: dict[str, Any],
         set_as_default: bool = False
     ):
         """
@@ -96,7 +96,7 @@ class ModelRegistry:
         self.registry["models"][model_name] = {
             "path": stem,
             "metadata": metadata,
-            "registered_at": datetime.now().isoformat()
+            "registered_at": datetime.now(UTC).isoformat()
         }
 
         if set_as_default or self.registry["default"] is None:
@@ -106,7 +106,7 @@ class ModelRegistry:
         self._save_registry()
         logger.info(f"✓ Registered model: {model_name}")
 
-    def list_models(self) -> List[Dict]:
+    def list_models(self) -> list[dict]:
         """List all registered models"""
         models = []
         
@@ -123,7 +123,7 @@ class ModelRegistry:
         
         return models
 
-    def get_model_path(self, model_name: Optional[str] = None) -> str:
+    def get_model_path(self, model_name: str | None = None) -> str:
         """
         Get full path to a model file
         
@@ -159,7 +159,7 @@ class ModelRegistry:
 
         return str(full)
 
-    def get_model_info(self, model_name: Optional[str] = None) -> Dict:
+    def get_model_info(self, model_name: str | None = None) -> dict:
         """
         Get metadata for a model
         
@@ -213,7 +213,7 @@ class ModelRegistry:
             if model_path.exists():
                 model_path.unlink()
                 logger.info(f"✓ Deleted model file: {model_path.name}")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - best-effort cleanup; registry entry is still removed below regardless
             logger.warning(f"Could not delete model file: {e}")
         
         # Remove from registry

@@ -7,9 +7,8 @@ Python shoelace formula, no GEE/`require_ee` needed - same helper
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from fastapi import Depends
 
 from app.db.session import get_db
 from app.registries.crop_registry import get_commodity

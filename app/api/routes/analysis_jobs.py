@@ -12,7 +12,7 @@ import os
 import tempfile
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -45,7 +45,7 @@ def _job_path(job_id: str) -> Path:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _write_job(job_id: str, data: dict[str, Any]) -> None:
@@ -113,7 +113,7 @@ def _run_job(job_id: str, job_type: str, payload: dict[str, Any]) -> None:
             job_id,
             {"job_id": job_id, "type": job_type, "status": "failed", "finished_at": _now(), "error": str(exc), "status_code": 400},
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.exception("Analysis job %s failed", job_id)
         _write_job(
             job_id,

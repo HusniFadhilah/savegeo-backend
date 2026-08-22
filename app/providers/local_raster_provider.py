@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Callable, Dict, List, Optional, Tuple
+from collections.abc import Callable
 
 import numpy as np
 
@@ -27,7 +27,7 @@ from app.providers.feature_engineering_non_gee import NonGeeStack
 
 logger = logging.getLogger(__name__)
 
-BBox = Tuple[float, float, float, float]  # (west, south, east, north) in EPSG:4326
+BBox = tuple[float, float, float, float]  # (west, south, east, north) in EPSG:4326
 
 # GDAL/vsicurl tuning for remote COG reads (Planetary Computer / CEDA HTTPS).
 # Without these, every rasterio.open() on a remote COG re-negotiates a fresh
@@ -53,8 +53,7 @@ class GridSpec:
     passes downstream.
     """
 
-    def __init__(self, bbox_lonlat: BBox, resolution_m: float, dst_crs: Optional[str] = None):
-        import rasterio
+    def __init__(self, bbox_lonlat: BBox, resolution_m: float, dst_crs: str | None = None):
         from rasterio.crs import CRS
         from rasterio.warp import calculate_default_transform
 
@@ -88,8 +87,8 @@ def load_raster_to_grid(
     grid: GridSpec,
     band_index: int = 1,
     resampling: str = "bilinear",
-    src_nodata: Optional[float] = None,
-) -> Optional[np.ndarray]:
+    src_nodata: float | None = None,
+) -> np.ndarray | None:
     """Read one band of a raster (local path or plain HTTPS/GCS COG URL) and
     reproject/resample it onto `grid` via rasterio WarpedVRT.
 
@@ -119,19 +118,19 @@ def load_raster_to_grid(
             ) as vrt:
                 data = vrt.read(band_index).astype(np.float32)
             return data
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - raster read can fail many ways; caller treats None as "unavailable"
         logger.warning(f"load_raster_to_grid: could not read '{path_or_url}': {exc}")
         return None
 
 
-def build_stack_from_local_files(file_map: Dict[str, str], grid: GridSpec) -> NonGeeStack:
+def build_stack_from_local_files(file_map: dict[str, str], grid: GridSpec) -> NonGeeStack:
     """file_map e.g. {'B2': 'path/b2.tif', ..., 'elevation': 'dem.tif'}.
 
     Used for (a) local test fixtures when validating grid-alignment logic
     without hitting Planetary Computer, and (b) any locally-cached composite
     reused across repeated experiments.
     """
-    bands: Dict[str, np.ndarray] = {}
+    bands: dict[str, np.ndarray] = {}
     for name, path in file_map.items():
         arr = load_raster_to_grid(path, grid)
         if arr is None:
@@ -151,13 +150,13 @@ def build_stack_from_local_files(file_map: Dict[str, str], grid: GridSpec) -> No
 # Tiled-COG carbon reference mosaicking (non-GEE labels)
 # ─────────────────────────────────────────────
 
-def _enumerate_tile_origins(bbox: BBox, tile_size_deg: int = 10) -> List[Tuple[int, int]]:
+def _enumerate_tile_origins(bbox: BBox, tile_size_deg: int = 10) -> list[tuple[int, int]]:
     """South-west-corner tile origins (floor convention) intersecting bbox."""
     west, south, east, north = bbox
-    lat_start = int(math.floor(south / tile_size_deg)) * tile_size_deg
-    lon_start = int(math.floor(west / tile_size_deg)) * tile_size_deg
-    lats = range(lat_start, int(math.ceil(north / tile_size_deg)) * tile_size_deg, tile_size_deg)
-    lons = range(lon_start, int(math.ceil(east / tile_size_deg)) * tile_size_deg, tile_size_deg)
+    lat_start = math.floor(south / tile_size_deg) * tile_size_deg
+    lon_start = math.floor(west / tile_size_deg) * tile_size_deg
+    lats = range(lat_start, math.ceil(north / tile_size_deg) * tile_size_deg, tile_size_deg)
+    lons = range(lon_start, math.ceil(east / tile_size_deg) * tile_size_deg, tile_size_deg)
     return [(la, lo) for la in lats for lo in lons]
 
 
@@ -194,10 +193,10 @@ def _apply_transform_array(arr: np.ndarray, transform: str) -> np.ndarray:
 def _mosaic_tiled_cog(
     url_builder: Callable[[int, int], str],
     grid: GridSpec,
-    nodata: Optional[float] = None,
+    nodata: float | None = None,
     resampling: str = "bilinear",
-    lossyear_url_builder: Optional[Callable[[int, int], str]] = None,
-) -> Tuple[np.ndarray, int]:
+    lossyear_url_builder: Callable[[int, int], str] | None = None,
+) -> tuple[np.ndarray, int]:
     """Mosaic whichever tiles intersect grid's bbox onto grid; first-valid wins.
 
     Returns (mosaic array with NaN where no tile covered a pixel, n_tiles_used).
@@ -230,8 +229,8 @@ _CEDA_AVAILABLE_YEARS = [2010, 2017, 2018, 2019, 2020]
 
 
 def load_carbon_reference_to_grid(
-    dataset_key: str, grid: GridSpec, year: Optional[int] = None,
-) -> Tuple[np.ndarray, Dict]:
+    dataset_key: str, grid: GridSpec, year: int | None = None,
+) -> tuple[np.ndarray, dict]:
     """Load a non-GEE-sampleable carbon reference dataset from
     CARBON_EXTERNAL_REGISTRY onto `grid`, applying the registry's unit
     transform. Returns (label_array[H,W] in Mg C/ha with NaN outside
@@ -303,9 +302,11 @@ if __name__ == "__main__":
     print("GridSpec construction OK")
 
     # Smoke test 2: synthetic local GeoTIFF round-trip through load_raster_to_grid.
+    import os
+    import tempfile
+
     import rasterio
     from rasterio.transform import from_bounds
-    import tempfile, os
 
     tmp_dir = tempfile.mkdtemp()
     src_path = os.path.join(tmp_dir, "synthetic_dem.tif")

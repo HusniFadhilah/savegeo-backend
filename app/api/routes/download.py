@@ -1,9 +1,9 @@
 """GeoTIFF download URL generation - /api/download/geotiff. Ported from backend/app.py."""
 from __future__ import annotations
 
-import ee
 import logging
 
+import ee
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
@@ -29,6 +29,6 @@ async def download_geotiff(request: Request, db: Session = Depends(get_db)):
         # EEException is not a ValueError subclass so it needs its own branch,
         # otherwise it falls through to the generic 500 handler below.
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.exception("Download GeoTIFF error")
         raise HTTPException(status_code=500, detail=str(e))

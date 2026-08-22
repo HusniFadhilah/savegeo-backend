@@ -8,13 +8,12 @@ Indonesian-language narrative generation.
 Imported by app.py; no Flask or GEE dependency allowed here (mirrors
 landcover_dataset_registry.py's separation of concerns).
 """
-from typing import Any, Dict, List, Optional
-
+from typing import Any
 
 # ─────────────────────────────────────────────
 # Categories
 # ─────────────────────────────────────────────
-INDEX_CATEGORIES: Dict[str, Dict[str, str]] = {
+INDEX_CATEGORIES: dict[str, dict[str, str]] = {
     "vegetation_health":   {"label": "Kesehatan Vegetasi",        "color": "#2E7D32"},
     "biomass_canopy":      {"label": "Biomassa / Kerapatan Tajuk", "color": "#1B5E20"},
     "moisture":            {"label": "Kadar Air Vegetasi",        "color": "#0277BD"},
@@ -45,7 +44,7 @@ INDEX_CATEGORIES: Dict[str, Dict[str, str]] = {
 #                      checks the real (post-rename) band list and correctly skips indices a
 #                      sensor can't support (e.g. red-edge indices on Landsat, which has none).
 # ─────────────────────────────────────────────
-VEGETATION_INDEX_CATALOG: Dict[str, Dict[str, Any]] = {
+VEGETATION_INDEX_CATALOG: dict[str, dict[str, Any]] = {
     "NDVI": {
         "name": "Normalized Difference Vegetation Index",
         "formula": "(NIR - RED) / (NIR + RED)",
@@ -475,7 +474,7 @@ VEGETATION_INDEX_CATALOG: Dict[str, Dict[str, Any]] = {
 # ─────────────────────────────────────────────
 # Domain → recommended indices (used by catalog UI + AI assistant Q&A)
 # ─────────────────────────────────────────────
-DOMAIN_RECOMMENDATIONS: Dict[str, Dict[str, Any]] = {
+DOMAIN_RECOMMENDATIONS: dict[str, dict[str, Any]] = {
     "pertanian": {
         "label": "Pertanian presisi",
         "indices": ["NDRE", "GCI", "SAVI", "NDVI", "SIPI"],
@@ -504,15 +503,15 @@ DOMAIN_RECOMMENDATIONS: Dict[str, Dict[str, Any]] = {
 }
 
 
-def get_indices_by_category() -> Dict[str, List[str]]:
-    grouped: Dict[str, List[str]] = {key: [] for key in INDEX_CATEGORIES}
+def get_indices_by_category() -> dict[str, list[str]]:
+    grouped: dict[str, list[str]] = {key: [] for key in INDEX_CATEGORIES}
     for idx_key, meta in VEGETATION_INDEX_CATALOG.items():
         for cat in meta.get("categories", []):
             grouped.setdefault(cat, []).append(idx_key)
     return grouped
 
 
-def get_catalog_payload() -> Dict[str, Any]:
+def get_catalog_payload() -> dict[str, Any]:
     """Full catalog for the frontend index-selection panel (metadata only, no GEE compute)."""
     return {
         "categories": INDEX_CATEGORIES,
@@ -522,7 +521,7 @@ def get_catalog_payload() -> Dict[str, Any]:
     }
 
 
-def classify_value(index_name: str, value: Optional[float]) -> Optional[Dict[str, Any]]:
+def classify_value(index_name: str, value: float | None) -> dict[str, Any] | None:
     """Return the classification bin {label, color, max} a scalar value falls into."""
     if value is None:
         return None
@@ -533,15 +532,15 @@ def classify_value(index_name: str, value: Optional[float]) -> Optional[Dict[str
     return None
 
 
-def _health_label(index_name: str, mean_value: Optional[float]) -> str:
+def _health_label(index_name: str, mean_value: float | None) -> str:
     cls = classify_value(index_name, mean_value)
     return cls["label"] if cls else "tidak diketahui"
 
 
 def generate_index_narrative(
     index_name: str,
-    stats: Dict[str, Any],
-    classification: Optional[Dict[str, Any]] = None,
+    stats: dict[str, Any],
+    classification: dict[str, Any] | None = None,
 ) -> str:
     """Auto-generate an Indonesian-language interpretation paragraph for one index result."""
     meta = VEGETATION_INDEX_CATALOG.get(index_name)
@@ -593,7 +592,7 @@ def generate_index_narrative(
 
 
 def generate_comparison_narrative(
-    index_a: str, index_b: str, quadrants: Dict[str, Dict[str, float]]
+    index_a: str, index_b: str, quadrants: dict[str, dict[str, float]]
 ) -> str:
     """Auto-generate an Indonesian insight paragraph for a two-index comparison.
 
@@ -635,7 +634,7 @@ def generate_comparison_narrative(
     return " ".join(lines)
 
 
-def available_bands_for_index(index_name: str, available_bands: List[str]) -> bool:
+def available_bands_for_index(index_name: str, available_bands: list[str]) -> bool:
     """Check whether the composite has every band an index formula needs."""
     required = VEGETATION_INDEX_CATALOG.get(index_name, {}).get("bands", [])
     return all(b in available_bands for b in required)

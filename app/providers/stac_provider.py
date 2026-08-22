@@ -10,12 +10,11 @@ planetary-computer). Everything else (rasterio, numpy) already installed.
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from app.providers.local_raster_provider import GridSpec, load_raster_to_grid
 from app.providers.feature_engineering_non_gee import NonGeeStack
+from app.providers.local_raster_provider import GridSpec, load_raster_to_grid
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +30,7 @@ S2_SCALE = 10000.0  # Sentinel-2 L2A DN -> reflectance (divide by 10000)
 # (matches CarbonInferenceEngine._mask_s2_clouds exactly)
 SCL_MASK_CLASSES = (3, 8, 9, 10)
 
-BBox = Tuple[float, float, float, float]
+BBox = tuple[float, float, float, float]
 
 
 def _stac_client():
@@ -41,7 +40,7 @@ def _stac_client():
 
 def search_sentinel2_items(
     bbox_lonlat: BBox, start_date: str, end_date: str, max_cloud_cover: int = 60,
-) -> List:
+) -> list:
     """Search Planetary Computer's sentinel-2-l2a collection.
 
     Signing is deferred to read time (planetary_computer.sign() at
@@ -66,7 +65,7 @@ def _signed_href(item, asset_key: str) -> str:
     return signed.href
 
 
-def _band_scale_offset(item, asset_key: str) -> Tuple[float, float]:
+def _band_scale_offset(item, asset_key: str) -> tuple[float, float]:
     """Reflectance = DN * scale + offset.
 
     Sentinel-2 L2A processing baseline >= 04.00 (all items acquired since
@@ -96,13 +95,13 @@ def _band_scale_offset(item, asset_key: str) -> Tuple[float, float]:
 
 
 def build_s2_cloud_masked_composite(
-    items: List,
+    items: list,
     grid: GridSpec,
-    bands: List[str] = tuple(S2_ASSET_MAP.keys()),
+    bands: list[str] | None = None,
     composite: str = "median",
-    percentile: Optional[int] = None,
-    max_items: Optional[int] = None,
-) -> Tuple[Dict[str, np.ndarray], Dict]:
+    percentile: int | None = None,
+    max_items: int | None = None,
+) -> tuple[dict[str, np.ndarray], dict]:
     """Cloud-masked composite (median or percentile) across STAC items.
 
     Reads each item's SCL asset first (nearest resampling — categorical),
@@ -113,12 +112,14 @@ def build_s2_cloud_masked_composite(
     stats dict with n_items_used / n_valid_pixels_per_band for QA).
     Raises ValueError if 0 items or an all-NaN composite result.
     """
+    if bands is None:
+        bands = list(S2_ASSET_MAP.keys())
     if max_items is not None:
         items = items[:max_items]
     if not items:
         raise ValueError("build_s2_cloud_masked_composite: 0 STAC items provided")
 
-    per_band_stacks: Dict[str, List[np.ndarray]] = {b: [] for b in bands}
+    per_band_stacks: dict[str, list[np.ndarray]] = {b: [] for b in bands}
     n_items_used = 0
 
     for item in items:
@@ -160,8 +161,8 @@ def build_s2_cloud_masked_composite(
             "(network/signing failures for every item) — check STAC search results and connectivity"
         )
 
-    composited: Dict[str, np.ndarray] = {}
-    n_valid_pixels: Dict[str, int] = {}
+    composited: dict[str, np.ndarray] = {}
+    n_valid_pixels: dict[str, int] = {}
     for band_name, stack_list in per_band_stacks.items():
         if not stack_list:
             raise ValueError(f"build_s2_cloud_masked_composite: no valid data for band '{band_name}' across {n_items_used} items")
@@ -190,7 +191,7 @@ def build_s2_cloud_masked_composite(
     return composited, stats
 
 
-def build_dem_derivatives(grid: GridSpec) -> Dict[str, np.ndarray]:
+def build_dem_derivatives(grid: GridSpec) -> dict[str, np.ndarray]:
     """Mosaic Copernicus DEM GLO-30 tiles covering grid.bbox_lonlat, then
     compute slope/aspect via feature_engineering_non_gee.compute_terrain
     (numpy.gradient approximation, documented simplification vs ee.Terrain).
@@ -227,7 +228,7 @@ def build_dem_derivatives(grid: GridSpec) -> Dict[str, np.ndarray]:
     return terrain
 
 
-def build_worldcover(grid: GridSpec, year: int = 2021) -> Dict:
+def build_worldcover(grid: GridSpec, year: int = 2021) -> dict:
     """Mosaic ESA WorldCover tiles. Only 2020 (v100) and 2021 (v200) epochs
     exist — pins to whichever is nearest to `year`, records landcover_year.
     """
@@ -266,7 +267,7 @@ def build_worldcover(grid: GridSpec, year: int = 2021) -> Dict:
     return {"landcover": landcover, "forest_mask": forest_mask, "landcover_year": target_year, "worldcover_n_items_used": n_used}
 
 
-def build_s1_composite(grid: GridSpec, start_date: str, end_date: str) -> Optional[Dict]:
+def build_s1_composite(grid: GridSpec, start_date: str, end_date: str) -> dict | None:
     """Best-effort Sentinel-1 RTC composite. Returns None (not a hard crash)
     on any failure — S1 is optional per the task brief; caller must drop it
     from the feature stack on a None return."""
@@ -306,7 +307,7 @@ def build_s1_composite(grid: GridSpec, start_date: str, end_date: str) -> Option
             "VV_minus_VH": vv_med - vh_med,
             "s1_n_items_used": len(items),
         }
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - S1 is a best-effort feature; the caller proceeds without it
         logger.warning(f"build_s1_composite: best-effort S1 fetch failed, dropping S1 from stack: {exc}")
         return None
 
@@ -321,7 +322,7 @@ def build_full_stack(
     include_landcover: bool = True,
     composite: str = "median",
     max_cloud_cover: int = 60,
-    max_items: Optional[int] = None,
+    max_items: int | None = None,
 ) -> NonGeeStack:
     """Single public entry point: builds a complete NonGeeStack from
     Planetary Computer STAC for the given AOI/date range."""
@@ -338,8 +339,8 @@ def build_full_stack(
         items, grid, composite=composite, max_items=max_items,
     )
 
-    bands: Dict[str, np.ndarray] = dict(s2_bands)
-    provenance: Dict = {
+    bands: dict[str, np.ndarray] = dict(s2_bands)
+    provenance: dict = {
         "provider": "non_gee_stac",
         "stac_catalog": "planetary-computer",
         "s2_collection": "sentinel-2-l2a",
@@ -381,7 +382,6 @@ def build_full_stack(
 
 
 if __name__ == "__main__":
-    import sys
     logging.basicConfig(level=logging.INFO)
 
     # Smoke test on a TINY Central-Java bbox, short date range, per build-sequence

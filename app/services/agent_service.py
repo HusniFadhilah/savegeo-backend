@@ -15,14 +15,20 @@ imports the routers which import this service module.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
-from typing import Any, Optional
+from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import Request
 from sqlalchemy.orm import Session
 
 from app.agentic import rate_limiter
-from app.agentic.agentic_ai import execute_agent_plan, plan_agent_request, plan_with_ai, geoai_with_ai, build_agent_capabilities
+from app.agentic.agentic_ai import (
+    build_agent_capabilities,
+    execute_agent_plan,
+    geoai_with_ai,
+    plan_agent_request,
+    plan_with_ai,
+)
 from app.db.models.chat_message import ChatMessage
 from app.db.models.chat_session import ChatSession
 from app.db.models.uploaded_model import UploadedModel
@@ -166,7 +172,7 @@ def run_agent_control(db: Session, request: Request, payload: dict) -> tuple[dic
         return {"error": "message is required"}, 400, {}
 
     # ── Session management ───────────────────────────────────────
-    session: Optional[ChatSession] = None
+    session: ChatSession | None = None
     if session_id:
         session = db.get(ChatSession, session_id)
 
@@ -246,7 +252,7 @@ def run_agent_control(db: Session, request: Request, payload: dict) -> tuple[dic
             content=assistant_full,
         ))
 
-        session.updated_at = datetime.now(timezone.utc)
+        session.updated_at = datetime.now(UTC)
         db.commit()
         result["session_id"] = session.id
     except Exception as e:  # noqa: BLE001

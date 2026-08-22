@@ -13,12 +13,12 @@ Metadata-only helpers (catalog, narrative generation) live in
 """
 from __future__ import annotations
 
-from app.services import config_service
 import logging
 
 import ee
 
 from app.core.config import get_settings
+from app.registries.satellite_provider_registry import resolve_satellite
 from app.registries.vegetation_index_registry import (
     VEGETATION_INDEX_CATALOG as VEGETATION_INDICES,
 )
@@ -27,8 +27,8 @@ from app.registries.vegetation_index_registry import (
     generate_comparison_narrative,
     generate_index_narrative,
 )
-from app.registries.satellite_provider_registry import resolve_satellite
 from app.repositories.satellite_provider_repo import get_satellite_meta
+from app.services import config_service
 from app.services.gee_common import (
     AnalysisError,
     build_date_range,
@@ -163,7 +163,6 @@ def _composite_for_period(
     `cloud_mask_technique` ("scl" | "qa60" | "s2cloudless", see gee_common.py)
     only applies to the Sentinel-2 path - Landsat keeps its own QA_PIXEL mask,
     there's no equivalent s2cloudless-style product for it in this catalog."""
-    settings = get_settings()
     start_date, end_date = build_date_range(year, start_month, end_month)
     resolved_key = resolve_satellite(satellite)
     provider = get_satellite_meta(db, satellite)
@@ -195,7 +194,7 @@ def _composite_for_period(
         coverage = composite.select([first_band]).mask().reduceRegion(
             reducer=ee.Reducer.mean(), geometry=aoi, scale=100, bestEffort=True, maxPixels=int(1e8), tileScale=4,
         ).getInfo()
-        valid_pixel_pct = round(float(list(coverage.values())[0] or 0) * 100, 1) if coverage else None
+        valid_pixel_pct = round(float(next(iter(coverage.values())) or 0) * 100, 1) if coverage else None
     except Exception as e:  # noqa: BLE001
         logger.warning(f"Valid-pixel coverage check failed: {e}")
 
@@ -251,7 +250,6 @@ def analyze_vegetation(db, data: dict) -> dict:
     if not data.get("aoi"):
         raise AnalysisError("aoi is required", 400)
 
-    settings = get_settings()
     year = int(data.get("year", 2022))
     start_month = int(data.get("start_month", 6))
     end_month = int(data.get("end_month", 9))
@@ -318,7 +316,7 @@ def analyze_vegetation(db, data: dict) -> dict:
         }
 
     # ── Single-period mode (default) ──────────────────────────────
-    median_composite, s2_collection, start_date, end_date, size, valid_pixel_pct = _composite_for_period(
+    median_composite, _s2_collection, start_date, end_date, size, valid_pixel_pct = _composite_for_period(
         db, aoi, year, start_month, end_month, cloud_threshold, satellite, cloud_mask_technique
     )
     if median_composite is None:
@@ -393,7 +391,6 @@ def analyze_vegetation_compare(db, data: dict) -> dict:
     if not data.get("aoi"):
         raise AnalysisError("aoi is required", 400)
 
-    settings = get_settings()
     index_a = data.get("index_a", "NDVI")
     index_b = data.get("index_b", "NDMI")
     if index_a not in VEGETATION_INDICES or index_b not in VEGETATION_INDICES:
@@ -408,7 +405,7 @@ def analyze_vegetation_compare(db, data: dict) -> dict:
     cloud_mask_technique = resolve_cloud_mask_technique(data.get("cloud_mask_technique"))
 
     aoi = create_geometry_from_payload(data["aoi"])
-    composite, _, start_date, end_date, size, _valid_pct = _composite_for_period(db, aoi, year, start_month, end_month, cloud_threshold, satellite, cloud_mask_technique)
+    composite, _, start_date, end_date, _size, _valid_pct = _composite_for_period(db, aoi, year, start_month, end_month, cloud_threshold, satellite, cloud_mask_technique)
     if composite is None:
         _sat_meta = get_satellite_meta(db, satellite)
         raise AnalysisError(
@@ -461,7 +458,6 @@ def analyze_timeseries(db, data: dict) -> dict:
     if not data.get("aoi"):
         raise AnalysisError("aoi is required", 400)
 
-    settings = get_settings()
     year = int(data.get("year", 2022))
     index_name = data.get("index", "NDVI")
     interval = data.get("interval", "monthly")
@@ -476,7 +472,7 @@ def analyze_timeseries(db, data: dict) -> dict:
     time_series = []
     for month in months:
         label = f"{year}-{month:02d}"
-        composite, _, _, _, size, _valid_pct = _composite_for_period(db, aoi, year, month, month, cloud_threshold, satellite, cloud_mask_technique)
+        composite, _, _, _, _size, _valid_pct = _composite_for_period(db, aoi, year, month, month, cloud_threshold, satellite, cloud_mask_technique)
         if composite is not None:
             stats = calculate_index(composite, index_name).reduceRegion(
                 reducer=ee.Reducer.mean(), geometry=aoi, scale=veg_scale,
@@ -542,10 +538,10 @@ def analyze_vegetation_change_hotspots(db, data: dict) -> dict:
 
     aoi = create_geometry_from_payload(data["aoi"])
 
-    from_composite, _, from_start, from_end, from_size, _from_valid_pct = _composite_for_period(
+    from_composite, _, from_start, from_end, _from_size, _from_valid_pct = _composite_for_period(
         db, aoi, from_year, start_month, end_month, cloud_threshold, satellite, cloud_mask_technique
     )
-    to_composite, _, to_start, to_end, to_size, _to_valid_pct = _composite_for_period(
+    to_composite, _, to_start, to_end, _to_size, _to_valid_pct = _composite_for_period(
         db, aoi, to_year, start_month, end_month, cloud_threshold, satellite, cloud_mask_technique
     )
     if from_composite is None or to_composite is None:
@@ -607,7 +603,7 @@ def analyze_vegetation_change_hotspots(db, data: dict) -> dict:
         try:
             ring = geom["coordinates"][0] if geom["type"] == "Polygon" else geom["coordinates"][0][0]
             centroid = [round(sum(c[0] for c in ring) / len(ring), 6), round(sum(c[1] for c in ring) / len(ring), 6)]
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001, S110 - centroid is a display nicety; hotspot is still reported without it
             pass
         mean_change = props.get("mean")
         hotspots.append({

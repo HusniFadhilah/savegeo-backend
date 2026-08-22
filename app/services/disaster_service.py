@@ -11,7 +11,7 @@ instead of the legacy Flask `cfg()` helper.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from xml.etree import ElementTree as ET
 
 import ee
@@ -121,7 +121,7 @@ def get_bmkg_alerts(limit: int = 30) -> dict:
         "feed_url": feed_url,
         "count": len(alerts),
         "alerts": alerts[:max(1, min(limit, 100))],
-        "fetched_at": datetime.utcnow().isoformat() + "Z",
+        "fetched_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
     }
 
 
@@ -172,7 +172,7 @@ def get_disaster_dem_slope(data: dict) -> dict:
         }
     except AnalysisError:
         raise
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.exception("DEM slope analysis failed")
         raise AnalysisError(str(e), 500)
 
@@ -185,7 +185,7 @@ def get_disaster_event_map(data: dict) -> dict:
         if event_type not in {"flood", "fire", "landslide"}:
             raise AnalysisError("event_type harus flood, fire, atau landslide", 400)
 
-        today = datetime.utcnow().date()
+        today = datetime.now(UTC).date()
         after_end = _date_or_default(data.get("after_end"), today)
         after_start = _date_or_default(data.get("after_start"), today - timedelta(days=30))
         before_end = _date_or_default(data.get("before_end"), today - timedelta(days=31))
@@ -311,6 +311,6 @@ def get_disaster_event_map(data: dict) -> dict:
         raise
     except ValueError as e:
         raise AnalysisError(str(e), 400)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.exception("Disaster event mapping failed")
         raise AnalysisError(str(e), 500)

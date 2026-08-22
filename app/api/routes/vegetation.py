@@ -6,19 +6,19 @@ and gated behind `require_ee`. Ported from backend/app.py.
 """
 from __future__ import annotations
 
-import ee
 import logging
 
+import ee
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_ee
 from app.db.session import get_db
-from app.registries.vegetation_index_registry import get_catalog_payload
 from app.registries.satellite_provider_registry import DEFAULT_SATELLITE
+from app.registries.vegetation_index_registry import get_catalog_payload
 from app.repositories.satellite_provider_repo import list_satellites
 from app.services import vegetation_service
-from app.services.gee_common import AnalysisError, CLOUD_MASK_TECHNIQUE_INFO, DEFAULT_CLOUD_MASK_TECHNIQUE
+from app.services.gee_common import CLOUD_MASK_TECHNIQUE_INFO, DEFAULT_CLOUD_MASK_TECHNIQUE, AnalysisError
 
 router = APIRouter(tags=["vegetation"])
 logger = logging.getLogger(__name__)

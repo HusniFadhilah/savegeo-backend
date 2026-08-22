@@ -7,7 +7,7 @@ mirrors `app/api/routes/admin.py`'s `login()` handler exactly, just against
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -45,7 +45,7 @@ def login(payload: UserLoginRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter_by(username=payload.username).first()
     if not user or not user.is_active or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid username or password")
-    user.last_login = datetime.now(timezone.utc)
+    user.last_login = datetime.now(UTC)
     db.commit()
     return {"token": create_user_access_token(user), "user": user.to_dict()}
 

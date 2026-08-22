@@ -123,7 +123,6 @@ def resolve_growth_stage(commodity: str, days_since_planting: int) -> dict[str, 
     if crop is None or days_since_planting < 0:
         return None
     for stage in crop["stages"]:
-        if stage["max_day"] is None or days_since_planting <= stage["max_day"]:
-            if days_since_planting >= stage["min_day"]:
-                return stage
+        if (stage["max_day"] is None or days_since_planting <= stage["max_day"]) and days_since_planting >= stage["min_day"]:
+            return stage
     return crop["stages"][-1]

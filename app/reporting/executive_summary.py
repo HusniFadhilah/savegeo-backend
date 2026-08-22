@@ -6,9 +6,9 @@ Business-oriented, not a technical report.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from io import BytesIO
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -50,7 +50,7 @@ def _fmt_area(ha: Any) -> str:
 
 
 def _set_font(run, size_pt: float, bold: bool = False, italic: bool = False,
-              color: Optional[RGBColor] = None) -> None:
+              color: RGBColor | None = None) -> None:
     run.font.name = _FONT
     run.font.size = Pt(size_pt)
     run.font.bold  = bold
@@ -60,8 +60,8 @@ def _set_font(run, size_pt: float, bold: bool = False, italic: bool = False,
 
 
 def _para(doc: Document, text: str = "", size_pt: float = 9.5,
-          bold: bool = False, color: Optional[RGBColor] = None,
-          align: Optional[int] = None,
+          bold: bool = False, color: RGBColor | None = None,
+          align: int | None = None,
           space_before: float = 0, space_after: float = 3) -> Any:
     p = doc.add_paragraph()
     p.paragraph_format.space_before = Pt(space_before)
@@ -96,7 +96,7 @@ def _heading(doc: Document, text: str, size_pt: float = 10,
 
 
 def _bullet(doc: Document, text: str, size_pt: float = 9.5,
-            color: Optional[RGBColor] = None) -> Any:
+            color: RGBColor | None = None) -> Any:
     p = doc.add_paragraph()
     p.paragraph_format.space_before = Pt(0)
     p.paragraph_format.space_after  = Pt(2)
@@ -116,9 +116,9 @@ def _shade_cell(cell, hex_color: str) -> None:
     tcPr.append(shd)
 
 
-def _fill_row(row, values: List[str], sizes: List[float],
-              bold: bool = False, color: Optional[RGBColor] = None,
-              bg_hex: Optional[str] = None) -> None:
+def _fill_row(row, values: list[str], sizes: list[float],
+              bold: bool = False, color: RGBColor | None = None,
+              bg_hex: str | None = None) -> None:
     for cell, val, sz in zip(row.cells, values, sizes):
         if bg_hex:
             _shade_cell(cell, bg_hex)
@@ -142,10 +142,10 @@ def get_nested(data: Any, path: str, default: Any = None) -> Any:
     return val if val is not None else default
 
 
-def extract_landcover_rows(analysis: Dict) -> List[Dict]:
+def extract_landcover_rows(analysis: dict) -> list[dict]:
     """Top-5 land cover classes sorted by area, handling several response shapes."""
     lc = analysis.get("landcover") or {}
-    rows: List[Dict] = []
+    rows: list[dict] = []
 
     if isinstance(lc.get("class_areas"), list):
         for item in lc["class_areas"]:
@@ -174,10 +174,10 @@ def extract_landcover_rows(analysis: Dict) -> List[Dict]:
     return rows[:5]
 
 
-def extract_transition_rows(analysis: Dict) -> List[Dict]:
+def extract_transition_rows(analysis: dict) -> list[dict]:
     """Top-3 land cover transitions."""
     tr = analysis.get("landcover_transition") or {}
-    changes: List[Dict] = []
+    changes: list[dict] = []
 
     if isinstance(tr.get("top_changes"), list):
         for item in tr["top_changes"]:
@@ -200,7 +200,7 @@ def extract_transition_rows(analysis: Dict) -> List[Dict]:
     return changes[:3]
 
 
-def extract_vegetation_stats(analysis: Dict) -> Dict[str, Dict]:
+def extract_vegetation_stats(analysis: dict) -> dict[str, dict]:
     """Returns {INDEX: {mean, min, max, classification, narrative}} from several response shapes.
 
     classification/narrative are new, optional fields (backend/vegetation_index_registry.py) —
@@ -208,7 +208,7 @@ def extract_vegetation_stats(analysis: Dict) -> Dict[str, Dict]:
     """
     veg = analysis.get("vegetation") or {}
     raw = veg.get("statistics") or veg.get("stats") or veg.get("indices") or {}
-    stats: Dict[str, Dict] = {}
+    stats: dict[str, dict] = {}
     for idx, d in raw.items():
         if isinstance(d, dict):
             entry = {
@@ -224,7 +224,7 @@ def extract_vegetation_stats(analysis: Dict) -> Dict[str, Dict]:
     return stats
 
 
-def dominant_vegetation_class(veg_entry: Dict) -> Optional[Tuple[str, Dict]]:
+def dominant_vegetation_class(veg_entry: dict) -> tuple[str, dict] | None:
     """Largest-area class from a single index's classification block, if present."""
     classes = (veg_entry or {}).get("classification", {}).get("classes")
     if not classes:
@@ -232,7 +232,7 @@ def dominant_vegetation_class(veg_entry: Dict) -> Optional[Tuple[str, Dict]]:
     return max(classes.items(), key=lambda kv: kv[1].get("area", 0))
 
 
-def extract_carbon_stats(analysis: Dict) -> Dict:
+def extract_carbon_stats(analysis: dict) -> dict:
     """Returns {mean, total, unit, co2e, dataset, model_name, target_pool}."""
     c = analysis.get("carbon") or {}
     raw = c.get("statistics") or c.get("stats") or c.get("summary") or {}
@@ -247,9 +247,9 @@ def extract_carbon_stats(analysis: Dict) -> Dict:
     }
 
 
-def extract_map_layers(payload: Dict) -> List[str]:
+def extract_map_layers(payload: dict) -> list[str]:
     """Top-3 map layer display names."""
-    layers: List[str] = []
+    layers: list[str] = []
     for item in (get_nested(payload, "agent_report.map_layers") or []):
         name = (item.get("name") or item.get("label") or item.get("type") or str(item)) \
                if isinstance(item, dict) else str(item)
@@ -258,9 +258,9 @@ def extract_map_layers(payload: Dict) -> List[str]:
     return layers
 
 
-def extract_limitations(payload: Dict) -> List[str]:
+def extract_limitations(payload: dict) -> list[str]:
     """Up to 5 limitation / warning strings."""
-    lims: List[str] = []
+    lims: list[str] = []
     for item in (get_nested(payload, "agent_report.limitations") or []):
         if isinstance(item, str) and item.strip() and len(lims) < 5:
             lims.append(item.strip())
@@ -270,18 +270,18 @@ def extract_limitations(payload: Dict) -> List[str]:
     return lims
 
 
-def extract_recommendations(payload: Dict) -> List[str]:
+def extract_recommendations(payload: dict) -> list[str]:
     """Up to 5 next-action strings."""
-    recs: List[str] = []
+    recs: list[str] = []
     for item in (get_nested(payload, "agent_report.next_actions") or []):
         if isinstance(item, str) and item.strip() and len(recs) < 5:
             recs.append(item.strip())
     return recs
 
 
-def extract_insights(payload: Dict) -> List[str]:
+def extract_insights(payload: dict) -> list[str]:
     """Up to 6 insight strings from agent_report."""
-    items: List[str] = []
+    items: list[str] = []
     for item in (get_nested(payload, "agent_report.insights") or []):
         if isinstance(item, str) and item.strip() and len(items) < 6:
             items.append(item.strip())
@@ -290,7 +290,7 @@ def extract_insights(payload: Dict) -> List[str]:
 
 # ── Business inference ─────────────────────────────────────────────────────────
 
-def infer_business_findings(n: Dict) -> List[str]:
+def infer_business_findings(n: dict) -> list[str]:
     """Business-oriented key findings inferred from analysis data."""
     insights = n["insights"]
     if insights:
@@ -300,7 +300,7 @@ def infer_business_findings(n: Dict) -> List[str]:
     veg      = n["veg_stats"]
     carbon   = n["carbon"]
     tr_rows  = n["tr_rows"]
-    findings: List[str] = []
+    findings: list[str] = []
 
     if lc_rows:
         dom = lc_rows[0]
@@ -348,9 +348,9 @@ def infer_business_findings(n: Dict) -> List[str]:
     return findings[:6]
 
 
-def infer_business_metrics(n: Dict) -> List[Tuple[str, str, str]]:
+def infer_business_metrics(n: dict) -> list[tuple[str, str, str]]:
     """Returns list of (Metric, Value, Business Meaning), max 6."""
-    rows: List[Tuple[str, str, str]] = []
+    rows: list[tuple[str, str, str]] = []
     lc_data  = n["analysis"].get("landcover") or {}
     lc_rows  = n["lc_rows"]
     veg      = n["veg_stats"]
@@ -410,7 +410,7 @@ def infer_business_metrics(n: Dict) -> List[Tuple[str, str, str]]:
     return rows[:6]
 
 
-def infer_recommendations(n: Dict) -> List[str]:
+def infer_recommendations(n: dict) -> list[str]:
     """Use provided recs, or fall back to sensible defaults."""
     recs = n["recommendations"]
     if recs:
@@ -426,7 +426,7 @@ def infer_recommendations(n: Dict) -> List[str]:
 
 # ── Normalizer ─────────────────────────────────────────────────────────────────
 
-def normalize_report_payload(payload: Dict) -> Dict:
+def normalize_report_payload(payload: dict) -> dict:
     """Defensive normalization — always returns a clean dict."""
     analysis     = payload.get("analysis") or {}
     agent_report = payload.get("agent_report") or {}
@@ -449,12 +449,12 @@ def normalize_report_payload(payload: Dict) -> Dict:
         audience_summary = audience_summary.get("text") or audience_summary.get("summary") or ""
 
     year = (period_raw.get("year") or period_raw.get("end_year")
-            or datetime.now().year)
-    n: Dict = {
+            or datetime.now(UTC).year)
+    n: dict = {
         "title":        payload.get("title") or "SaveGeo Executive Summary",
         "aoi_name":     payload.get("aoi_name") or "Area Studi",
         "generated_by": payload.get("generated_by") or "SaveGeo",
-        "generated_at": datetime.now().strftime("%d %B %Y, %H:%M"),
+        "generated_at": datetime.now(UTC).strftime("%d %B %Y, %H:%M"),
         "period": {
             "year":       year,
             "start_year": period_raw.get("start_year") or year,
@@ -489,7 +489,7 @@ def normalize_report_payload(payload: Dict) -> Dict:
 
 # ── Section builders ───────────────────────────────────────────────────────────
 
-def _add_compact_header(doc: Document, n: Dict) -> None:
+def _add_compact_header(doc: Document, n: dict) -> None:
     # Title
     p = doc.add_paragraph()
     p.paragraph_format.space_before = Pt(0)
@@ -522,7 +522,7 @@ def _add_compact_header(doc: Document, n: Dict) -> None:
     pPr.append(pBdr)
 
 
-def _add_business_summary(doc: Document, n: Dict) -> None:
+def _add_business_summary(doc: Document, n: dict) -> None:
     _heading(doc, "Business Summary")
 
     summary = (n["audience_summary"] or "").strip()
@@ -551,7 +551,7 @@ def _add_business_summary(doc: Document, n: Dict) -> None:
         _para(doc, txt, size_pt=9.5, space_after=3)
 
         # Para 2: vegetation + carbon
-        parts: List[str] = []
+        parts: list[str] = []
         ndvi_key = "NDVI" if "NDVI" in veg else next(iter(veg), None)
         if ndvi_key and veg[ndvi_key].get("mean") is not None:
             if veg[ndvi_key].get("narrative"):
@@ -583,13 +583,13 @@ def _add_business_summary(doc: Document, n: Dict) -> None:
                   size_pt=9.5, space_after=3)
 
 
-def _add_strategic_key_findings(doc: Document, n: Dict) -> None:
+def _add_strategic_key_findings(doc: Document, n: dict) -> None:
     _heading(doc, "Strategic Key Findings")
     for f in n["findings"]:
         _bullet(doc, f)
 
 
-def _add_business_metrics_table(doc: Document, n: Dict) -> None:
+def _add_business_metrics_table(doc: Document, n: dict) -> None:
     _heading(doc, "Business-Relevant Metrics")
     metrics = n["metrics"]
     if not metrics:
@@ -612,7 +612,7 @@ def _add_business_metrics_table(doc: Document, n: Dict) -> None:
     _para(doc, "", space_before=2, space_after=2)
 
 
-def _add_business_interpretation(doc: Document, n: Dict) -> None:
+def _add_business_interpretation(doc: Document, n: dict) -> None:
     _heading(doc, "Business Interpretation by Theme")
 
     lc, veg, carbon, tr = n["lc_rows"], n["veg_stats"], n["carbon"], n["tr_rows"]
@@ -649,7 +649,7 @@ def _add_business_interpretation(doc: Document, n: Dict) -> None:
         )
 
     if carbon.get("mean") is not None or carbon.get("total") is not None:
-        parts: List[str] = []
+        parts: list[str] = []
         if carbon.get("mean") is not None:
             parts.append(f"Kerapatan karbon rata-rata {_fmt(carbon['mean'], 1)} {carbon['unit']}")
         if carbon.get("total") is not None:
@@ -675,7 +675,7 @@ def _add_business_interpretation(doc: Document, n: Dict) -> None:
               size_pt=9, color=_C_GRAY)
 
 
-def _add_decision_considerations(doc: Document, n: Dict) -> None:
+def _add_decision_considerations(doc: Document, n: dict) -> None:
     _heading(doc, "Decision Considerations")
     lims = n["limitations"] or [
         "Validasi lapangan diperlukan sebelum pengambilan keputusan operasional.",
@@ -688,17 +688,17 @@ def _add_decision_considerations(doc: Document, n: Dict) -> None:
         _bullet(doc, lim)
 
 
-def _add_recommended_next_actions(doc: Document, n: Dict) -> None:
+def _add_recommended_next_actions(doc: Document, n: dict) -> None:
     _heading(doc, "Recommended Next Actions")
     for rec in n["final_recs"]:
         _bullet(doc, rec)
 
 
-def _add_technical_notes(doc: Document, n: Dict) -> None:
+def _add_technical_notes(doc: Document, n: dict) -> None:
     _heading(doc, "Technical Notes", size_pt=8.5, color=_C_GRAY, border_hex="757575",
              space_before=4)
 
-    lines: List[str] = []
+    lines: list[str] = []
     if n["datasets"]:
         lines.append(f"Dataset: {', '.join(str(d) for d in n['datasets'][:4])}")
     if n["models"]:
@@ -732,7 +732,7 @@ def _add_technical_notes(doc: Document, n: Dict) -> None:
 
 # ── Main entry point ───────────────────────────────────────────────────────────
 
-def build_executive_summary_docx(payload: Dict) -> BytesIO:
+def build_executive_summary_docx(payload: dict) -> BytesIO:
     """
     Build a ~2-page executive summary DOCX from a SaveGeo analysis payload.
     Returns BytesIO ready for Flask send_file().

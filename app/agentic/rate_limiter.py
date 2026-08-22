@@ -3,9 +3,12 @@ rate_limiter.py — In-memory sliding-window rate limiter for the AI endpoint.
 Limits are per client IP, configurable via SystemConfig DB (ai.rate_limit_*).
 Thread-safe; stores state in module-level dict (resets on server restart).
 """
+import logging
 import time
 from collections import defaultdict
 from threading import Lock
+
+logger = logging.getLogger(__name__)
 
 _store: dict = defaultdict(lambda: {"min": [], "day": []})
 _lock  = Lock()
@@ -38,7 +41,8 @@ def _get_limits() -> dict:
                 row = db.query(SystemConfig).filter_by(key=key).first()
                 try:
                     return max(1, int(float(row.value))) if row and row.value else d
-                except Exception:
+                except Exception as exc:  # noqa: BLE001 - malformed config value falls back to the default
+                    logger.debug("Rate-limit config %r has an invalid value, using default: %s", key, exc)
                     return d
 
             _cfg_cache = {
@@ -49,7 +53,8 @@ def _get_limits() -> dict:
             }
         finally:
             db.close()
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 - no DB/app context (tests, CLI, outage): fall back to hardcoded defaults
+        logger.debug("Rate-limit config lookup failed, using defaults: %s", exc)
         _cfg_cache = defaults.copy()
 
     _cfg_ts = now

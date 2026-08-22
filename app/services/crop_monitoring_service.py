@@ -84,7 +84,7 @@ _ANOMALY_NDVI_DROP_THRESHOLD = -0.15
 
 def _resolve_period(field, period: dict) -> tuple[str, str, str]:
     mode = period.get("mode", "current_season")
-    today = dt.date.today()
+    today = dt.datetime.now(dt.UTC).date()
     if mode == "30d":
         return (today - dt.timedelta(days=30)).isoformat(), today.isoformat(), mode
     if mode == "90d":
@@ -109,8 +109,7 @@ def _period_to_year_months(start_date: str, end_date: str) -> tuple[int, int, in
     year = start.year
     start_month = start.month
     end_month = end.month if end.year == start.year else 12
-    if end_month < start_month:
-        end_month = start_month
+    end_month = max(end_month, start_month)
     return year, start_month, end_month
 
 
@@ -293,7 +292,7 @@ def _crop_anomaly(db, aoi, year, start_month, end_month, cloud_threshold, veg_sc
 def _growth_stage(field) -> dict:
     if field.planting_date is None:
         return {"available": False, "reason": "planting_date belum diisi pada Field ini"}
-    days = (dt.date.today() - field.planting_date).days
+    days = (dt.datetime.now(dt.UTC).date() - field.planting_date).days
     stage = crop_registry.resolve_growth_stage(field.commodity, days)
     if stage is None:
         return {"available": False, "reason": "Growth stage tidak tersedia untuk komoditas ini"}
@@ -409,7 +408,7 @@ def _productivity_zones(db, aoi, period_list: list[tuple[int, int, int]], cloud_
     ndvi_images, ndmi_images = [], []
     date_ranges = []
     for (y, sm, em) in period_list:
-        composite, _, s_date, e_date, size, _ = vegetation_service._composite_for_period(db, aoi, y, sm, em, cloud_threshold, satellite, cloud_mask_technique)
+        composite, _, s_date, e_date, _size, _ = vegetation_service._composite_for_period(db, aoi, y, sm, em, cloud_threshold, satellite, cloud_mask_technique)
         if composite is None:
             continue
         ndvi_images.append(calculate_index(composite, "NDVI"))
@@ -433,7 +432,7 @@ def _productivity_zones(db, aoi, period_list: list[tuple[int, int, int]], cloud_
         if s1_median is not None:
             s1_norm = s1_median.add(25).divide(25).clamp(0, 1)  # VV in dB, roughly [-25, 0] -> [0, 1]
 
-    components: list[tuple[str, "ee.Image", float]] = [("ndvi", ndvi_norm, 0.40), ("ndmi", ndmi_norm, 0.25)]
+    components: list[tuple[str, ee.Image, float]] = [("ndvi", ndvi_norm, 0.40), ("ndmi", ndmi_norm, 0.25)]
     if s1_norm is not None:
         components.append(("sentinel1_vv", s1_norm, 0.20))
     if elev_norm is not None:

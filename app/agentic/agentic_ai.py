@@ -7,12 +7,15 @@ produce the same plan schema, then pass through the validator here.
 """
 from __future__ import annotations
 
+import logging
 import re
 import time
 from copy import deepcopy
-from datetime import datetime
+from datetime import UTC, datetime
 from threading import Lock
-from typing import Any, Dict, List, Optional
+from typing import Any, ClassVar
+
+logger = logging.getLogger(__name__)
 
 
 # ── API key pool — per-provider multi-key with 429 rate-limit tracking ────────
@@ -25,7 +28,7 @@ class _KeyPool:
     """
 
     _lock:  Lock        = Lock()
-    _rl:    Dict[str, float] = {}   # "provider:prefix" → unavailable_until (epoch)
+    _rl:    ClassVar[dict[str, float]] = {}   # "provider:prefix" → unavailable_until (epoch)
 
     @classmethod
     def is_available(cls, provider: str, key: str) -> bool:
@@ -43,7 +46,7 @@ class _KeyPool:
             return max(0, int(cls._rl.get(f"{provider}:{key[:12]}", 0) - time.time()))
 
     @classmethod
-    def status(cls, provider: str, keys: List[str]) -> List[dict]:
+    def status(cls, provider: str, keys: list[str]) -> list[dict]:
         now = time.time()
         out = []
         for k in keys:
@@ -56,7 +59,7 @@ class _KeyPool:
         return out
 
 
-ALLOWED_TOOLS: Dict[str, Dict[str, str]] = {
+ALLOWED_TOOLS: dict[str, dict[str, str]] = {
     "list_capabilities": {
         "method": "GET",
         "path": "/api/agent/capabilities",
@@ -330,12 +333,12 @@ WORKFLOW_DEFAULTS = {
 
 
 def build_agent_capabilities(
-    carbon_datasets: List[Dict[str, Any]],
-    landcover_datasets: List[Dict[str, Any]],
-    models: List[Dict[str, Any]],
+    carbon_datasets: list[dict[str, Any]],
+    landcover_datasets: list[dict[str, Any]],
+    models: list[dict[str, Any]],
     ee_initialized: bool,
     arcgis_enabled: bool,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Create the compact capability document exposed to clients and the planner."""
     return {
         "agent": {
@@ -392,7 +395,7 @@ def build_agent_capabilities(
     }
 
 
-def plan_agent_request(payload: Dict[str, Any], capabilities: Dict[str, Any]) -> Dict[str, Any]:
+def plan_agent_request(payload: dict[str, Any], capabilities: dict[str, Any]) -> dict[str, Any]:
     """Build a validated workflow plan from a natural-language-ish request."""
     message = str(payload.get("message") or payload.get("prompt") or "").strip()
     requested_task = str(payload.get("task") or "").strip().lower()
@@ -432,7 +435,7 @@ def plan_agent_request(payload: Dict[str, Any], capabilities: Dict[str, Any]) ->
     }
 
 
-def execute_agent_plan(plan: Dict[str, Any], http_client) -> Dict[str, Any]:
+def execute_agent_plan(plan: dict[str, Any], http_client) -> dict[str, Any]:
     """Execute whitelisted tool calls against our own FastAPI app.
 
     `http_client` is an `httpx.Client` bound to the app via `httpx.ASGITransport`
@@ -478,7 +481,7 @@ def execute_agent_plan(plan: Dict[str, Any], http_client) -> Dict[str, Any]:
 
         try:
             data = response.json()
-        except Exception:
+        except Exception:  # noqa: BLE001 - response body might not be JSON; fall back to raw text
             data = response.text
 
         results.append({
@@ -524,7 +527,7 @@ def _infer_task(message: str) -> str:
     return "unknown"
 
 
-def _build_complete_analysis_plan(payload: Dict[str, Any], message: str, capabilities: Dict[str, Any]) -> Dict[str, Any]:
+def _build_complete_analysis_plan(payload: dict[str, Any], message: str, capabilities: dict[str, Any]) -> dict[str, Any]:
     years = _years_from_message(message)
     primary_year = int(payload.get("year") or (years[-1] if years else WORKFLOW_DEFAULTS["landcover"]["year"]))
     baseline_year = payload.get("start_year") or (years[0] if len(years) > 1 else None)
@@ -576,7 +579,7 @@ def _build_complete_analysis_plan(payload: Dict[str, Any], message: str, capabil
     )
 
 
-def _build_carbon_plan(payload: Dict[str, Any], message: str, capabilities: Dict[str, Any]) -> Dict[str, Any]:
+def _build_carbon_plan(payload: dict[str, Any], message: str, capabilities: dict[str, Any]) -> dict[str, Any]:
     carbon_datasets = capabilities["datasets"]["carbon"]
     dataset = _pick_carbon_dataset(payload, message, carbon_datasets)
     if not dataset:
@@ -624,7 +627,7 @@ def _build_carbon_plan(payload: Dict[str, Any], message: str, capabilities: Dict
     )
 
 
-def _build_vegetation_plan(payload: Dict[str, Any], message: str, capabilities: Dict[str, Any]) -> Dict[str, Any]:
+def _build_vegetation_plan(payload: dict[str, Any], message: str, capabilities: dict[str, Any]) -> dict[str, Any]:
     params = _merged_params("vegetation", payload)
     indices = payload.get("indices") or _indices_from_message(message) or params["indices"]
     request_payload = {
@@ -665,7 +668,7 @@ def _index_pair_from_message(message: str, default_a: str, default_b: str) -> tu
     return default_a, default_b
 
 
-def _build_vegetation_compare_plan(payload: Dict[str, Any], message: str, capabilities: Dict[str, Any]) -> Dict[str, Any]:
+def _build_vegetation_compare_plan(payload: dict[str, Any], message: str, capabilities: dict[str, Any]) -> dict[str, Any]:
     params = _merged_params("vegetation_compare", payload)
     index_a, index_b = _index_pair_from_message(message, params["index_a"], params["index_b"])
     index_a = payload.get("index_a") or index_a
@@ -701,7 +704,7 @@ def _build_vegetation_compare_plan(payload: Dict[str, Any], message: str, capabi
     )
 
 
-def _build_landcover_plan(payload: Dict[str, Any], message: str, capabilities: Dict[str, Any]) -> Dict[str, Any]:
+def _build_landcover_plan(payload: dict[str, Any], message: str, capabilities: dict[str, Any]) -> dict[str, Any]:
     params = _merged_params("landcover", payload)
     datasets = payload.get("datasets") or _pick_landcover_datasets(message, capabilities) or params["datasets"]
     request_payload = {
@@ -732,10 +735,10 @@ def _build_landcover_plan(payload: Dict[str, Any], message: str, capabilities: D
     )
 
 
-def _build_landcover_transition_plan(payload: Dict[str, Any], message: str, capabilities: Dict[str, Any]) -> Dict[str, Any]:
+def _build_landcover_transition_plan(payload: dict[str, Any], message: str, capabilities: dict[str, Any]) -> dict[str, Any]:
     years = _years_from_message(message)
-    start_year = int(payload.get("start_year") or (years[0] if years else datetime.now().year - 1))
-    end_year = int(payload.get("end_year") or (years[-1] if len(years) > 1 else datetime.now().year))
+    start_year = int(payload.get("start_year") or (years[0] if years else datetime.now(UTC).year - 1))
+    end_year = int(payload.get("end_year") or (years[-1] if len(years) > 1 else datetime.now(UTC).year))
     dataset = payload.get("dataset") or _pick_transition_landcover_dataset(message, capabilities)
     if not dataset:
         return _blocked_plan(
@@ -772,7 +775,7 @@ def _build_landcover_transition_plan(payload: Dict[str, Any], message: str, capa
     )
 
 
-def _build_troubleshooting_plan(message: str, capabilities: Dict[str, Any]) -> Dict[str, Any]:
+def _build_troubleshooting_plan(message: str, capabilities: dict[str, Any]) -> dict[str, Any]:
     carbon_keys = [d["key"] for d in capabilities["datasets"]["carbon"]]
     example_dataset = carbon_keys[0] if carbon_keys else "dataset operasional dari /api/carbon/datasets"
     return {
@@ -814,14 +817,14 @@ def _build_troubleshooting_plan(message: str, capabilities: Dict[str, Any]) -> D
 def _ready_plan(
     task: str,
     summary: str,
-    steps: List[str],
-    tool_calls: List[Dict[str, Any]],
-    warnings: List[str],
+    steps: list[str],
+    tool_calls: list[dict[str, Any]],
+    warnings: list[str],
     requires_aoi: bool,
     has_aoi: bool,
-    guidance: Optional[Dict[str, Any]] = None,
-    workflow_stage: Optional[str] = None,
-) -> Dict[str, Any]:
+    guidance: dict[str, Any] | None = None,
+    workflow_stage: str | None = None,
+) -> dict[str, Any]:
     missing = []
     if requires_aoi and not has_aoi:
         missing.append("aoi")
@@ -859,7 +862,7 @@ def _ready_plan(
     }
 
 
-def _blocked_plan(task: str, message: str, warnings: List[str]) -> Dict[str, Any]:
+def _blocked_plan(task: str, message: str, warnings: list[str]) -> dict[str, Any]:
     return {
         "status": "blocked",
         "task": task,
@@ -875,7 +878,7 @@ def _blocked_plan(task: str, message: str, warnings: List[str]) -> Dict[str, Any
     }
 
 
-def _missing_input_questions(payload: Dict[str, Any], needs_year: bool = True) -> List[str]:
+def _missing_input_questions(payload: dict[str, Any], needs_year: bool = True) -> list[str]:
     questions = []
     if not payload.get("aoi"):
         questions.append("Tentukan AOI dulu: gambar batas area di peta atau unggah GeoJSON.")
@@ -886,7 +889,7 @@ def _missing_input_questions(payload: Dict[str, Any], needs_year: bool = True) -
     return questions
 
 
-def _dataset_reason(dataset: Dict[str, Any]) -> Dict[str, Any]:
+def _dataset_reason(dataset: dict[str, Any]) -> dict[str, Any]:
     return {
         "key": dataset.get("key"),
         "name": dataset.get("name") or dataset.get("full_name"),
@@ -899,7 +902,7 @@ def _dataset_reason(dataset: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _build_execution_report(plan: Dict[str, Any], results: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _build_execution_report(plan: dict[str, Any], results: list[dict[str, Any]]) -> dict[str, Any]:
     ok_results = [result for result in results if result.get("ok")]
     failed_results = [result for result in results if not result.get("ok")]
     map_layers = []
@@ -949,7 +952,7 @@ def _build_execution_report(plan: Dict[str, Any], results: List[Dict[str, Any]])
     }
 
 
-def _extract_map_layer(tool: str, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _extract_map_layer(tool: str, data: dict[str, Any]) -> dict[str, Any] | None:
     for key in ("tile_url", "tiles", "map_tile", "map_url"):
         if data.get(key):
             return {"tool": tool, "url": data[key]}
@@ -964,7 +967,7 @@ def _extract_map_layer(tool: str, data: Dict[str, Any]) -> Optional[Dict[str, An
     return None
 
 
-def _extract_statistics(data: Dict[str, Any]) -> Dict[str, Any]:
+def _extract_statistics(data: dict[str, Any]) -> dict[str, Any]:
     for key in ("statistics", "stats", "summary", "area_stats", "class_areas", "transition_matrix"):
         value = data.get(key)
         if value is not None:
@@ -976,7 +979,7 @@ def _extract_statistics(data: Dict[str, Any]) -> Dict[str, Any]:
     return compact
 
 
-def _extract_error(data: Any) -> Optional[str]:
+def _extract_error(data: Any) -> str | None:
     if isinstance(data, dict):
         return data.get("error") or data.get("message")
     if isinstance(data, str):
@@ -984,7 +987,7 @@ def _extract_error(data: Any) -> Optional[str]:
     return None
 
 
-def _merged_params(workflow: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+def _merged_params(workflow: str, payload: dict[str, Any]) -> dict[str, Any]:
     params = deepcopy(WORKFLOW_DEFAULTS[workflow])
     for key in list(params.keys()):
         if key in payload and payload[key] is not None:
@@ -995,7 +998,7 @@ def _merged_params(workflow: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     return params
 
 
-def _pick_carbon_dataset(payload: Dict[str, Any], message: str, datasets: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+def _pick_carbon_dataset(payload: dict[str, Any], message: str, datasets: list[dict[str, Any]]) -> dict[str, Any] | None:
     if not datasets:
         return None
     requested = payload.get("reference_dataset") or payload.get("dataset")
@@ -1019,7 +1022,7 @@ def _pick_carbon_dataset(payload: Dict[str, Any], message: str, datasets: List[D
     return _rank_carbon_datasets(datasets)[0]
 
 
-def _dataset_replacement(key: str) -> Optional[str]:
+def _dataset_replacement(key: str) -> str | None:
     replacements = {
         "ESA_CCI": "ESA_CCI_SATIO_AGB",
         "GLOBAL_MANGROVE_WATCH_AGB": "HANSEN_TREECOVER_AGB_PROXY",
@@ -1031,7 +1034,7 @@ def _dataset_replacement(key: str) -> Optional[str]:
 _NON_GEE_PROVIDERS = {"non_gee_stac", "local_raster"}
 
 
-def _pick_model_for_dataset(dataset: Dict[str, Any], capabilities: Optional[Dict[str, Any]] = None) -> Optional[str]:
+def _pick_model_for_dataset(dataset: dict[str, Any], capabilities: dict[str, Any] | None = None) -> str | None:
     models = dataset.get("compatible_models") or []
     if not models:
         return None
@@ -1041,7 +1044,7 @@ def _pick_model_for_dataset(dataset: Dict[str, Any], capabilities: Optional[Dict
     # like NDVI_x_elevation) can't be built server-side in GEE and would fail deep
     # inside tile construction. Exclude those from auto-pick; they're only reachable
     # via explicit model_name + /api/analyze/carbon-local, never auto-selected here.
-    provider_by_name: Dict[str, Optional[str]] = {}
+    provider_by_name: dict[str, str | None] = {}
     if capabilities:
         for m in capabilities.get("models", {}).get("carbon", []):
             meta = m.get("metadata_json") or {}
@@ -1058,7 +1061,7 @@ def _pick_model_for_dataset(dataset: Dict[str, Any], capabilities: Optional[Dict
     return gee_models[0]
 
 
-def _pick_landcover_datasets(message: str, capabilities: Dict[str, Any]) -> List[str]:
+def _pick_landcover_datasets(message: str, capabilities: dict[str, Any]) -> list[str]:
     available = [
         dataset for dataset in capabilities["datasets"]["landcover"]
         if dataset.get("supports_summary", True)
@@ -1072,7 +1075,7 @@ def _pick_landcover_datasets(message: str, capabilities: Dict[str, Any]) -> List
     return picks
 
 
-def _pick_transition_landcover_dataset(message: str, capabilities: Dict[str, Any]) -> Optional[str]:
+def _pick_transition_landcover_dataset(message: str, capabilities: dict[str, Any]) -> str | None:
     available = [
         dataset for dataset in capabilities["datasets"]["landcover"]
         if dataset.get("supports_transition", True)
@@ -1084,7 +1087,7 @@ def _pick_transition_landcover_dataset(message: str, capabilities: Dict[str, Any
     return ranked[0]["key"] if ranked else None
 
 
-def _best_dataset_match(text: str, datasets: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+def _best_dataset_match(text: str, datasets: list[dict[str, Any]]) -> dict[str, Any] | None:
     ranked = [
         (score, dataset)
         for dataset in datasets
@@ -1097,7 +1100,7 @@ def _best_dataset_match(text: str, datasets: List[Dict[str, Any]]) -> Optional[D
     return ranked[0][1]
 
 
-def _matching_dataset_keys(text: str, datasets: List[Dict[str, Any]]) -> List[str]:
+def _matching_dataset_keys(text: str, datasets: list[dict[str, Any]]) -> list[str]:
     ranked = [
         (score, dataset)
         for dataset in datasets
@@ -1108,7 +1111,7 @@ def _matching_dataset_keys(text: str, datasets: List[Dict[str, Any]]) -> List[st
     return [dataset["key"] for _, dataset in ranked[:3]]
 
 
-def _dataset_match_score(text: str, dataset: Dict[str, Any]) -> int:
+def _dataset_match_score(text: str, dataset: dict[str, Any]) -> int:
     haystack = " ".join(
         str(dataset.get(key) or "")
         for key in (
@@ -1135,7 +1138,7 @@ def _dataset_match_score(text: str, dataset: Dict[str, Any]) -> int:
     return score
 
 
-def _meaningful_words(text: str) -> List[str]:
+def _meaningful_words(text: str) -> list[str]:
     stopwords = {
         "analisis", "analysis", "hitung", "estimasi", "pakai", "gunakan",
         "dataset", "model", "untuk", "yang", "dan", "atau", "ini", "aoi",
@@ -1148,11 +1151,11 @@ def _meaningful_words(text: str) -> List[str]:
     ]
 
 
-def _rank_carbon_datasets(datasets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _rank_carbon_datasets(datasets: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(datasets, key=_dataset_preference_score)
 
 
-def _dataset_preference_score(dataset: Dict[str, Any]) -> tuple:
+def _dataset_preference_score(dataset: dict[str, Any]) -> tuple:
     model_count = int(dataset.get("compatible_model_count") or len(dataset.get("compatible_models") or []))
     resolution = _resolution_number(dataset.get("resolution"))
     provider_type = str(dataset.get("provider_type") or "")
@@ -1160,7 +1163,7 @@ def _dataset_preference_score(dataset: Dict[str, Any]) -> tuple:
     return (-model_count, provider_rank, resolution, str(dataset.get("key") or ""))
 
 
-def _landcover_dataset_sort_key(dataset: Dict[str, Any]) -> tuple:
+def _landcover_dataset_sort_key(dataset: dict[str, Any]) -> tuple:
     resolution = _resolution_number(dataset.get("native_scale") or dataset.get("resolution"))
     year_max = dataset.get("year_max")
     year_rank = -int(year_max) if isinstance(year_max, int) else 0
@@ -1175,7 +1178,7 @@ def _resolution_number(value: Any) -> int:
     return int(match.group(0)) if match else 999999
 
 
-def _indices_from_message(message: str) -> List[str]:
+def _indices_from_message(message: str) -> list[str]:
     text = message.upper()
     indices = []
     # MSAVI before SAVI, MNDWI before NDWI: "SAVI"/"NDWI" are substrings of the
@@ -1190,7 +1193,7 @@ def _indices_from_message(message: str) -> List[str]:
     return indices
 
 
-def _years_from_message(message: str) -> List[int]:
+def _years_from_message(message: str) -> list[int]:
     years = []
     for match in re.findall(r"\b(20\d{2}|19\d{2})\b", message):
         year = int(match)
@@ -1199,7 +1202,7 @@ def _years_from_message(message: str) -> List[int]:
     return years
 
 
-def _carbon_warnings(dataset: Dict[str, Any]) -> List[str]:
+def _carbon_warnings(dataset: dict[str, Any]) -> list[str]:
     warnings = []
     pool = str(dataset.get("target_pool") or "")
     if "soil" in pool:
@@ -1419,7 +1422,7 @@ def _get_ai_config() -> dict:
             }
         finally:
             _db_session.close()
-    except Exception:
+    except Exception:  # noqa: BLE001 - outside app context (tests, CLI): fall back to env vars only
         # Outside app context (tests, CLI) — env vars only
         return {
             "provider":               _env("AI_PROVIDER", "anthropic"),
@@ -1441,7 +1444,7 @@ def _get_ai_config() -> dict:
         }
 
 
-def _get_keys_for_provider(cfg: dict, provider: str) -> List[str]:
+def _get_keys_for_provider(cfg: dict, provider: str) -> list[str]:
     """Return [primary, ...backup] keys for a provider, deduplicated."""
     primary_field = {
         "gemini":     "gemini_api_key",
@@ -1457,7 +1460,7 @@ def _get_keys_for_provider(cfg: dict, provider: str) -> List[str]:
     backups   = [k.strip() for k in bk_raw.splitlines() if k.strip()]
 
     seen: set = set()
-    keys: List[str] = []
+    keys: list[str] = []
     for k in [primary] + backups:
         if k and k not in seen:
             seen.add(k)
@@ -1517,14 +1520,15 @@ def _extract_attachment_text(att: dict) -> str:
     import base64 as _b64
     try:
         data = _b64.b64decode(b64)
-    except Exception:
+    except Exception:  # noqa: BLE001 - malformed base64 can fail in several ways; surfaced to the user directly
         return f"[Lampiran: {name} — gagal decode base64]"
 
     # PDF
     if "pdf" in mime or name.lower().endswith(".pdf"):
         try:
-            from pypdf import PdfReader
             import io
+
+            from pypdf import PdfReader
             reader = PdfReader(io.BytesIO(data))
             pages  = []
             for p in reader.pages[:10]:  # max 10 pages
@@ -1535,27 +1539,28 @@ def _extract_attachment_text(att: dict) -> str:
             return f"[Lampiran PDF: {name} — {len(reader.pages)} halaman]\n{content}"
         except ImportError:
             return f"[Lampiran PDF: {name} — install pypdf: pip install pypdf]"
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - PDF parsing can fail many ways; surfaced to the user directly
             return f"[Lampiran PDF: {name} — gagal membaca: {exc}]"
 
     # DOCX
     if "wordprocessingml" in mime or name.lower().endswith(".docx"):
         try:
-            from docx import Document
             import io
+
+            from docx import Document
             doc     = Document(io.BytesIO(data))
             content = "\n".join(p.text for p in doc.paragraphs if p.text.strip())[:8000]
             return f"[Lampiran DOCX: {name}]\n{content}"
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - DOCX parsing can fail many ways; surfaced to the user directly
             return f"[Lampiran DOCX: {name} — gagal membaca: {exc}]"
 
     return f"[Lampiran: {name} ({mime}) — format tidak didukung untuk ekstraksi teks]"
 
 
 def plan_with_ai(message: str, page_state: dict,
-                 image_b64: Optional[str] = None,
-                 attachment: Optional[dict] = None,
-                 history: Optional[List[dict]] = None) -> dict:
+                 image_b64: str | None = None,
+                 attachment: dict | None = None,
+                 history: list[dict] | None = None) -> dict:
     """Multi-provider AI controller — dispatches to the configured provider.
 
     image_b64:  base64 PNG screenshot (no data-URL prefix), optional.
@@ -1615,7 +1620,7 @@ def plan_with_ai(message: str, page_state: dict,
             # Key pool — try primary then backups on 429
             keys     = _get_keys_for_provider(cfg, provider)
             raw      = ""
-            last_exc: Optional[Exception] = None
+            last_exc: Exception | None = None
             for key in keys:
                 if not _KeyPool.is_available(provider, key):
                     continue
@@ -1686,8 +1691,8 @@ def plan_with_ai(message: str, page_state: dict,
                 obj = _ast.literal_eval(candidate)
                 if isinstance(obj, dict):
                     return obj
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001 - last-resort parse attempt, next line re-raises anyway
+                logger.debug("literal_eval parse attempt failed: %s", exc)
 
             # All attempts failed — re-raise with original text for logging
             raise _json.JSONDecodeError("All parse attempts failed", text, 0)
@@ -1708,8 +1713,8 @@ def plan_with_ai(message: str, page_state: dict,
 
 
 def _call_anthropic(api_key: str, model: str, user_input: str,
-                    image_b64: Optional[str] = None,
-                    history: Optional[List[dict]] = None) -> str:
+                    image_b64: str | None = None,
+                    history: list[dict] | None = None) -> str:
     if not api_key:
         raise ValueError("ai.anthropic_api_key tidak dikonfigurasi.")
     try:
@@ -1742,9 +1747,9 @@ def _call_anthropic(api_key: str, model: str, user_input: str,
 
 
 def _call_openai_compat(api_key: str, model: str, user_input: str,
-                        base_url: Optional[str] = None,
-                        image_b64: Optional[str] = None,
-                        history: Optional[List[dict]] = None,
+                        base_url: str | None = None,
+                        image_b64: str | None = None,
+                        history: list[dict] | None = None,
                         force_json: bool = True) -> str:
     _LOCAL_DUMMY_KEYS = {"ollama", "opencode"}
     if not api_key or (api_key not in _LOCAL_DUMMY_KEYS and not api_key.strip()):
@@ -1820,8 +1825,8 @@ def _call_openai_compat(api_key: str, model: str, user_input: str,
 
 
 def _call_gemini(api_key: str, model: str, user_input: str,
-                 image_b64: Optional[str] = None,
-                 history: Optional[List[dict]] = None) -> str:
+                 image_b64: str | None = None,
+                 history: list[dict] | None = None) -> str:
     """Uses google-genai (new SDK: from google import genai)."""
     if not api_key:
         raise ValueError("ai.gemini_api_key tidak dikonfigurasi.")
@@ -1877,14 +1882,14 @@ def _call_gemini(api_key: str, model: str, user_input: str,
                 # Try extracting from candidates directly
                 try:
                     text = resp.candidates[0].content.parts[0].text
-                except Exception:
-                    pass
+                except Exception as exc:  # noqa: BLE001 - best-effort fallback; `if not text` below still handles it
+                    logger.debug("Gemini candidates fallback extraction failed: %s", exc)
             if not text:
                 finish = ""
                 try:
                     finish = str(resp.candidates[0].finish_reason)
-                except Exception:
-                    pass
+                except Exception as exc:  # noqa: BLE001 - best-effort diagnostic only, used in the error message below
+                    logger.debug("Gemini finish_reason extraction failed: %s", exc)
                 raise ValueError(
                     f"Gemini mengembalikan respons kosong "
                     f"(finish_reason={finish}). Mungkin diblokir safety filter."
@@ -1893,10 +1898,9 @@ def _call_gemini(api_key: str, model: str, user_input: str,
         except Exception as e:
             last_err = e
             msg = str(e)
-            if any(code in msg for code in ("503", "UNAVAILABLE", "529", "overloaded")):
-                if attempt < 2:
-                    _time.sleep(3 * (attempt + 1))
-                    continue
+            if any(code in msg for code in ("503", "UNAVAILABLE", "529", "overloaded")) and attempt < 2:
+                _time.sleep(3 * (attempt + 1))
+                continue
             raise
     raise last_err
 
@@ -1917,9 +1921,9 @@ def _controller_fallback(reason: str) -> dict:
 
 # Backward-compat alias
 def plan_with_claude(message: str, page_state: dict,
-                     image_b64: Optional[str] = None,
-                     attachment: Optional[dict] = None,
-                     history: Optional[List[dict]] = None) -> dict:
+                     image_b64: str | None = None,
+                     attachment: dict | None = None,
+                     history: list[dict] | None = None) -> dict:
     return plan_with_ai(message, page_state, image_b64, attachment, history)
 
 
@@ -2065,8 +2069,8 @@ def _extract_json_object(raw: str) -> dict:
         obj = _ast.literal_eval(candidate)
         if isinstance(obj, dict):
             return obj
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 - last-resort parse attempt, falls through to the generic reply below
+        logger.debug("literal_eval fallback parse failed: %s", exc)
 
     return {
         "message": raw.strip() or "Maaf, saya tidak bisa memproses permintaan ini sekarang.",
@@ -2087,7 +2091,7 @@ def _tool_round_limit_response() -> str:
     }, ensure_ascii=False)
 
 
-def _tool_schema_for_anthropic() -> List[dict]:
+def _tool_schema_for_anthropic() -> list[dict]:
     from app.agentic.geoai_tools import GEOAI_TOOLS
 
     return [
@@ -2096,7 +2100,7 @@ def _tool_schema_for_anthropic() -> List[dict]:
     ]
 
 
-def _tool_schema_for_openai() -> List[dict]:
+def _tool_schema_for_openai() -> list[dict]:
     from app.agentic.geoai_tools import GEOAI_TOOLS
 
     return [
@@ -2106,7 +2110,7 @@ def _tool_schema_for_openai() -> List[dict]:
 
 
 def _call_anthropic_tools(api_key: str, model: str, user_input: str,
-                          history: Optional[List[dict]], tool_ctx: dict,
+                          history: list[dict] | None, tool_ctx: dict,
                           max_rounds: int = 6) -> str:
     import json as _json
 
@@ -2147,7 +2151,7 @@ def _call_anthropic_tools(api_key: str, model: str, user_input: str,
 
 
 def _call_openai_compat_tools(api_key: str, model: str, user_input: str,
-                              base_url: Optional[str], history: Optional[List[dict]],
+                              base_url: str | None, history: list[dict] | None,
                               tool_ctx: dict, max_rounds: int = 6) -> str:
     import json as _json
 
@@ -2193,7 +2197,8 @@ def _call_openai_compat_tools(api_key: str, model: str, user_input: str,
         for tc in tool_calls:
             try:
                 args = _json.loads(tc.function.arguments or "{}")
-            except Exception:
+            except Exception as exc:  # noqa: BLE001 - malformed tool-call args fall back to no args, not a crash
+                logger.debug("Tool-call arguments failed to parse as JSON: %s", exc)
                 args = {}
             result = execute_geoai_tool(tc.function.name, args, tool_ctx)
             messages.append({"role": "tool", "tool_call_id": tc.id, "content": _json.dumps(result, ensure_ascii=False, default=str)})
@@ -2202,7 +2207,7 @@ def _call_openai_compat_tools(api_key: str, model: str, user_input: str,
 
 
 def _call_gemini_tools(api_key: str, model: str, user_input: str,
-                       history: Optional[List[dict]], tool_ctx: dict,
+                       history: list[dict] | None, tool_ctx: dict,
                        max_rounds: int = 6) -> str:
     if not api_key:
         raise ValueError("ai.gemini_api_key tidak dikonfigurasi.")
@@ -2252,7 +2257,7 @@ def _call_gemini_tools(api_key: str, model: str, user_input: str,
     return _tool_round_limit_response()
 
 
-def geoai_with_ai(message: str, context: dict, db, history: Optional[List[dict]] = None) -> dict:
+def geoai_with_ai(message: str, context: dict, db, history: list[dict] | None = None) -> dict:
     """Tool-calling SaveGeo Assistant loop (P0). See GEOAI_SYSTEM_PROMPT and
     app/agentic/geoai_tools.py for the grounding/whitelist contract.
 
@@ -2297,7 +2302,7 @@ def geoai_with_ai(message: str, context: dict, db, history: Optional[List[dict]]
         else:
             keys = _get_keys_for_provider(cfg, provider)
             raw = ""
-            last_exc: Optional[Exception] = None
+            last_exc: Exception | None = None
             for key in keys:
                 if not _KeyPool.is_available(provider, key):
                     continue

@@ -37,9 +37,9 @@ class Field(Base):
     # duration for the commodity - stored so the Field list can show it without
     # recomputing per row; recomputed whenever planting_date or commodity changes.
     estimated_harvest_date: Mapped[dt.date | None] = mapped_column(Date)
-    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc))
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.UTC))
     updated_at: Mapped[dt.datetime] = mapped_column(
-        DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc)
+        DateTime(timezone=True), default=lambda: dt.datetime.now(dt.UTC), onupdate=lambda: dt.datetime.now(dt.UTC)
     )
 
     def to_dict(self, include_geojson: bool = False) -> dict:

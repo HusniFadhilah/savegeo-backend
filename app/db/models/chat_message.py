@@ -17,7 +17,7 @@ class ChatMessage(Base):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     has_image: Mapped[bool] = mapped_column(Boolean, default=False)
     file_name: Mapped[str | None] = mapped_column(String(255))
-    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc))
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.UTC))
 
     def to_dict(self) -> dict:
         return {

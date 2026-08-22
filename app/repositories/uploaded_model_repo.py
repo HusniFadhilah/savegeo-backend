@@ -29,7 +29,7 @@ def _safe_json_load_file(path: Path) -> dict:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
             return data if isinstance(data, dict) else {}
-    except Exception:
+    except Exception:  # noqa: BLE001 - malformed/missing legacy registry file: treat as empty, not a crash
         return {}
 
 

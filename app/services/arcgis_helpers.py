@@ -10,8 +10,7 @@ import hashlib
 import json
 import logging
 import math
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 import requests
 
@@ -124,8 +123,8 @@ def _aoi_bbox(aoi_payload: dict):
 
 def _year_ms_range(year: int) -> str:
     """Return ArcGIS time parameter string for a full calendar year (UTC ms)."""
-    start = int(datetime(year, 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
-    end = int(datetime(year, 12, 31, 23, 59, 59, tzinfo=timezone.utc).timestamp() * 1000)
+    start = int(datetime(year, 1, 1, tzinfo=UTC).timestamp() * 1000)
+    end = int(datetime(year, 12, 31, 23, 59, 59, tzinfo=UTC).timestamp() * 1000)
     return f"{start},{end}"
 
 

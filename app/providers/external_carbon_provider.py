@@ -17,7 +17,6 @@ import logging
 import math
 import random
 import time
-from typing import Dict, List, Optional, Tuple
 
 import requests
 
@@ -43,9 +42,9 @@ class ExternalRasterProvider:
 
     def sample_carbon_labels(
         self,
-        meta: Dict,
-        points_lonlat: List[Tuple[float, float]],
-    ) -> List[Optional[float]]:
+        meta: dict,
+        points_lonlat: list[tuple[float, float]],
+    ) -> list[float | None]:
         """
         Fetch carbon/SOC values at given (lon, lat) points from the provider.
 
@@ -68,11 +67,11 @@ class ExternalRasterProvider:
 
     def get_stats_for_aoi(
         self,
-        meta: Dict,
-        aoi_geojson: Dict,
+        meta: dict,
+        aoi_geojson: dict,
         n_samples: int = _AOI_STATS_N_SAMPLES,
         seed: int = 42,
-    ) -> Dict:
+    ) -> dict:
         """
         Compute carbon statistics for the given AOI by sampling N random points.
 
@@ -117,7 +116,7 @@ class ExternalRasterProvider:
             "provider":  meta.get("provider_type"),
         }
 
-    def get_tile_url(self, meta: Dict, dataset_key: str) -> Optional[str]:
+    def get_tile_url(self, meta: dict, dataset_key: str) -> str | None:
         """
         Return a tile URL template for the dataset, or None if not available.
 
@@ -137,9 +136,9 @@ class ExternalRasterProvider:
 # ─────────────────────────────────────────────
 
 def _sample_soilgrids(
-    meta: Dict,
-    points: List[Tuple[float, float]],
-) -> List[Optional[float]]:
+    meta: dict,
+    points: list[tuple[float, float]],
+) -> list[float | None]:
     """
     Query ISRIC SoilGrids v2.0 REST API for SOC at each (lon, lat) point.
 
@@ -153,7 +152,7 @@ def _sample_soilgrids(
     depth_weights = [("0-5cm", 5), ("5-15cm", 10), ("15-30cm", 15)]
     total_depth = sum(w for _, w in depth_weights)
 
-    values: List[Optional[float]] = []
+    values: list[float | None] = []
     for lon, lat in points:
         val = _soilgrids_point(service_url, lon, lat, depth_weights, total_depth)
         values.append(val)
@@ -169,9 +168,9 @@ def _soilgrids_point(
     service_url: str,
     lon: float,
     lat: float,
-    depth_weights: List[Tuple[str, int]],
+    depth_weights: list[tuple[str, int]],
     total_depth: int,
-) -> Optional[float]:
+) -> float | None:
     """Query one point from SoilGrids REST, return weighted-mean SOC (dg/kg)."""
     params = {
         "lon":      lon,
@@ -198,10 +197,10 @@ def _soilgrids_point(
 
 
 def _parse_soilgrids_response(
-    data: Dict,
-    depth_weights: List[Tuple[str, int]],
+    data: dict,
+    depth_weights: list[tuple[str, int]],
     total_depth: int,
-) -> Optional[float]:
+) -> float | None:
     """Extract depth-weighted mean SOC (dg/kg) from SoilGrids API response."""
     try:
         layers = data["properties"]["layers"]
@@ -211,7 +210,7 @@ def _parse_soilgrids_response(
         if soc_layer is None:
             return None
 
-        depth_map: Dict[str, Optional[float]] = {}
+        depth_map: dict[str, float | None] = {}
         for depth_obj in soc_layer.get("depths", []):
             label = depth_obj.get("label", "")
             raw = depth_obj.get("values", {}).get("mean")
@@ -238,9 +237,9 @@ def _parse_soilgrids_response(
 # ─────────────────────────────────────────────
 
 def _sample_cog_rasterio(
-    meta: Dict,
-    points: List[Tuple[float, float]],
-) -> List[Optional[float]]:
+    meta: dict,
+    points: list[tuple[float, float]],
+) -> list[float | None]:
     """
     Sample a Cloud-Optimized GeoTIFF via rasterio.
 
@@ -251,7 +250,7 @@ def _sample_cog_rasterio(
     Raises NotImplementedError if rasterio is not installed.
     """
     try:
-        import rasterio  # noqa: F401
+        import rasterio
     except ImportError:
         raise NotImplementedError(
             "COG/rasterio ingestion requires the 'rasterio' package. "
@@ -273,7 +272,7 @@ def _sample_cog_rasterio(
     from rasterio.crs import CRS
 
     nodata_cfg = meta.get("nodata")
-    values: List[Optional[float]] = []
+    values: list[float | None] = []
     with rasterio.open(cog_url) as src:
         nodata = src.nodata if nodata_cfg is None else nodata_cfg
         crs = src.crs
@@ -297,7 +296,7 @@ def _sample_cog_rasterio(
                     continue
                 raw = float(src.read(1, window=((row, row + 1), (col, col + 1)))[0, 0])
                 values.append(None if (nodata is not None and raw == nodata) else raw)
-            except Exception:
+            except Exception:  # noqa: BLE001 - one bad point shouldn't fail the whole batch; sampled as missing
                 values.append(None)
 
     valid = sum(1 for v in values if v is not None)
@@ -306,9 +305,9 @@ def _sample_cog_rasterio(
 
 
 def _sample_cog_tiled(
-    meta: Dict,
-    points: List[Tuple[float, float]],
-) -> List[Optional[float]]:
+    meta: dict,
+    points: list[tuple[float, float]],
+) -> list[float | None]:
     """
     Sample a tiled COG where the URL is built per tile from coordinates.
 
@@ -323,12 +322,12 @@ def _sample_cog_tiled(
     nodata_cfg = meta.get("nodata")
 
     # Group point indices by tile key
-    tile_groups: Dict[Tuple[str, str], List[Tuple[int, float, float]]] = {}
+    tile_groups: dict[tuple[str, str], list[tuple[int, float, float]]] = {}
     for i, (lon, lat) in enumerate(points):
         key = _tile_key(lat, lon, tile_size_deg)
         tile_groups.setdefault(key, []).append((i, lon, lat))
 
-    values: List[Optional[float]] = [None] * len(points)
+    values: list[float | None] = [None] * len(points)
 
     lossyear_template = meta.get("lossyear_url_template")
     mask_lossyear = meta.get("mask_lossyear", False) and bool(lossyear_template)
@@ -357,7 +356,7 @@ def _sample_cog_tiled(
                 if lossyear_url:
                     try:
                         loss_src = rasterio.open(lossyear_url)
-                    except Exception as exc:
+                    except Exception as exc:  # noqa: BLE001 - lossyear masking is optional; sampling proceeds without it
                         logger.debug(f"lossyear tile {lat_str}_{lon_str} unavailable: {exc}")
 
                 for idx, lon, lat in tile_pts:
@@ -377,16 +376,16 @@ def _sample_cog_tiled(
                                     lyear = int(loss_src.read(1, window=((lrow, lrow + 1), (lcol, lcol + 1)))[0, 0])
                                     if lyear > 0:
                                         continue  # deforested pixel — label stale
-                            except Exception:
-                                pass
+                            except Exception as exc:  # noqa: BLE001 - lossyear masking is optional; point stays unmasked
+                                logger.debug(f"lossyear sample at point {idx} failed: {exc}")
                         values[idx] = raw
-                    except Exception:
-                        pass
+                    except Exception as exc:  # noqa: BLE001 - one bad point shouldn't fail the whole tile; skipped
+                        logger.debug(f"COG tile sample at point {idx} failed: {exc}")
 
                 if loss_src is not None:
                     loss_src.close()
 
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - one bad tile shouldn't fail the whole batch; already logged
             logger.warning(f"Tiled COG tile {lat_str}_{lon_str} failed: {exc}")
 
     valid = sum(1 for v in values if v is not None)
@@ -394,15 +393,15 @@ def _sample_cog_tiled(
     return values
 
 
-def _tile_key(lat: float, lon: float, tile_size_deg: int = 10) -> Tuple[str, str]:
+def _tile_key(lat: float, lon: float, tile_size_deg: int = 10) -> tuple[str, str]:
     """
     Return (lat_str, lon_str) tile identifiers for Hansen GFC tile URL naming.
 
     Hansen tiles are labeled by their northern (lat) and western (lon) edge.
     Example: tile covering lat [-10, 0], lon [110, 120] → ('00N', '110E').
     """
-    lat_north = int(math.ceil(lat / tile_size_deg + 1e-10)) * tile_size_deg
-    lon_west = int(math.floor(lon / tile_size_deg)) * tile_size_deg
+    lat_north = math.ceil(lat / tile_size_deg + 1e-10) * tile_size_deg
+    lon_west = math.floor(lon / tile_size_deg) * tile_size_deg
     lat_str = f"{abs(lat_north):02d}{'N' if lat_north >= 0 else 'S'}"
     lon_str = f"{abs(lon_west):03d}{'E' if lon_west >= 0 else 'W'}"
     return (lat_str, lon_str)
@@ -412,7 +411,7 @@ def _tile_key(lat: float, lon: float, tile_size_deg: int = 10) -> Tuple[str, str
 # Helpers
 # ─────────────────────────────────────────────
 
-def _apply_transform(value: Optional[float], transform: str) -> Optional[float]:
+def _apply_transform(value: float | None, transform: str) -> float | None:
     """Apply registry transform string to a raw pixel value."""
     if value is None:
         return None
@@ -430,10 +429,10 @@ def _apply_transform(value: Optional[float], transform: str) -> Optional[float]:
     return value
 
 
-def _geojson_to_bbox(geojson: Dict) -> Tuple[float, float, float, float]:
+def _geojson_to_bbox(geojson: dict) -> tuple[float, float, float, float]:
     """Extract (west, south, east, north) bbox from a GeoJSON Polygon/FeatureCollection."""
     geojson_type = geojson.get("type", "")
-    coords: List[List[float]] = []
+    coords: list[list[float]] = []
 
     if geojson_type == "Polygon":
         for ring in geojson.get("coordinates", []):

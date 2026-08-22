@@ -25,8 +25,9 @@ turn's tool-calling loop.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional
+from collections.abc import Callable
+from datetime import UTC, datetime
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,7 @@ logger = logging.getLogger(__name__)
 # in agentic_ai.py's _call_*_tools helpers)
 # ══════════════════════════════════════════════════════════════════
 
-GEOAI_TOOLS: List[Dict[str, Any]] = [
+GEOAI_TOOLS: list[dict[str, Any]] = [
     {
         "name": "get_current_context",
         "description": (
@@ -163,17 +164,17 @@ GEOAI_TOOLS: List[Dict[str, Any]] = [
 # ══════════════════════════════════════════════════════════════════
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
-def _not_available(kind: str, hint: str) -> Dict[str, Any]:
+def _not_available(kind: str, hint: str) -> dict[str, Any]:
     return {
         "available": False,
         "message": f"Data '{kind}' belum tersedia untuk AOI/periode ini. {hint}",
     }
 
 
-def get_current_context(tool_ctx: dict) -> Dict[str, Any]:
+def get_current_context(tool_ctx: dict) -> dict[str, Any]:
     ctx = tool_ctx.get("context") or {}
     results = ctx.get("results") or {}
     return {
@@ -195,11 +196,11 @@ def get_current_context(tool_ctx: dict) -> Dict[str, Any]:
     }
 
 
-def get_analysis_results(tool_ctx: dict, kind: str = "all") -> Dict[str, Any]:
+def get_analysis_results(tool_ctx: dict, kind: str = "all") -> dict[str, Any]:
     ctx = tool_ctx.get("context") or {}
     results = ctx.get("results") or {}
 
-    def _one(k: str) -> Dict[str, Any]:
+    def _one(k: str) -> dict[str, Any]:
         val = results.get(k)
         if not val:
             return _not_available(k, f"Jalankan analisis {k} terlebih dahulu di modul terkait.")
@@ -221,7 +222,7 @@ def get_analysis_results(tool_ctx: dict, kind: str = "all") -> Dict[str, Any]:
     return _one(kind)
 
 
-def _dataset_label(kind: str, val: Any) -> Optional[str]:
+def _dataset_label(kind: str, val: Any) -> str | None:
     if not isinstance(val, dict):
         return None
     if kind == "carbon":
@@ -231,7 +232,7 @@ def _dataset_label(kind: str, val: Any) -> Optional[str]:
     return None
 
 
-def query_vegetation_index(tool_ctx: dict, index: str, operator: Optional[str] = None, threshold: Optional[float] = None) -> Dict[str, Any]:
+def query_vegetation_index(tool_ctx: dict, index: str, operator: str | None = None, threshold: float | None = None) -> dict[str, Any]:
     ctx = tool_ctx.get("context") or {}
     veg = (ctx.get("results") or {}).get("vegetation")
     if not veg:
@@ -245,7 +246,7 @@ def query_vegetation_index(tool_ctx: dict, index: str, operator: Optional[str] =
             "message": f"Indeks '{index}' belum dihitung pada analisis vegetasi yang tersedia. Indeks yang tersedia: {list(indices.keys())}.",
         }
 
-    result: Dict[str, Any] = {
+    result: dict[str, Any] = {
         "available": True,
         "index": index,
         "mean": stats.get("mean"),
@@ -257,7 +258,7 @@ def query_vegetation_index(tool_ctx: dict, index: str, operator: Optional[str] =
     }
     if operator and threshold is not None and stats.get("mean") is not None:
         mean = float(stats["mean"])
-        ops: Dict[str, Callable[[float, float], bool]] = {
+        ops: dict[str, Callable[[float, float], bool]] = {
             "<": lambda a, b: a < b, "<=": lambda a, b: a <= b,
             ">": lambda a, b: a > b, ">=": lambda a, b: a >= b, "==": lambda a, b: a == b,
         }
@@ -271,7 +272,7 @@ def query_vegetation_index(tool_ctx: dict, index: str, operator: Optional[str] =
     return result
 
 
-def query_landcover(tool_ctx: dict, dataset: Optional[str] = None) -> Dict[str, Any]:
+def query_landcover(tool_ctx: dict, dataset: str | None = None) -> dict[str, Any]:
     ctx = tool_ctx.get("context") or {}
     lc = (ctx.get("results") or {}).get("landcover")
     if not lc:
@@ -292,7 +293,7 @@ def query_landcover(tool_ctx: dict, dataset: Optional[str] = None) -> Dict[str, 
     }
 
 
-def query_carbon(tool_ctx: dict) -> Dict[str, Any]:
+def query_carbon(tool_ctx: dict) -> dict[str, Any]:
     """Reads the CarbonResult shape actually returned by carbon_service.analyze_carbon
     (see savegeo/frontend/src/features/carbon/types.ts CarbonResult) - carbon_estimated.
     statistics for density, area_info for totals, model_info(.cv_metrics) for the model
@@ -326,7 +327,7 @@ def query_carbon(tool_ctx: dict) -> Dict[str, Any]:
     }
 
 
-def compare_periods(tool_ctx: dict, metric: str) -> Dict[str, Any]:
+def compare_periods(tool_ctx: dict, metric: str) -> dict[str, Any]:
     ctx = tool_ctx.get("context") or {}
     if metric == "landcover":
         trans = (ctx.get("results") or {}).get("landcover_transition")
@@ -350,7 +351,7 @@ def compare_periods(tool_ctx: dict, metric: str) -> Dict[str, Any]:
     )
 
 
-def _next_hotspot_ids(tool_ctx: dict, hotspots: List[dict]) -> List[str]:
+def _next_hotspot_ids(tool_ctx: dict, hotspots: list[dict]) -> list[str]:
     store = tool_ctx.setdefault("last_hotspots", {})
     ids = []
     for h in hotspots:
@@ -367,11 +368,11 @@ def find_hotspots(
     to_year: int,
     index: str = "NDVI",
     direction: str = "decline",
-    threshold: Optional[float] = None,
-    dataset: Optional[str] = None,
+    threshold: float | None = None,
+    dataset: str | None = None,
     top_n: int = 10,
     min_area_ha: float = 1.0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     ctx = tool_ctx.get("context") or {}
     aoi_geojson = ctx.get("aoi")
     if not aoi_geojson:
@@ -436,7 +437,7 @@ def find_hotspots(
         return {"available": False, "error": str(exc)}
 
 
-def get_hotspot_detail(tool_ctx: dict, hotspot_id: str) -> Dict[str, Any]:
+def get_hotspot_detail(tool_ctx: dict, hotspot_id: str) -> dict[str, Any]:
     store = tool_ctx.get("last_hotspots") or {}
     hotspot = store.get(hotspot_id)
     if not hotspot:
@@ -451,7 +452,7 @@ def get_hotspot_detail(tool_ctx: dict, hotspot_id: str) -> Dict[str, Any]:
     return {"available": True, "hotspot": hotspot}
 
 
-TOOL_REGISTRY: Dict[str, Callable[..., Dict[str, Any]]] = {
+TOOL_REGISTRY: dict[str, Callable[..., dict[str, Any]]] = {
     "get_current_context": get_current_context,
     "get_analysis_results": get_analysis_results,
     "query_vegetation_index": query_vegetation_index,
@@ -463,7 +464,7 @@ TOOL_REGISTRY: Dict[str, Callable[..., Dict[str, Any]]] = {
 }
 
 
-def execute_geoai_tool(name: str, args: dict, tool_ctx: dict) -> Dict[str, Any]:
+def execute_geoai_tool(name: str, args: dict, tool_ctx: dict) -> dict[str, Any]:
     """Dispatch a model-issued tool call to its whitelisted implementation.
 
     Never executes anything not in TOOL_REGISTRY - this is the enforcement

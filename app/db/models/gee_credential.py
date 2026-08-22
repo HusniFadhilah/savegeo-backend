@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import datetime as dt
+from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
+
+if TYPE_CHECKING:
+    from app.db.models.admin_user import AdminUser
 
 
 class GEECredential(Base):
@@ -24,11 +28,11 @@ class GEECredential(Base):
     bucket_path: Mapped[str] = mapped_column(String(512), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=False)
     uploaded_by: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id"))
-    uploaded_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc))
+    uploaded_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.UTC))
     last_used_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     notes: Mapped[str | None] = mapped_column(Text)
 
-    uploader: Mapped["AdminUser | None"] = relationship("AdminUser", backref="gee_credentials")
+    uploader: Mapped[AdminUser | None] = relationship("AdminUser", backref="gee_credentials")
 
     def to_dict(self, include_path: bool = False) -> dict:
         data = {

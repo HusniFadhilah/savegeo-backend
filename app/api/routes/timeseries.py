@@ -1,9 +1,9 @@
 """Vegetation index monthly time series - /api/timeseries. Ported from backend/app.py."""
 from __future__ import annotations
 
-import ee
 import logging
 
+import ee
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import math
-from typing import Any
 
 
 def estimate_area_ha(geojson_obj: dict) -> float:
@@ -41,7 +40,7 @@ def estimate_area_ha(geojson_obj: dict) -> float:
             return round(ring_area_ha(coords[0]), 2) if coords else 0.0
         if gt == "MultiPolygon":
             return round(sum(ring_area_ha(poly[0]) for poly in coords), 2)
-    except Exception:  # noqa: BLE001 - best-effort estimate, never blocks a save
+    except Exception:  # noqa: BLE001, S110 - best-effort estimate, never blocks a save
         pass
     return 0.0
 

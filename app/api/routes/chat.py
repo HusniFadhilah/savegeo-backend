@@ -7,8 +7,6 @@ session-ownership check here if that turns out to matter for this deployment.
 """
 from __future__ import annotations
 
-from typing import Optional
-
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -22,14 +20,14 @@ MAX_SESSIONS_RETURNED = 50
 
 
 class SessionCreateRequest(BaseModel):
-    title: Optional[str] = None
+    title: str | None = None
 
 
 class SessionUpdateRequest(BaseModel):
     title: str
 
 
-def _client_ip(request: Request) -> Optional[str]:
+def _client_ip(request: Request) -> str | None:
     forwarded = request.headers.get("x-forwarded-for")
     if forwarded:
         return forwarded.split(",")[0].strip()

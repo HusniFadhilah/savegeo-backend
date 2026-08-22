@@ -25,7 +25,7 @@ class DisasterAOI(Base):
     centroid: Mapped[dict | None] = mapped_column(JSONB)  # {"lat": .., "lng": ..}
     bbox: Mapped[list | None] = mapped_column(JSONB)  # [minLng, minLat, maxLng, maxLat]
     source: Mapped[str] = mapped_column(String(30), default="draw")  # see AOI_SOURCES
-    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc))
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.UTC))
 
     def to_dict(self, include_geojson: bool = True) -> dict:
         data = {

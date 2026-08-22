@@ -6,18 +6,17 @@ Ported (business logic unchanged) from legacy `backend/app.py::download_geotiff`
 """
 from __future__ import annotations
 
-from app.services import config_service
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 
 import ee
 from sqlalchemy.orm import Session
 
-from app.core.config import get_settings
 from app.inference.carbon_inference import CarbonInferenceEngine
 from app.registries.landcover_dataset_registry import LAND_COVER_LEGENDS
 from app.registries.vegetation_index_registry import VEGETATION_INDEX_CATALOG as VEGETATION_INDICES
 from app.repositories.uploaded_model_repo import get_active_model_path
+from app.services import config_service
 from app.services.gee_common import (
     AnalysisError,
     build_date_range,
@@ -37,8 +36,6 @@ def download_geotiff(db: Session, data: dict) -> dict:
     - getDownloadURL() memiliki batas ukuran.
     - Untuk area besar, gunakan scale lebih besar atau AOI lebih kecil.
     """
-    settings = get_settings()
-
     # ── Required ─────────────────────────────────────────
     aoi_spec = data.get("aoi")
     if not aoi_spec:
@@ -46,7 +43,7 @@ def download_geotiff(db: Session, data: dict) -> dict:
 
     # ── Inputs ───────────────────────────────────────────
     layer_type = str(data.get("layer_type", "vegetation")).strip().lower()
-    year = int(data.get("year", datetime.now().year))
+    year = int(data.get("year", datetime.now(UTC).year))
     start_month = int(data.get("start_month", 1))
     end_month = int(data.get("end_month", 12))
     cloud_threshold = int(data.get("cloud_threshold", config_service.get_analysis_defaults(db)["cloud_threshold"]))
@@ -66,7 +63,7 @@ def download_geotiff(db: Session, data: dict) -> dict:
     if scale <= 0:
         raise AnalysisError("scale harus lebih besar dari 0", 400)
 
-    year_min, year_max = 2015, datetime.now().year
+    year_min, year_max = 2015, datetime.now(UTC).year
     if not (year_min <= year <= year_max):
         raise AnalysisError(f"Year harus antara {year_min}-{year_max}", 400)
 
@@ -148,9 +145,9 @@ def download_geotiff(db: Session, data: dict) -> dict:
 
             filename = f"{filename}_carbon"
 
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.exception("Carbon inference failed")
-            raise AnalysisError(f"Carbon inference failed: {str(e)}", 400)
+            raise AnalysisError(f"Carbon inference failed: {e!s}", 400)
 
     else:
         raise AnalysisError(f"Unknown layer_type: {layer_type}", 400)

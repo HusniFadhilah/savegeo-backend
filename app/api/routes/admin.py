@@ -7,12 +7,13 @@ intentionally left out of this pass - see migration summary.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+import logging
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
 
 import requests
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -21,9 +22,12 @@ from app.db.models.admin_user import AdminUser
 from app.db.models.company_boundary import CompanyBoundary
 from app.db.models.gee_credential import GEECredential
 from app.db.models.role import Role
+from app.db.models.satellite_provider_entry import SatelliteProviderEntry
 from app.db.models.system_config import SystemConfig
 from app.db.models.uploaded_model import UploadedModel
 from app.db.session import get_db
+from app.registries.satellite_provider_registry import SATELLITE_PROVIDERS
+from app.repositories.satellite_provider_repo import apply_override, get_overrides_by_key
 from app.repositories.uploaded_model_repo import ALLOWED_MODEL_EXTS, import_legacy_models
 from app.schemas.admin import (
     AdminUserCreateRequest,
@@ -33,15 +37,13 @@ from app.schemas.admin import (
     ModelUpdateRequest,
     SatelliteProviderUpdateRequest,
 )
-from app.db.models.satellite_provider_entry import SatelliteProviderEntry
-from app.registries.satellite_provider_registry import SATELLITE_PROVIDERS
-from app.repositories.satellite_provider_repo import apply_override, get_overrides_by_key
 from app.services import audit_service, config_service, gee_service, storage_service
-from app.services.geo_utils import estimate_area_ha
-from app.services.datatable_service import datatables_response, is_datatables_request
 from app.services.arcgis_service import get_arcgis_client
+from app.services.datatable_service import datatables_response, is_datatables_request
+from app.services.geo_utils import estimate_area_ha
 
 router = APIRouter(prefix="/admin", tags=["admin"])
+logger = logging.getLogger(__name__)
 
 
 # -- Auth --
@@ -50,7 +52,7 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
     admin = db.query(AdminUser).filter_by(username=payload.username).first()
     if not admin or not admin.is_active or not verify_password(payload.password, admin.password_hash):
         raise HTTPException(status_code=401, detail="Invalid username or password")
-    admin.last_login = datetime.now(timezone.utc)
+    admin.last_login = datetime.now(UTC)
     db.commit()
     return {"token": create_access_token(admin), "user": admin.to_dict()}
 
@@ -96,7 +98,7 @@ def list_gee_credentials(request: Request, admin: AdminUser = Depends(get_curren
 async def upload_gee_credential(
     file: UploadFile = File(...),
     label: str = Form(...),
-    notes: Optional[str] = Form(None),
+    notes: str | None = Form(None),
     activate: bool = Form(False),
     admin: AdminUser = Depends(get_current_admin),
     db: Session = Depends(get_db),
@@ -118,7 +120,7 @@ async def upload_gee_credential(
 
     project_id = key_data["project_id"]
     client_email = key_data["client_email"]
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     bucket_path = f"gee_{project_id}_{ts}.json"
 
     try:
@@ -159,8 +161,8 @@ def delete_gee_credential(cred_id: int, admin: AdminUser = Depends(get_current_a
         raise HTTPException(status_code=400, detail="Cannot delete the active credential - activate another one first")
     try:
         storage_service.delete_credential(cred.bucket_path)
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 - best-effort cleanup; the DB row is still deleted below regardless
+        logger.warning("Failed to delete GEE credential file %s from storage: %s", cred.bucket_path, exc)
     cred_id_val = cred.id
     db.delete(cred)
     db.commit()
@@ -218,7 +220,7 @@ def config_public(db: Session = Depends(get_db)):
 
 @router.get("/config")
 def config_all(
-    category: Optional[str] = None,
+    category: str | None = None,
     admin: AdminUser = Depends(get_current_admin),
     db: Session = Depends(get_db),
 ):
@@ -249,7 +251,7 @@ async def config_update(request: Request, admin: AdminUser = Depends(get_current
         try:
             config_service.upsert_setting(db, key, value, updated_by=admin.id)
             updated.append(key)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - bulk update: one bad key shouldn't abort the rest, so it's collected
             errors.append({"key": key, "error": str(exc)})
 
     if updated:
@@ -272,7 +274,7 @@ def config_reset(
 @router.get("/models")
 def admin_models_list(
     request: Request,
-    model_type: Optional[str] = None,
+    model_type: str | None = None,
     admin: AdminUser = Depends(get_current_admin),
     db: Session = Depends(get_db),
 ):
@@ -298,12 +300,12 @@ async def upload_model(
     name: str = Form(...),
     display_name: str = Form(...),
     model_type: str = Form(...),
-    algorithm: Optional[str] = Form(None),
-    description: Optional[str] = Form(None),
-    version: Optional[str] = Form(None),
-    metrics: Optional[str] = Form(None),
-    feature_names: Optional[str] = Form(None),
-    metadata_json: Optional[str] = Form(None),
+    algorithm: str | None = Form(None),
+    description: str | None = Form(None),
+    version: str | None = Form(None),
+    metrics: str | None = Form(None),
+    feature_names: str | None = Form(None),
+    metadata_json: str | None = Form(None),
     set_default: bool = Form(False),
     admin: AdminUser = Depends(get_current_admin),
     db: Session = Depends(get_db),
@@ -323,11 +325,11 @@ async def upload_model(
         raise HTTPException(status_code=400, detail="Model file too large (max 500MB)")
 
     settings = get_settings()
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     dest = settings.model_path / f"{name}_{ts}{ext}"
     dest.write_bytes(raw)
 
-    def _parse_json(s: Optional[str], default):
+    def _parse_json(s: str | None, default):
         if not s:
             return default
         try:
@@ -396,8 +398,8 @@ def admin_model_delete(model_id: int, admin: AdminUser = Depends(get_current_adm
     if not model.is_legacy:
         try:
             Path(model.filepath).unlink(missing_ok=True)
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 - best-effort cleanup; the DB row is still deleted below regardless
+            logger.warning("Failed to delete model file %s: %s", model.filepath, exc)
     model_id_val, model_name = model.id, model.name
     db.delete(model)
     db.commit()
@@ -648,7 +650,7 @@ def _classify_osm_industry(tags: dict) -> str:
     return "mining"
 
 
-def _osm_sub_type(tags: dict) -> Optional[str]:
+def _osm_sub_type(tags: dict) -> str | None:
     for key in ("industrial", "crop", "power", "plant:source", "resource", "landuse", "boundary"):
         value = tags.get(key)
         if value:
@@ -656,7 +658,7 @@ def _osm_sub_type(tags: dict) -> Optional[str]:
     return None
 
 
-def _osm_element_to_geojson(element: dict) -> Optional[dict]:
+def _osm_element_to_geojson(element: dict) -> dict | None:
     etype = element.get("type")
     if etype == "way":
         geom = element.get("geometry", [])
@@ -730,9 +732,9 @@ def _import_gfw_rows(db: Session, admin: AdminUser, rows: list, ds: dict, datase
 @router.get("/companies")
 def admin_companies_list(
     request: Request,
-    industry_type: Optional[str] = None,
-    province: Optional[str] = None,
-    search: Optional[str] = None,
+    industry_type: str | None = None,
+    province: str | None = None,
+    search: str | None = None,
     admin: AdminUser = Depends(get_current_admin),
     db: Session = Depends(get_db),
 ):
@@ -776,7 +778,7 @@ async def admin_company_create(
     db: Session = Depends(get_db),
 ):
     content_type = request.headers.get("content-type", "")
-    geojson_raw: Optional[str] = None
+    geojson_raw: str | None = None
 
     if "multipart/form-data" in content_type:
         form = await request.form()
@@ -815,8 +817,8 @@ async def admin_company_create(
         gj = json.loads(geojson_raw) if isinstance(geojson_raw, str) else geojson_raw
         if gj.get("type") not in ("Feature", "FeatureCollection", "Polygon", "MultiPolygon", "GeometryCollection"):
             raise ValueError("unknown geojson type")
-    except Exception:
-        raise HTTPException(status_code=400, detail="GeoJSON tidak valid")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="GeoJSON tidak valid") from exc
 
     company = CompanyBoundary(
         name=name,
@@ -884,6 +886,23 @@ def admin_company_delete(cid: int, admin: AdminUser = Depends(get_current_admin)
     return {"message": "Dihapus"}
 
 
+def _fetch_osm_overpass(overpass_query: str) -> tuple[dict | None, str]:
+    """Blocking network fetch, run off the event loop via run_in_threadpool -
+    each Overpass mirror gets up to 320s, and `requests` has no async form."""
+    osm_data = None
+    last_error = ""
+    for server in _OVERPASS_SERVERS:
+        try:
+            resp = requests.post(server, data={"data": overpass_query}, timeout=320)
+            if resp.status_code == 200:
+                osm_data = resp.json()
+                break
+            last_error = f"HTTP {resp.status_code} dari {server}"
+        except Exception as e:  # noqa: BLE001 - any per-mirror failure just falls through to the next server
+            last_error = f"{server}: {e}"
+    return osm_data, last_error
+
+
 @router.post("/companies/import/osm")
 async def admin_companies_import_osm(
     request: Request,
@@ -905,17 +924,7 @@ async def admin_companies_import_osm(
         "out geom qt;"
     )
 
-    osm_data = None
-    last_error = ""
-    for server in _OVERPASS_SERVERS:
-        try:
-            resp = requests.post(server, data={"data": overpass_query}, timeout=320)
-            if resp.status_code == 200:
-                osm_data = resp.json()
-                break
-            last_error = f"HTTP {resp.status_code} dari {server}"
-        except Exception as e:  # noqa: BLE001
-            last_error = f"{server}: {e}"
+    osm_data, last_error = await run_in_threadpool(_fetch_osm_overpass, overpass_query)
     if osm_data is None:
         raise HTTPException(status_code=502, detail=f"Semua server Overpass gagal. Error terakhir: {last_error}")
 
@@ -963,6 +972,20 @@ async def admin_companies_import_osm(
     return {"imported": imported, "skipped": skipped, "errors": errors[:10]}
 
 
+def _fetch_gfw_carto(ds: dict) -> dict:
+    """Blocking CARTO SQL API fetch, run off the event loop via run_in_threadpool.
+    Returns {"mode": "rows", "rows": [...]} (CARTO's row-based fallback format)
+    or {"mode": "fc", "fc": {...}} (GeoJSON FeatureCollection, the normal path)."""
+    resp = requests.get(_CARTO_BASE, params={"q": ds["sql"], "format": "GeoJSON"}, timeout=60)
+    if resp.status_code in (400, 404):
+        resp2 = requests.get(_CARTO_BASE, params={"q": ds["sql"]}, timeout=60)
+        resp2.raise_for_status()
+        raw = resp2.json()
+        return {"mode": "rows", "rows": raw.get("rows", [])}
+    resp.raise_for_status()
+    return {"mode": "fc", "fc": resp.json()}
+
+
 @router.post("/companies/import/gfw")
 async def admin_companies_import_gfw(
     request: Request,
@@ -978,18 +1001,15 @@ async def admin_companies_import_gfw(
     ds = _GFW_CARTO[dataset_key]
 
     try:
-        resp = requests.get(_CARTO_BASE, params={"q": ds["sql"], "format": "GeoJSON"}, timeout=60)
-        if resp.status_code in (400, 404):
-            resp2 = requests.get(_CARTO_BASE, params={"q": ds["sql"]}, timeout=60)
-            resp2.raise_for_status()
-            raw = resp2.json()
-            return _import_gfw_rows(db, admin, raw.get("rows", []), ds, dataset_key)
-        resp.raise_for_status()
-        fc = resp.json()
+        result = await run_in_threadpool(_fetch_gfw_carto, ds)
     except HTTPException:
         raise
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001 - surfaced to the client as a 502 either way
         raise HTTPException(status_code=502, detail=f"GFW/CARTO API error: {e}")
+
+    if result["mode"] == "rows":
+        return _import_gfw_rows(db, admin, result["rows"], ds, dataset_key)
+    fc = result["fc"]
 
     imported, skipped = 0, 0
     for feat in fc.get("features", []):
@@ -1113,7 +1133,7 @@ _OR_CACHE_TTL = 300.0
 
 
 @router.get("/openrouter/models")
-def openrouter_models(free: Optional[str] = None, q: Optional[str] = None):
+def openrouter_models(free: str | None = None, q: str | None = None):
     import time as _time
 
     now = _time.time()

@@ -25,7 +25,7 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(128), unique=True, nullable=False, index=True)
     password_hash: Mapped[str] = mapped_column(String(256), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc))
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.UTC))
     last_login: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
 
     def to_dict(self) -> dict:

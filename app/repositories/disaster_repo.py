@@ -264,7 +264,7 @@ def upsert_result(db: Session, run_id: int, data: dict) -> AnalysisResult:
 
 def publish_result(db: Session, result: AnalysisResult, published_by: int | None) -> AnalysisResult:
     result.is_published = True
-    result.published_at = dt.datetime.now(dt.timezone.utc)
+    result.published_at = dt.datetime.now(dt.UTC)
     result.published_by = published_by
     result.publication_version = (result.publication_version or 0) + 1
     db.commit()

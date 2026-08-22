@@ -3,16 +3,21 @@ Inference engine for carbon estimation using pre-trained models
 """
 from __future__ import annotations
 
+import logging
+from datetime import date, timedelta
+from pathlib import Path
+from typing import ClassVar
+
 import ee
 import numpy as np
-from pathlib import Path
-from typing import Dict, Optional
-from datetime import datetime, timedelta
-import logging
 
 from app.inference.carbon_model import CarbonEstimationModel
 from app.inference.model_registry import ModelRegistry
-from app.services.gee_common import build_date_range, build_s2_cloud_masked_collection, resolve_cloud_mask_technique
+from app.services.gee_common import (
+    build_date_range,
+    build_s2_cloud_masked_collection,
+    resolve_cloud_mask_technique,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +31,7 @@ class CarbonInferenceEngine:
     Perform carbon estimation inference using pre-trained models
     """
     
-    def __init__(self, model_name: Optional[str] = None, model_path: Optional[str] = None,
+    def __init__(self, model_name: str | None = None, model_path: str | None = None,
                  cloud_mask_technique: str = "scl"):
         """
         Initialize inference engine
@@ -175,8 +180,8 @@ class CarbonInferenceEngine:
         # has a valid value for is left untouched.
         self.last_gap_filled = False
         try:
-            wide_start = (datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=90)).strftime("%Y-%m-%d")
-            wide_end = (datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=90)).strftime("%Y-%m-%d")
+            wide_start = (date.fromisoformat(start_date) - timedelta(days=90)).isoformat()
+            wide_end = (date.fromisoformat(end_date) + timedelta(days=90)).isoformat()
             wide_collection = _build_collection(max(cloud_threshold, 70), wide_start, wide_end)
             if wide_collection.size().getInfo() > 0:
                 wide_composite = wide_collection.median().multiply(0.0001).select(S2_BANDS)
@@ -361,7 +366,10 @@ class CarbonInferenceEngine:
             .addBands(forest_mask_x_ndvi).addBands(b8_x_b11)
         )
 
-    _NEIGHBORHOOD_BANDS = ['B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B8', 'B8A', 'B11', 'B12',
+    # Class-level constant (read-only, shared across instances by design) -
+    # kept a real `list` since ee.Image.select() is untested here against a
+    # tuple and this project has no live-EE sandbox to verify that swap in.
+    _NEIGHBORHOOD_BANDS: ClassVar[list[str]] = ['B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B8', 'B8A', 'B11', 'B12',
                            'NDVI', 'NDWI', 'NDMI', 'NBR', 'NDRE', 'EVI', 'SAVI', 'BSI', 'brightness']
 
     def _build_s2_neighborhood_feature_stack(self, roi: ee.Geometry, year: int, start_month: int,
@@ -825,7 +833,7 @@ class CarbonInferenceEngine:
             "std": float(predictions.std()),
             "min": float(predictions.min()),
             "max": float(predictions.max()),
-            "n_pixels": int(len(predictions)),
+            "n_pixels": len(predictions),
         }
 
     def _get_model_coefficients_for_gee(self) -> list:
@@ -870,7 +878,7 @@ class CarbonInferenceEngine:
         This is used for GEE deployment when the original model is not linear.
         """
         from sklearn.linear_model import Ridge
-        from sklearn.metrics import r2_score, mean_squared_error
+        from sklearn.metrics import mean_squared_error, r2_score
 
         training_info = self.model.metadata.get("training_info", {}) or {}
 
@@ -926,6 +934,6 @@ class CarbonInferenceEngine:
 
         return coefficients, intercept
     
-    def get_model_info(self) -> Dict:
+    def get_model_info(self) -> dict:
         """Get information about the loaded model"""
         return self.model.get_info()

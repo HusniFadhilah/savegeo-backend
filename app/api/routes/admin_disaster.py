@@ -21,7 +21,6 @@ this file.
 from __future__ import annotations
 
 import datetime as dt
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -50,55 +49,55 @@ router = APIRouter(prefix="/admin", tags=["admin-disaster"])
 class EventCreateRequest(BaseModel):
     name: str
     disaster_type: str
-    location_name: Optional[str] = None
-    province: Optional[list[str]] = None
-    district: Optional[list[str]] = None
-    event_date: Optional[dt.date] = None
-    start_date: Optional[dt.date] = None
-    end_date: Optional[dt.date] = None
-    severity: Optional[str] = None
-    description: Optional[str] = None
-    source: Optional[str] = None
-    thumbnail: Optional[str] = None
+    location_name: str | None = None
+    province: list[str] | None = None
+    district: list[str] | None = None
+    event_date: dt.date | None = None
+    start_date: dt.date | None = None
+    end_date: dt.date | None = None
+    severity: str | None = None
+    description: str | None = None
+    source: str | None = None
+    thumbnail: str | None = None
 
 
 class EventUpdateRequest(BaseModel):
-    name: Optional[str] = None
-    disaster_type: Optional[str] = None
-    location_name: Optional[str] = None
-    province: Optional[list[str]] = None
-    district: Optional[list[str]] = None
-    event_date: Optional[dt.date] = None
-    start_date: Optional[dt.date] = None
-    end_date: Optional[dt.date] = None
-    status: Optional[str] = None
-    severity: Optional[str] = None
-    description: Optional[str] = None
-    source: Optional[str] = None
-    thumbnail: Optional[str] = None
+    name: str | None = None
+    disaster_type: str | None = None
+    location_name: str | None = None
+    province: list[str] | None = None
+    district: list[str] | None = None
+    event_date: dt.date | None = None
+    start_date: dt.date | None = None
+    end_date: dt.date | None = None
+    status: str | None = None
+    severity: str | None = None
+    description: str | None = None
+    source: str | None = None
+    thumbnail: str | None = None
 
 
 class AoiCreateRequest(BaseModel):
     geojson: dict
-    source: Optional[str] = "draw"
+    source: str | None = "draw"
 
 
 class ImageryCreateRequest(BaseModel):
     phase: str
     satellite: str
     acquisition_date: dt.date
-    sensor: Optional[str] = None
-    resolution_m: Optional[float] = None
-    cloud_coverage_pct: Optional[float] = None
-    data_source: Optional[str] = None
-    is_primary: Optional[bool] = False
+    sensor: str | None = None
+    resolution_m: float | None = None
+    cloud_coverage_pct: float | None = None
+    data_source: str | None = None
+    is_primary: bool | None = False
 
 
 class AnalysisCreateRequest(BaseModel):
     model_id: str
     aoi_id: int
-    pre_imagery_id: Optional[int] = None
-    post_imagery_id: Optional[int] = None
+    pre_imagery_id: int | None = None
+    post_imagery_id: int | None = None
 
 
 class RunStatusUpdateRequest(BaseModel):
@@ -106,27 +105,27 @@ class RunStatusUpdateRequest(BaseModel):
 
 
 class ResultUpdateRequest(BaseModel):
-    statistics: Optional[dict] = None
-    legend: Optional[list] = None
-    confidence_summary: Optional[dict] = None
+    statistics: dict | None = None
+    legend: list | None = None
+    confidence_summary: dict | None = None
 
 
 class HotspotCreateRequest(BaseModel):
     name: str
     impact_level: str
     geojson: dict
-    analysis_result_id: Optional[int] = None
-    stats: Optional[dict] = None
-    is_published: Optional[bool] = False
+    analysis_result_id: int | None = None
+    stats: dict | None = None
+    is_published: bool | None = False
 
 
 class HotspotUpdateRequest(BaseModel):
-    name: Optional[str] = None
-    impact_level: Optional[str] = None
-    geojson: Optional[dict] = None
-    analysis_result_id: Optional[int] = None
-    stats: Optional[dict] = None
-    is_published: Optional[bool] = None
+    name: str | None = None
+    impact_level: str | None = None
+    geojson: dict | None = None
+    analysis_result_id: int | None = None
+    stats: dict | None = None
+    is_published: bool | None = None
 
 
 # -- helpers --
@@ -168,11 +167,11 @@ def admin_create_event(
 
 @router.get("/disasters")
 def admin_list_events(
-    status: Optional[str] = None,
-    disaster_type: Optional[str] = None,
-    severity: Optional[str] = None,
-    year: Optional[int] = None,
-    search: Optional[str] = None,
+    status: str | None = None,
+    disaster_type: str | None = None,
+    severity: str | None = None,
+    year: int | None = None,
+    search: str | None = None,
     admin: AdminUser = Depends(get_current_admin),
     db: Session = Depends(get_db),
 ):
@@ -284,7 +283,7 @@ def admin_create_aoi(
 @router.get("/disasters/{id}/imagery")
 def admin_list_imagery(
     id: int,
-    phase: Optional[str] = None,
+    phase: str | None = None,
     admin: AdminUser = Depends(get_current_admin),
     db: Session = Depends(get_db),
 ):

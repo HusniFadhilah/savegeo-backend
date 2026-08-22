@@ -87,5 +87,27 @@ include = ["app*"]
 line-length = 110
 target-version = "py311"
 
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's DI pattern is `def route(db: Session = Depends(get_db))` - the
+# call-in-default-argument is the documented, intended usage (FastAPI calls
+# it once per request, it's not evaluated once at import time like a normal
+# mutable default), not the footgun B008 exists to catch. Ruff's own docs
+# name this as the canonical case for extend-immutable-calls.
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Body",
+    "fastapi.Header",
+    "fastapi.Cookie",
+    "fastapi.Form",
+    "fastapi.File",
+    "fastapi.Security",
+    # app.core.security.require_permission(code) is a dependency *factory*:
+    # called once (inside Depends(...)) to build the actual dependency
+    # closure, same shape as Depends itself - not a mutable-default footgun.
+    "app.core.security.require_permission",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

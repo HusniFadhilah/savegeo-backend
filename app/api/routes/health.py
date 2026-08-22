@@ -20,7 +20,7 @@ def health(request: Request, db: Session = Depends(get_db)):
     return {
         "status": "ok",
         "ee_initialized": ee_initialized,
-        "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "timestamp": dt.datetime.now(dt.UTC).isoformat(),
         "active_credential": active_cred.client_email if active_cred else None,
         "active_models": active_models,
     }

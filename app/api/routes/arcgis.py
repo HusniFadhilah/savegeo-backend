@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import logging
 import math
-from typing import Optional
 
 import requests
 from fastapi import APIRouter, HTTPException
@@ -31,12 +30,12 @@ def arcgis_tile_proxy(
     z: int,
     y: int,
     x: int,
-    year: Optional[int] = None,
-    clip_west: Optional[float] = None,
-    clip_south: Optional[float] = None,
-    clip_east: Optional[float] = None,
-    clip_north: Optional[float] = None,
-    clip_key: Optional[str] = None,
+    year: int | None = None,
+    clip_west: float | None = None,
+    clip_south: float | None = None,
+    clip_east: float | None = None,
+    clip_north: float | None = None,
+    clip_key: str | None = None,
 ):
     """
     Proxy ArcGIS ImageServer as XYZ tiles via exportImage.

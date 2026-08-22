@@ -6,8 +6,6 @@ see migration summary.
 """
 from __future__ import annotations
 
-from typing import Optional
-
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -19,9 +17,9 @@ router = APIRouter(tags=["companies"])
 
 @router.get("/companies")
 def list_companies(
-    industry_type: Optional[str] = None,
-    province: Optional[str] = None,
-    search: Optional[str] = None,
+    industry_type: str | None = None,
+    province: str | None = None,
+    search: str | None = None,
     db: Session = Depends(get_db),
 ):
     query = db.query(CompanyBoundary).filter_by(is_active=True)

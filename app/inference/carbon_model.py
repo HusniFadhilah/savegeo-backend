@@ -5,34 +5,32 @@ Random Forest, Extra Trees, Gradient Boosting, HistGradientBoosting,
 XGBoost, LightGBM, CatBoost, AdaBoost, SVR, SGD, KNN, GPR, and MLP.
 """
 
-import numpy as np
-import pickle
 import json
-from datetime import datetime
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 import logging
+from datetime import UTC, datetime
+from pathlib import Path
+
+import numpy as np
 
 # --- Core scikit-learn (required) ---
 try:
-    from sklearn.linear_model import (
-        LinearRegression, Ridge, Lasso, ElasticNet, SGDRegressor
-    )
-    from sklearn.tree import DecisionTreeRegressor
+    import joblib
     from sklearn.ensemble import (
-        RandomForestRegressor, ExtraTreesRegressor,
-        GradientBoostingRegressor, HistGradientBoostingRegressor,
-        AdaBoostRegressor
+        AdaBoostRegressor,
+        ExtraTreesRegressor,
+        GradientBoostingRegressor,
+        HistGradientBoostingRegressor,
+        RandomForestRegressor,
     )
-    from sklearn.svm import SVR
-    from sklearn.neighbors import KNeighborsRegressor
     from sklearn.gaussian_process import GaussianProcessRegressor
-    from sklearn.gaussian_process.kernels import RBF, WhiteKernel
+    from sklearn.linear_model import ElasticNet, Lasso, LinearRegression, Ridge, SGDRegressor
+    from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+    from sklearn.model_selection import KFold
+    from sklearn.neighbors import KNeighborsRegressor
     from sklearn.neural_network import MLPRegressor
     from sklearn.preprocessing import StandardScaler
-    from sklearn.model_selection import KFold
-    from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
-    import joblib
+    from sklearn.svm import SVR
+    from sklearn.tree import DecisionTreeRegressor
     SKLEARN_AVAILABLE = True
 except ImportError:
     SKLEARN_AVAILABLE = False
@@ -60,12 +58,12 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-def _model_load_error_message(filepath: Path, metadata: Dict, exc: Exception) -> str:
+def _model_load_error_message(filepath: Path, metadata: dict, exc: Exception) -> str:
     """Return a user-facing message for common sklearn/joblib incompatibilities."""
     try:
         import sklearn
         sklearn_version = sklearn.__version__
-    except Exception:
+    except Exception:  # noqa: BLE001 - version is just for a diagnostic message, never worth failing over
         sklearn_version = "unknown"
 
     raw = str(exc)
@@ -153,16 +151,16 @@ class CarbonEstimationModel:
         self.metadata = {
             'algorithm': algorithm,
             'version': '2.0',
-            'created_at': datetime.now().isoformat(),
+            'created_at': datetime.now(UTC).isoformat(),
             'training_params': kwargs
         }
 
     def train(self,
               X: np.ndarray,
               y: np.ndarray,
-              feature_names: List[str],
+              feature_names: list[str],
               cv_folds: int = 5,
-              scale_features: bool = True) -> Dict:
+              scale_features: bool = True) -> dict:
         """
         Train the model with cross-validation.
 
@@ -211,7 +209,7 @@ class CarbonEstimationModel:
             'train_metrics':   train_metrics,
             'cv_metrics':      cv_metrics,
             'scaled_features': scale_features,
-            'trained_at':      datetime.now().isoformat()
+            'trained_at':      datetime.now(UTC).isoformat()
         })
 
         # Feature importance (where available)
@@ -245,7 +243,7 @@ class CarbonEstimationModel:
             'feature_importance': self.metadata.get('feature_importance', {})
         }
 
-    def _cross_validate(self, X: np.ndarray, y: np.ndarray, n_folds: int) -> Dict:
+    def _cross_validate(self, X: np.ndarray, y: np.ndarray, n_folds: int) -> dict:
         """Perform k-fold cross-validation on the (already-scaled) training data."""
         kfold = KFold(n_splits=n_folds, shuffle=True, random_state=42)
 
@@ -351,6 +349,6 @@ class CarbonEstimationModel:
 
         return instance
 
-    def get_info(self) -> Dict:
+    def get_info(self) -> dict:
         """Return model metadata."""
         return self.metadata.copy()
