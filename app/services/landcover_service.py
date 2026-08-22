@@ -70,6 +70,99 @@ def clamp_landcover_year(dataset: str, year: int) -> int:
 # Core GEE helpers (ported ~verbatim)
 # ─────────────────────────────────────────────
 
+DW_PROB_BANDS = ["water", "trees", "grass", "flooded_vegetation", "crops", "shrub_and_scrub", "built", "bare", "snow_and_ice"]
+
+# Used only to report "% low-confidence pixels" as a diagnostic when the
+# caller hasn't set an explicit dw_probability_threshold - the review that
+# flagged this (finding #8: no DW confidence surfaced) wants it visible even
+# when no masking cutoff is applied, not just after the fact.
+_DW_DIAGNOSTIC_CONFIDENCE_THRESHOLD = 0.5
+
+
+def _dw_confidence_stats(dw_collection, aoi, scale: int, threshold: Optional[float]) -> dict:
+    """Mean/min confidence + % of pixels below `threshold` (or the 0.5
+    diagnostic default) for a Dynamic World collection's per-pixel max class
+    probability - computed over the FULL collection before any threshold
+    mask is applied, so "% low confidence" is meaningful (a post-mask
+    computation would always read ~0%, since those pixels were just removed).
+    Best-effort: returns all-None on failure rather than blocking the request."""
+    settings = get_settings()
+    effective_threshold = threshold if (threshold is not None and 0 < threshold < 1) else _DW_DIAGNOSTIC_CONFIDENCE_THRESHOLD
+    try:
+        max_prob = dw_collection.select(DW_PROB_BANDS).reduce(ee.Reducer.max()).reduce(ee.Reducer.max()).rename("confidence").clip(aoi)
+        stats = max_prob.reduceRegion(
+            reducer=ee.Reducer.mean().combine(ee.Reducer.minMax(), sharedInputs=True),
+            geometry=aoi, scale=scale, maxPixels=int(settings.max_pixels), bestEffort=True, tileScale=4,
+        ).getInfo()
+        low_conf = max_prob.lt(effective_threshold).rename("low").reduceRegion(
+            reducer=ee.Reducer.mean(),
+            geometry=aoi, scale=scale, maxPixels=int(settings.max_pixels), bestEffort=True, tileScale=4,
+        ).getInfo()
+        mean_c = stats.get("confidence_mean")
+        return {
+            "mean_confidence": round(float(mean_c), 3) if mean_c is not None else None,
+            "min_confidence": round(float(stats["confidence_min"]), 3) if stats.get("confidence_min") is not None else None,
+            "low_confidence_threshold": effective_threshold,
+            "low_confidence_pixel_pct": round(float(low_conf.get("low", 0) or 0) * 100, 1),
+        }
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Dynamic World confidence stats failed: {e}")
+        return {"mean_confidence": None, "min_confidence": None, "low_confidence_threshold": effective_threshold, "low_confidence_pixel_pct": None}
+
+
+# Dynamic World's first image is 2015-06-27 (per GOOGLE/DYNAMICWORLD/V1 catalog
+# docs) - a full "2015" Jan-Dec request silently only reflects ~6 months of
+# real data. Audit finding: "DW partial-year (2015) / current-year YTD" had no
+# user-facing note at all before this.
+DW_COLLECTION_START_DATE = "2015-06-27"
+
+
+# Below this many images in a full-year (or longer) window, a low count is
+# more likely to reflect a gap in Dynamic World's own near-real-time
+# ingestion pipeline (it runs on Google's infrastructure, not this platform's)
+# than genuine cloud cover for the whole period - worth flagging as a
+# possibility rather than silently presenting a sparse composite as routine.
+_DW_SPARSE_IMAGE_COUNT_THRESHOLD = 5
+
+
+def _dw_coverage_note(start_date: str, end_date_display: str, image_count: Optional[int] = None) -> Optional[str]:
+    """User-facing note when the requested Dynamic World window only
+    partially overlaps real image coverage - either it starts before the
+    collection's first image (2015-06-27), it extends past today (current-
+    year/YTD requests: the "missing" months simply have no images yet, not an
+    error), or - audit finding "DW ingestion outage concern" - the collection
+    returned unusually few images for a period that should have plenty,
+    which may reflect a delay/gap in Google's own DW ingestion pipeline
+    rather than genuine cloud cover. Best-effort: returns None on any parse
+    failure rather than blocking the response."""
+    try:
+        req_start = date.fromisoformat(start_date)
+        req_end = date.fromisoformat(end_date_display)
+    except ValueError:
+        return None
+    today = datetime.utcnow().date()
+    notes = []
+    collection_start = date.fromisoformat(DW_COLLECTION_START_DATE)
+    is_partial_start = req_start < collection_start
+    is_ytd = req_end > today
+    if is_partial_start:
+        notes.append(f"Dynamic World baru tersedia sejak {DW_COLLECTION_START_DATE} - periode sebelum tanggal itu tidak punya citra.")
+    if is_ytd:
+        notes.append(f"Periode mencakup tanggal setelah hari ini ({today.isoformat()}) - ini data tahun berjalan (year-to-date), belum satu tahun penuh.")
+    if (
+        image_count is not None
+        and image_count < _DW_SPARSE_IMAGE_COUNT_THRESHOLD
+        and not is_partial_start
+        and not is_ytd
+        and (req_end - req_start).days > 60
+    ):
+        notes.append(
+            f"Hanya {image_count} citra ditemukan untuk periode ini - kemungkinan ada celah pada pipeline ingesti "
+            "Dynamic World (near-real-time, dikelola Google, di luar kendali platform ini), bukan semata tutupan awan."
+        )
+    return " ".join(notes) if notes else None
+
+
 def _reyear_date(date_str: str, year: int) -> str:
     """Swap only the year portion of an ISO date, keeping month/day - used to
     reapply a "Mode Tanggal Analisis: Tanggal" day-window (e.g. 01-01 to
@@ -120,18 +213,17 @@ def get_landcover_image(
         dw_start_date, dw_end_date = build_date_range(effective_year, start_month, end_month)
 
     if dataset == "Dynamic_World":
-        dw_prob_bands = ["water", "trees", "grass", "flooded_vegetation",
-                          "crops", "shrub_and_scrub", "built", "bare", "snow_and_ice"]
         dw = (
             ee.ImageCollection("GOOGLE/DYNAMICWORLD/V1")
             .filterDate(dw_start_date, dw_end_date)
             .filterBounds(aoi)
         )
-        if dw.size().getInfo() == 0:
+        _dw_size = dw.size().getInfo()
+        if _dw_size == 0:
             raise ValueError(f"No Dynamic World data found for {effective_year} ({dw_start_date}-{dw_end_date})")
         label_mode = dw.select("label").reduce(ee.Reducer.mode()).rename("landcover")
         if dw_probability_threshold is not None and 0 < dw_probability_threshold < 1:
-            max_prob = dw.select(dw_prob_bands).reduce(ee.Reducer.max()).reduce(ee.Reducer.max())
+            max_prob = dw.select(DW_PROB_BANDS).reduce(ee.Reducer.max()).reduce(ee.Reducer.max())
             confidence_mask = max_prob.gte(dw_probability_threshold)
             label_mode = label_mode.updateMask(confidence_mask)
         image = label_mode.clip(aoi)
@@ -143,6 +235,8 @@ def get_landcover_image(
             "date_range": {"start": dw_start_date, "end": display_end_date or dw_end_date},
             "provider_type": "gee_near_real_time",
             "dw_probability_threshold": dw_probability_threshold,
+            "confidence": _dw_confidence_stats(dw, aoi, LAND_COVER_NATIVE_SCALE.get(dataset, 30), dw_probability_threshold),
+            "coverage_note": _dw_coverage_note(dw_start_date, display_end_date or dw_end_date, _dw_size),
         }
 
     if dataset == "ESA_WorldCover":
@@ -471,12 +565,12 @@ def analyze_landcover(data: dict) -> dict:
 
     # Dynamic World (gee_near_real_time - supports current year and beyond)
     if "Dynamic_World" in datasets:
-        dw_prob_bands = ["water", "trees", "grass", "flooded_vegetation", "crops", "shrub_and_scrub", "built", "bare", "snow_and_ice"]
         dw = ee.ImageCollection("GOOGLE/DYNAMICWORLD/V1").filterDate(dw_start_date, dw_end_date).filterBounds(aoi)
-        if dw.size().getInfo() > 0:
+        _dw_size = dw.size().getInfo()
+        if _dw_size > 0:
             classification = dw.select("label").reduce(ee.Reducer.mode()).clip(aoi)
             if dw_probability_threshold is not None and 0 < dw_probability_threshold < 1:
-                max_prob = dw.select(dw_prob_bands).reduce(ee.Reducer.max()).reduce(ee.Reducer.max())
+                max_prob = dw.select(DW_PROB_BANDS).reduce(ee.Reducer.max()).reduce(ee.Reducer.max())
                 classification = classification.updateMask(max_prob.gte(dw_probability_threshold))
             summary = summarize_landcover_classes(
                 "Dynamic_World", classification, aoi, lc_scale,
@@ -496,6 +590,8 @@ def analyze_landcover(data: dict) -> dict:
                     "date_range": {"start": dw_start_date, "end": dw_display_end_date},
                     "provider_type": "gee_near_real_time",
                     "dw_probability_threshold": dw_probability_threshold,
+                    "confidence": _dw_confidence_stats(dw, aoi, effective_scale, dw_probability_threshold),
+                    "coverage_note": _dw_coverage_note(dw_start_date, dw_display_end_date, _dw_size),
                 }
 
     # ESA WorldCover

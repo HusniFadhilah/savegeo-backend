@@ -12,11 +12,14 @@ from app.api.routes import (
     carbon,
     chat,
     companies,
+    crop_monitoring,
     datasets,
     disaster,
     disaster_events,
     download,
+    fields,
     health,
+    imagery,
     landcover,
     maps,
     models,
@@ -52,3 +55,6 @@ api_router.include_router(download.router)
 api_router.include_router(arcgis.router)
 api_router.include_router(agent.router)
 api_router.include_router(analysis_jobs.router)
+api_router.include_router(fields.router)
+api_router.include_router(crop_monitoring.router)
+api_router.include_router(imagery.router)

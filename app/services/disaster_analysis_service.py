@@ -258,6 +258,19 @@ def _compute_forest_change(aoi, pre_date: dt.date | None, post_date: dt.date, sc
     }
 
 
+# --- public cross-module alias ------------------------------------------------
+
+
+def compute_flood_change(aoi, pre_date: dt.date, post_date: dt.date, scale: int = 30) -> dict:
+    """Public alias of `_compute_flood_change` for cross-module callers
+    (`crop_monitoring_service`'s Flood/Excess-Water Impact sub-analysis) -
+    `_compute_flood_change` already takes a raw `ee.Geometry` + two dates, no
+    persisted `DisasterAOI`/`AnalysisRun` needed to call it. Kept as a thin
+    alias rather than renaming the underscore-prefixed original, to avoid
+    touching every existing in-module call site above."""
+    return _compute_flood_change(aoi, pre_date, post_date, scale)
+
+
 # --- dispatcher --------------------------------------------------------------
 
 

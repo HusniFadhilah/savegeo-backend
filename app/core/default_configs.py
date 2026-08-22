@@ -107,6 +107,23 @@ DEFAULT_CONFIGS: list[tuple[str, str, str, str, str, str, bool]] = [
 
     ("ai.rate_limit_max_file_mb", os.getenv("AI_RATE_LIMIT_MAX_FILE_MB", "5"), "int", "ai",
      "Maks Ukuran File (MB)", "Ukuran maksimum file/foto yang bisa diupload ke chatbot", True),
+
+    # -- Crop Monitoring risk score weights (must sum to 1.0; admin-editable,
+    # never hardcoded in crop_monitoring_service - see _risk_score()) --
+    ("crop_risk.weight_vegetation", "0.30", "float", "crop_monitoring",
+     "Bobot: Anomali Vegetasi", "Kontribusi anomali NDVI terhadap Crop Risk Score", True),
+
+    ("crop_risk.weight_moisture", "0.20", "float", "crop_monitoring",
+     "Bobot: Kelembapan", "Kontribusi defisit curah hujan terhadap Crop Risk Score", True),
+
+    ("crop_risk.weight_weather", "0.20", "float", "crop_monitoring",
+     "Bobot: Cuaca", "Kontribusi peringatan cuaca (hari kering/heat stress) terhadap Crop Risk Score", True),
+
+    ("crop_risk.weight_flood", "0.15", "float", "crop_monitoring",
+     "Bobot: Banjir", "Kontribusi luas area tergenang terhadap Crop Risk Score", True),
+
+    ("crop_risk.weight_growth_anomaly", "0.15", "float", "crop_monitoring",
+     "Bobot: Anomali Fase Pertumbuhan", "Kontribusi anomali fase pertumbuhan terhadap Crop Risk Score (belum aktif di V1)", True),
 ]
 
 # Keys with these suffixes are treated as secrets: masked on GET, write-only on PUT

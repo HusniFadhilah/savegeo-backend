@@ -44,6 +44,24 @@ from app.services.gee_common import (
 logger = logging.getLogger(__name__)
 
 
+def _no_imagery_suggestion(meta: dict, year: int) -> str:
+    """Better error hint for a zero-image composite. Audit finding: "S2 SR vs
+    TOA provenance for 2015" - COPERNICUS/S2_SR_HARMONIZED's real global data
+    floor is 2017 (verified live: 2015/2016 return zero images for every AOI
+    tried), well after the satellite's 2015 launch, and the same gap applies
+    to any other provider's `start_year`. A plain "try different dates" hint
+    doesn't tell the user *why* an early year fails; naming the actual floor
+    does."""
+    start_year = meta.get("start_year")
+    name = meta.get("name", "satelit ini")
+    if start_year is not None and year < start_year:
+        return (
+            f"Tahun {year} lebih awal dari data {name} yang tersedia (mulai {start_year}). "
+            f"Coba tahun {start_year} atau lebih baru, atau ganti provider satelit."
+        )
+    return "Coba ubah rentang tanggal, cloud threshold, atau ganti provider satelit"
+
+
 # ─────────────────────────────────────────────
 # Vegetation index classification / histogram helpers
 # ─────────────────────────────────────────────
@@ -304,10 +322,15 @@ def analyze_vegetation(db, data: dict) -> dict:
         db, aoi, year, start_month, end_month, cloud_threshold, satellite, cloud_mask_technique
     )
     if median_composite is None:
+        _sat_meta = get_satellite_meta(db, satellite)
+        # `extra=` on AnalysisError is never actually forwarded to the client -
+        # every route's exception handler does `HTTPException(detail=str(e))`,
+        # dropping it (verified: no route reads `.extra` anywhere in this
+        # codebase) - fold the hint into the message itself instead of a field
+        # nobody reads.
         raise AnalysisError(
-            f"Tidak ada citra {get_satellite_meta(db, satellite)['name']} untuk periode ini",
+            f"Tidak ada citra {_sat_meta['name']} untuk periode ini. {_no_imagery_suggestion(_sat_meta, year)}",
             404,
-            extra={"suggestion": "Coba ubah rentang tanggal, cloud threshold, atau ganti provider satelit"},
         )
 
     results = {
@@ -387,10 +410,10 @@ def analyze_vegetation_compare(db, data: dict) -> dict:
     aoi = create_geometry_from_payload(data["aoi"])
     composite, _, start_date, end_date, size, _valid_pct = _composite_for_period(db, aoi, year, start_month, end_month, cloud_threshold, satellite, cloud_mask_technique)
     if composite is None:
+        _sat_meta = get_satellite_meta(db, satellite)
         raise AnalysisError(
-            f"Tidak ada citra {get_satellite_meta(db, satellite)['name']} untuk periode ini",
+            f"Tidak ada citra {_sat_meta['name']} untuk periode ini. {_no_imagery_suggestion(_sat_meta, year)}",
             404,
-            extra={"suggestion": "Coba ubah rentang tanggal, cloud threshold, atau ganti provider satelit"},
         )
 
     available_bands = composite.bandNames().getInfo()
@@ -526,10 +549,11 @@ def analyze_vegetation_change_hotspots(db, data: dict) -> dict:
         db, aoi, to_year, start_month, end_month, cloud_threshold, satellite, cloud_mask_technique
     )
     if from_composite is None or to_composite is None:
+        _sat_meta = get_satellite_meta(db, satellite)
+        _failed_year = from_year if from_composite is None else to_year
         raise AnalysisError(
-            f"Tidak ada citra {get_satellite_meta(db, satellite)['name']} untuk salah satu periode.",
+            f"Tidak ada citra {_sat_meta['name']} untuk salah satu periode. {_no_imagery_suggestion(_sat_meta, _failed_year)}",
             404,
-            extra={"suggestion": "Coba ubah rentang bulan atau cloud threshold."},
         )
 
     from_bands = from_composite.bandNames().getInfo()

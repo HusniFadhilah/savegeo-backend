@@ -25,8 +25,8 @@ $repos = @(
   "HusniFadhilah/savegeo-frontend"
 )
 
-$vpnConfig = "L:\Husni\Penelitian\Hiliriset\Progress\sslvpn-fatah.undip.vpn-client-config.ovpn"
-$vpnAuth = "K:\Key\len_server.txt"
+$vpnConfig = "your-vpn.vpn-client-config.ovpn"
+$vpnAuth = "your_server.txt"
 $vpnConfigB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($vpnConfig))
 $vpnAuthB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($vpnAuth))
 $knownHosts = ssh-keyscan -p 6970 192.168.17.55 2>$null | Out-String

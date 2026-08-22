@@ -40,8 +40,16 @@ SATELLITE_PROVIDERS: Dict[str, Dict[str, Any]] = {
         "resolution_label": "10 m (RGB/NIR) · 20 m (red-edge/SWIR)",
         "revisit_days": 5,
         "swath_km": 290,
-        "launch": "2015 (2A) / 2017 (2B)",
-        "start_year": 2015,
+        # Audit: "S2 SR vs TOA provenance for 2015" - satellites launched 2015
+        # (2A) / 2017 (2B), but this app only ever queries the Surface
+        # Reflectance collection above (COPERNICUS/S2_SR_HARMONIZED), whose
+        # actual global Level-2A data starts 2017-03-28, not 2015 - verified
+        # live: requesting 2015/2016 returns zero images for every AOI tried,
+        # only 2017+ returns results. `start_year` here must reflect *this
+        # collection's* real floor, not the satellite's launch date, since
+        # it's what callers use to validate/clamp requested years.
+        "launch": "2015 (2A) / 2017 (2B) - Surface Reflectance (L2A) processing only from 2017",
+        "start_year": 2017,
         "bands_available": [
             "Coastal Aerosol", "Blue", "Green", "Red", "Red Edge 1", "Red Edge 2",
             "Red Edge 3", "NIR", "NIR Narrow", "Water Vapour", "SWIR1", "SWIR2",

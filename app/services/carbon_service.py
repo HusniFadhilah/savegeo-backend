@@ -243,9 +243,19 @@ def analyze_carbon(db: Session, data: dict) -> dict:
     match_reference_vis = bool(data.get("match_reference_vis", True))
     cloud_mask_technique = resolve_cloud_mask_technique(data.get("cloud_mask_technique"))
 
-    year_min, year_max = 2015, datetime.now().year
+    # Audit: "S2 SR vs TOA provenance for 2015" - carbon inference always
+    # composites Sentinel-2 via COPERNICUS/S2_SR_HARMONIZED (see
+    # CarbonInferenceEngine._safe_s2_composite), whose real global L2A data
+    # starts 2017-03-28, not the satellite's 2015 launch date - verified
+    # live: requesting 2015/2016 returns zero images for every AOI tried.
+    # 2015/2016 used to pass this check and fail confusingly deep inside GEE
+    # processing instead; reject upfront with a clear reason.
+    year_min, year_max = 2017, datetime.now().year
     if not (year_min <= year <= year_max):
-        raise AnalysisError(f"Year harus antara {year_min}-{year_max}", 400)
+        raise AnalysisError(
+            f"Year harus antara {year_min}-{year_max} (Sentinel-2 Surface Reflectance belum tersedia sebelum {year_min})",
+            400,
+        )
 
     dataset_info = get_dataset_meta(reference_dataset, dataset_year)
 
@@ -575,6 +585,14 @@ def analyze_carbon(db: Session, data: dict) -> dict:
             "cv_metrics": model_info.get("cv_metrics", {}),
             "feature_importance": model_info.get("feature_importance", {}),
             "inference_date_range": f"{year}-{start_month:02d} to {year}-{end_month:02d}",
+            # Audit: "carbon reference vs model-estimate labeling for 2025/2026" -
+            # `year` here is the satellite-imagery year the model ran inference on;
+            # `reference_dataset`'s own vintage (see carbon_reference.year, e.g.
+            # WCMC circa-2010) is almost always older. Exposing `analysis_year`
+            # explicitly lets the frontend show "this is a model prediction for
+            # {analysis_year} imagery, trained on {reference_dataset} ground truth
+            # from {reference.year}" instead of implying a direct measurement.
+            "analysis_year": year,
             "reference_dataset": reference_dataset,
             "scale": carbon_scale,
             "images_used": inference_engine.last_s2_image_count,
@@ -733,7 +751,8 @@ def analyze_carbon_delta(db: Session, data: dict) -> dict:
     if start_year >= end_year:
         raise AnalysisError("start_year harus lebih kecil dari end_year", 400)
 
-    year_min, year_max = 2015, year_max_default
+    # Same Sentinel-2 SR floor as analyze_carbon (2017, not 2015 - see note there).
+    year_min, year_max = 2017, year_max_default
     start_year = max(year_min, min(year_max, start_year))
     end_year = max(year_min, min(year_max, end_year))
 

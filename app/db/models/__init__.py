@@ -19,6 +19,7 @@ from app.db.models.satellite_imagery import SatelliteImagery  # noqa: F401
 from app.db.models.analysis_run import AnalysisRun  # noqa: F401
 from app.db.models.analysis_result import AnalysisResult  # noqa: F401
 from app.db.models.hotspot import Hotspot  # noqa: F401
+from app.db.models.field import Field  # noqa: F401
 
 __all__ = [
     "Role",
@@ -41,4 +42,5 @@ __all__ = [
     "AnalysisRun",
     "AnalysisResult",
     "Hotspot",
+    "Field",
 ]

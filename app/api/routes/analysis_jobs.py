@@ -22,14 +22,14 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 from app.api.deps import require_ee
 from app.core.config import get_settings
 from app.db.session import SessionLocal
-from app.services import carbon_service, landcover_service, vegetation_service
+from app.services import carbon_service, crop_monitoring_service, landcover_service, vegetation_service
 from app.services.gee_common import AnalysisError
 
 router = APIRouter(tags=["analysis-jobs"])
 logger = logging.getLogger(__name__)
 
 _executor = ThreadPoolExecutor(max_workers=int(os.getenv("ANALYSIS_JOB_WORKERS", "2")))
-_ALLOWED_JOB_TYPES = {"carbon", "carbon_local", "vegetation", "landcover"}
+_ALLOWED_JOB_TYPES = {"carbon", "carbon_local", "vegetation", "landcover", "crop_monitoring"}
 
 
 def _jobs_dir() -> Path:
@@ -81,6 +81,8 @@ def _run_job(job_id: str, job_type: str, payload: dict[str, Any]) -> None:
             result = vegetation_service.analyze_vegetation(db, payload)
         elif job_type == "landcover":
             result = landcover_service.analyze_landcover(payload)
+        elif job_type == "crop_monitoring":
+            result = crop_monitoring_service.run_crop_monitoring(db, payload)
         else:  # defensive; validated before submit
             raise ValueError(f"Unsupported job type: {job_type}")
         _write_job(
