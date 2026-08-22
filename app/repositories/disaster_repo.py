@@ -162,10 +162,26 @@ def add_imagery(db: Session, event_id: int, data: dict) -> SatelliteImagery:
         data_source=data.get("data_source"),
         is_primary=bool(data.get("is_primary", False)),
         preview_tile_url=data.get("preview_tile_url"),
+        source_kind=data.get("source_kind", "gee"),
+        local_file_path=data.get("local_file_path"),
     )
     if img.is_primary:
         _clear_primary(db, event_id, img.phase)
     db.add(img)
+    db.commit()
+    db.refresh(img)
+    return img
+
+
+def set_preview_tile_url(db: Session, imagery_id: int, preview_tile_url: str) -> SatelliteImagery:
+    """Fill in `preview_tile_url` after the row already exists - needed for
+    source_kind="local_upload" rows, whose tile URL template embeds the row's
+    own `imagery_id` (`.../imagery-tiles/{imagery_id}/{z}/{x}/{y}.png`) and
+    so can't be known before `add_imagery` returns."""
+    img = db.get(SatelliteImagery, imagery_id)
+    if img is None:
+        raise ValueError(f"Imagery {imagery_id} not found")
+    img.preview_tile_url = preview_tile_url
     db.commit()
     db.refresh(img)
     return img

@@ -2,7 +2,7 @@
 name = "savegeo-backend"
 version = "0.1.0"
 description = "GEOMOKA/SAVEGEO backend — FastAPI + Supabase Postgres rebuild of the legacy Flask API"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 readme = "README.md"
 
 dependencies = [
@@ -51,6 +51,19 @@ dependencies = [
     "rasterio>=1.3.9",
     "pystac-client>=0.8.3",
     "planetary-computer>=1.0.0",
+    # Copernicus Data Space Ecosystem (CDSE) ingestion - GeoAnchor/GeoTile/
+    # GeoStack over live STAC catalogs (Copernicus, Planetary Computer).
+    # Requires Python >=3.12 (see `requires-python` above - this is why the
+    # backend's Python floor was bumped from 3.11). Needs CDSE credentials
+    # in .env (see docs/README once wired) - not yet used by any service,
+    # this only declares the dependency; app/providers/stac_provider.py
+    # remains the actual ingestion path used by training/inference today.
+    "geosave-engine>=0.1.1",
+    # Self-hosted XYZ tile serving for locally-stored GeoTIFFs (e.g. commercial
+    # disaster imagery not in the public GEE catalog, or when GEE asset upload
+    # is blocked by a disabled GCP billing account - no Cloud Storage/billing
+    # needed, tiles are rendered on-demand straight from disk).
+    "rio-tiler>=6.0.0",
     "pyproj>=3.6.0",
 
     # --- Geo file handling ---
@@ -85,7 +98,7 @@ include = ["app*"]
 
 [tool.ruff]
 line-length = 110
-target-version = "py311"
+target-version = "py312"
 
 [tool.ruff.lint.flake8-bugbear]
 # FastAPI's DI pattern is `def route(db: Session = Depends(get_db))` - the

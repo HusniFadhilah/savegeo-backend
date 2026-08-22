@@ -28,6 +28,12 @@ class SatelliteImagery(Base):
     data_source: Mapped[str | None] = mapped_column(String(100))
     is_primary: Mapped[bool] = mapped_column(Boolean, default=False)
     preview_tile_url: Mapped[str | None] = mapped_column(String(1000))
+    # "gee" (default, existing behavior - preview_tile_url points at an
+    # already-live GEE getMapId() tile template) | "local_upload" (admin-
+    # ingested raster served by local_imagery_tile_service via
+    # local_file_path - see 0008_local_imagery migration).
+    source_kind: Mapped[str] = mapped_column(String(20), default="gee", nullable=False)
+    local_file_path: Mapped[str | None] = mapped_column(String(500))
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.UTC))
 
     def to_dict(self) -> dict:
@@ -43,5 +49,6 @@ class SatelliteImagery(Base):
             "data_source": self.data_source,
             "is_primary": self.is_primary,
             "preview_tile_url": self.preview_tile_url,
+            "source_kind": self.source_kind,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }

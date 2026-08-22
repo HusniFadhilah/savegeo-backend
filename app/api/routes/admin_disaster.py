@@ -23,6 +23,7 @@ from __future__ import annotations
 import datetime as dt
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -35,7 +36,7 @@ from app.db.models.hotspot import IMPACT_LEVELS, Hotspot
 from app.db.session import get_db
 from app.registries.disaster_model_registry import get_model, list_models
 from app.repositories import disaster_repo
-from app.services import audit_service, disaster_analysis_service
+from app.services import audit_service, disaster_analysis_service, local_imagery_tile_service
 from app.services.gee_common import AnalysisError
 from app.services.geo_utils import bbox_and_centroid, estimate_area_ha
 
@@ -91,6 +92,15 @@ class ImageryCreateRequest(BaseModel):
     cloud_coverage_pct: float | None = None
     data_source: str | None = None
     is_primary: bool | None = False
+    # "gee" (default) - preview_tile_url is a ready GEE getMapId() template.
+    # "local_upload" - preview_tile_url is filled in AFTER creation (its
+    # template embeds this row's own id, see disaster_repo.set_preview_tile_url)
+    # from a raster already ingested at local_file_path (see
+    # app/services/local_imagery_tile_service.ensure_cog - COG conversion is a
+    # separate offline step, this endpoint doesn't upload/convert a file itself).
+    source_kind: str | None = "gee"
+    local_file_path: str | None = None
+    preview_tile_url: str | None = None
 
 
 class AnalysisCreateRequest(BaseModel):
@@ -329,6 +339,34 @@ def admin_set_primary_imagery(
         detail={"imagery_id": img.id, "phase": img.phase},
     )
     return img.to_dict()
+
+
+# -- Local raster tile preview (admin-only, unpublished OK) ---------------
+
+
+@router.get("/disasters/imagery-tiles/{imagery_id}/{z}/{x}/{y}.png")
+def admin_local_imagery_tile(
+    imagery_id: int,
+    z: int,
+    x: int,
+    y: int,
+    admin: AdminUser = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """Admin preview of a `source_kind="local_upload"` raster's tiles before
+    the event/result is published - Admin needs to check the imagery looks
+    right in AnalysisReview/ImageryManager ahead of the User-facing route
+    below, which 404s on anything not yet published."""
+    img = disaster_repo.get_imagery(db, imagery_id)
+    if img is None or img.source_kind != "local_upload" or not img.local_file_path:
+        raise HTTPException(status_code=404, detail="Local imagery not found")
+    # local_file_path is stored as an absolute path under settings.disaster_raster_path
+    # (see local_imagery_tile_service / scripts/ingest_ntt_earthquake.py) - not joined
+    # with upload_dir, that's a separate unrelated storage location.
+    png = local_imagery_tile_service.render_tile(img.local_file_path, z, x, y)
+    if png is None:
+        raise HTTPException(status_code=404, detail="Tile out of coverage")
+    return Response(content=png, media_type="image/png")
 
 
 # -- Analyses (runs/results) ---------------------------------------------

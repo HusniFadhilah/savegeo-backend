@@ -45,6 +45,11 @@ class Settings(BaseSettings):
     # --- Local storage ---
     upload_dir: str = "./var/uploads"
     model_dir: str = "./var/saved_models"
+    # Self-hosted disaster-imagery rasters (e.g. commercial GeoTIFFs not in the
+    # public GEE catalog) served as XYZ tiles by app/services/local_tile_service.py -
+    # chosen specifically to avoid needing a billed GCS bucket for GEE asset
+    # ingestion (see savegeo/backend/docs/ntt-earthquake-integration-prompt.md).
+    disaster_raster_dir: str = "./var/disaster_rasters"
 
     # --- Region API ---
     region_api_base_url: str = "https://api.sp3stab.id/api/en"
@@ -99,6 +104,12 @@ class Settings(BaseSettings):
     @property
     def model_path(self) -> Path:
         p = Path(self.model_dir)
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    @property
+    def disaster_raster_path(self) -> Path:
+        p = Path(self.disaster_raster_dir)
         p.mkdir(parents=True, exist_ok=True)
         return p
 

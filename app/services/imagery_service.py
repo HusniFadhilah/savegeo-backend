@@ -31,6 +31,7 @@ from datetime import UTC, datetime
 
 import ee
 
+from app.core.config import get_settings
 from app.registries.imagery_provider_registry import (
     IMAGERY_PROVIDERS,
     get_imagery_provider_meta,
@@ -218,3 +219,94 @@ def get_scene_tile(data: dict) -> dict:
         raise AnalysisError("Gagal membuat tile untuk scene ini", 500)
 
     return {"scene_id": scene_id, "tile_url": tile["tile_url"], "satellite": meta}
+
+
+def get_dem_tile(data: dict) -> dict:
+    """DEM/terrain layer for the imagery browser.
+
+    DEMNAS can come from a configured Earth Engine asset, XYZ tile URL, or WMS.
+    If none is configured, return an explicit SRTM fallback so the UI can still
+    render terrain while clearly warning that it is not official DEMNAS.
+    """
+    if not data.get("aoi"):
+        raise AnalysisError("aoi is required", 400)
+
+    settings = get_settings()
+    aoi = create_geometry_from_payload(data["aoi"])
+    scale = int(data.get("scale", 30))
+    elevation_vis = {"min": 0, "max": 3000, "palette": ["0b3d2e", "3f8f46", "f6d365", "c08457", "f7f7f7"]}
+
+    if settings.demnas_ee_asset:
+        dem = ee.Image(settings.demnas_ee_asset).rename("elevation").clip(aoi)
+        tile = get_tile_url(dem, elevation_vis, "BIG DEMNAS elevation")
+        stats = dem.reduceRegion(
+            reducer=ee.Reducer.minMax().combine(ee.Reducer.mean(), sharedInputs=True),
+            geometry=aoi,
+            scale=scale,
+            maxPixels=int(settings.max_pixels),
+            bestEffort=True,
+        ).getInfo()
+        return {
+            "tile_url": tile["tile_url"] if tile else None,
+            "source": "BIG DEMNAS (configured Earth Engine asset)",
+            "source_kind": "gee_asset",
+            "is_official_demnas": True,
+            "stats": {
+                "min_elevation_m": stats.get("elevation_min"),
+                "mean_elevation_m": stats.get("elevation_mean"),
+                "max_elevation_m": stats.get("elevation_max"),
+            },
+            "legend": [
+                {"label": "Rendah", "color": "#0b3d2e"},
+                {"label": "Menengah", "color": "#f6d365"},
+                {"label": "Tinggi", "color": "#f7f7f7"},
+            ],
+        }
+
+    if settings.demnas_tile_url:
+        return {
+            "tile_url": settings.demnas_tile_url,
+            "source": "BIG DEMNAS (configured XYZ tile service)",
+            "source_kind": "xyz",
+            "is_official_demnas": True,
+            "stats": None,
+            "legend": [],
+        }
+
+    if settings.demnas_wms_url and settings.demnas_wms_layers:
+        return {
+            "tile_url": None,
+            "wms_url": settings.demnas_wms_url,
+            "wms_layers": settings.demnas_wms_layers,
+            "source": "BIG DEMNAS (configured WMS service)",
+            "source_kind": "wms",
+            "is_official_demnas": True,
+            "stats": None,
+            "legend": [],
+        }
+
+    dem = ee.Image("USGS/SRTMGL1_003").select("elevation").clip(aoi)
+    tile = get_tile_url(dem, elevation_vis, "SRTM fallback elevation")
+    stats = dem.reduceRegion(
+        reducer=ee.Reducer.minMax().combine(ee.Reducer.mean(), sharedInputs=True),
+        geometry=aoi,
+        scale=90,
+        maxPixels=int(settings.max_pixels),
+        bestEffort=True,
+    ).getInfo()
+    return {
+        "tile_url": tile["tile_url"] if tile else None,
+        "source": "USGS SRTM fallback (DEMNAS belum dikonfigurasi)",
+        "source_kind": "gee_asset",
+        "is_official_demnas": False,
+        "stats": {
+            "min_elevation_m": stats.get("elevation_min"),
+            "mean_elevation_m": stats.get("elevation_mean"),
+            "max_elevation_m": stats.get("elevation_max"),
+        },
+        "legend": [
+            {"label": "Rendah", "color": "#0b3d2e"},
+            {"label": "Menengah", "color": "#f6d365"},
+            {"label": "Tinggi", "color": "#f7f7f7"},
+        ],
+    }

@@ -53,3 +53,17 @@ async def imagery_scene_tile(request: Request):
     except Exception as e:  # noqa: BLE001
         logger.error(f"Imagery scene-tile error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/imagery/dem-tile", dependencies=[Depends(require_ee)])
+async def imagery_dem_tile(request: Request):
+    data = await request.json()
+    try:
+        return imagery_service.get_dem_tile(data)
+    except AnalysisError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e))
+    except ee.EEException as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Imagery DEM tile error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
