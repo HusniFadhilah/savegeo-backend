@@ -33,7 +33,7 @@ _CACHE_TTL_SECONDS = 3600
 
 
 def _swap_lat_lng(node):
-    """The upstream region API (api.sp3stab.id) returns polygon coordinates as
+    """The upstream region API returns polygon coordinates as
     [lat, lng] pairs for province/city/district - confirmed against live data
     (e.g. Kecamatan Bangli's `meta` center is lat=-8.45/long=115.35, and its
     ring coordinates come back as [-8.52, 115.33, ...], same order). GeoJSON

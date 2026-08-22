@@ -179,7 +179,7 @@ def run_agent_control(db: Session, request: Request, payload: dict) -> tuple[dic
     # ── AI call ──────────────────────────────────────────────────
     try:
         if mode == "geoai":
-            # Geo-AI Assistant: grounded tool-calling loop over already-computed
+            # SaveGeo Assistant: grounded tool-calling loop over already-computed
             # results + live hotspot search (see agentic_ai.geoai_with_ai). Screenshot/
             # attachment inputs are UI-automation-mode-only and not passed through here.
             result = geoai_with_ai(message, geoai_context, db, history)

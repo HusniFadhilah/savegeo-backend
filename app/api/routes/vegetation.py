@@ -85,7 +85,7 @@ async def analyze_vegetation_compare(request: Request, db: Session = Depends(get
 @router.post("/analyze/vegetation/change-hotspots", dependencies=[Depends(require_ee)])
 async def analyze_vegetation_change_hotspots(request: Request, db: Session = Depends(get_db)):
     """Ranked, vectorized vegetation-index change polygons (P0 hotspot detection,
-    Geo-AI Assistant's `find_hotspots(metric="vegetation_change")`) - see
+    SaveGeo Assistant's `find_hotspots(metric="vegetation_change")`) - see
     vegetation_service.analyze_vegetation_change_hotspots for the full contract."""
     data = await request.json()
     try:

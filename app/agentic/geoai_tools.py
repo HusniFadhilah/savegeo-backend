@@ -1,5 +1,5 @@
 """
-geoai_tools.py - Whitelisted tool/function layer for the Geo-AI Assistant.
+geoai_tools.py - Whitelisted tool/function layer for the SaveGeo Assistant.
 
 Per the "Safety Against Hallucination" requirement, the LLM never gets free
 SQL/code execution or direct DB/GEE access. It can only call the functions

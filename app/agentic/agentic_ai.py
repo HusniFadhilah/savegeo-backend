@@ -1936,7 +1936,7 @@ def get_key_pool_status() -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════
-# GEO-AI ASSISTANT — tool-calling grounded query/action agent (P0)
+# SaveGeo Assistant — tool-calling grounded query/action agent (P0)
 # ══════════════════════════════════════════════════════════════════
 #
 # Unlike CONTROLLER_SYSTEM_PROMPT/plan_with_ai above (a single-shot JSON-mode
@@ -1947,7 +1947,7 @@ def get_key_pool_status() -> dict:
 # app/agentic/geoai_tools.py for the tool registry and the "no fabricated
 # numbers" enforcement.
 
-GEOAI_SYSTEM_PROMPT = """You are SAVEGEO Geo-AI Assistant.
+GEOAI_SYSTEM_PROMPT = """You are SAVEGEO Assistant.
 
 You help users analyze geospatial information already available inside SAVEGEO: AOI, active
 layers, analysis period, Sentinel-2 imagery, vegetation indices (NDVI/EVI/SAVI/NDWI/NBR/etc.),
@@ -2253,7 +2253,7 @@ def _call_gemini_tools(api_key: str, model: str, user_input: str,
 
 
 def geoai_with_ai(message: str, context: dict, db, history: Optional[List[dict]] = None) -> dict:
-    """Tool-calling Geo-AI Assistant loop (P0). See GEOAI_SYSTEM_PROMPT and
+    """Tool-calling SaveGeo Assistant loop (P0). See GEOAI_SYSTEM_PROMPT and
     app/agentic/geoai_tools.py for the grounding/whitelist contract.
 
     `context` is the richer client-held state (AOI geometry, period, active
@@ -2331,7 +2331,7 @@ def geoai_with_ai(message: str, context: dict, db, history: Optional[List[dict]]
 
 def _geoai_fallback(reason: str) -> dict:
     return {
-        "message": "Geo-AI Assistant tidak dapat digunakan saat ini. Gunakan panel analisis secara manual.",
+        "message": "SaveGeo Assistant tidak dapat digunakan saat ini. Gunakan panel analisis secara manual.",
         "warnings": [reason],
         "actions": [],
         "cards": [],
