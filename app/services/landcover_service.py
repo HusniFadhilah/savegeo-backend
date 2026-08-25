@@ -909,6 +909,9 @@ def analyze_landcover_change_map(data: dict) -> dict:
     to_year = int(data.get("to_year"))
     start_month = int(data.get("start_month", 1))
     end_month = int(data.get("end_month", 12))
+    dw_probability_threshold = data.get("dw_probability_threshold")
+    if dw_probability_threshold is not None:
+        dw_probability_threshold = float(dw_probability_threshold)
     lc_scale = max(
         int(data.get("scale", LAND_COVER_NATIVE_SCALE.get(dataset, settings.default_landcover_scale))),
         LAND_COVER_NATIVE_SCALE.get(dataset, int(data.get("scale", settings.default_landcover_scale))),
@@ -1053,6 +1056,9 @@ def analyze_landcover_hotspots(data: dict) -> dict:
     to_year = int(data.get("to_year"))
     start_month = int(data.get("start_month", 1))
     end_month = int(data.get("end_month", 12))
+    dw_probability_threshold = data.get("dw_probability_threshold")
+    if dw_probability_threshold is not None:
+        dw_probability_threshold = float(dw_probability_threshold)
     native_scale = LAND_COVER_NATIVE_SCALE.get(dataset, settings.default_landcover_scale)
     lc_scale = max(int(data.get("scale", native_scale)), native_scale)
     # Vectorizing at native pixel resolution over a large AOI can be very slow/
