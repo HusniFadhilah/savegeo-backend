@@ -281,7 +281,7 @@ def analyze_carbon(db: Session, data: dict) -> dict:
     _is_cloud_geotiff_ee_ref = (
         _is_external_ref
         and _external_ref_meta is not None
-        and _external_ref_meta.get("ingestion_method") == "cloud_geotiff_ee"
+        and _external_ref_meta.get("ingestion_method") in {"cloud_geotiff_ee", "chloris_downloads_index"}
     )
     if not _is_arcgis_ref and not _is_external_ref:
         carbon_reference = load_carbon_reference_ee(reference_dataset, dataset_year=dataset_year, roi=roi_for_calculation)

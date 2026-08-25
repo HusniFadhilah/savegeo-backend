@@ -11,6 +11,7 @@ from app.api.routes import (
     arcgis,
     carbon,
     chat,
+    chloris,
     companies,
     crop_monitoring,
     datasets,
@@ -46,6 +47,7 @@ api_router.include_router(utils.router)
 api_router.include_router(reports.router)
 api_router.include_router(admin.router)
 api_router.include_router(carbon.router)
+api_router.include_router(chloris.router)
 api_router.include_router(landcover.router)
 api_router.include_router(disaster.router)
 api_router.include_router(disaster_events.router)

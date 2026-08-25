@@ -50,6 +50,31 @@ Docker image. Optional Copernicus CDSE ingestion via GeoSave Engine can be
 installed separately with `pip install -e ".[cdse]"` in a Python 3.12+
 environment.
 
+### Chloris carbon stock data
+
+Chloris AGB stock is available as the `CHLORIS_AGB_STOCK` carbon reference
+dataset. Keep Chloris login credentials out of source code and `.env`; use API
+credentials/download settings from the Chloris profile or reporting unit:
+
+```bash
+# Easiest: direct downloadable GeoTIFF URL for the stock product
+CHLORIS_AGB_STOCK_URL=https://...
+
+# Or resolve from a Chloris reporting-unit data folder
+CHLORIS_DATA_PATH=s3://chloris-app-data/...
+
+# Or resolve dataPath via the Chloris API
+CHLORIS_ORGANIZATION_ID=...
+CHLORIS_REPORTING_UNIT_ID=...   # optional when the organization has one unit
+CHLORIS_ID_TOKEN=...
+```
+
+Check resolution with:
+
+```bash
+curl "http://localhost:8086/api/carbon/chloris/status?product=stock&year=2025"
+```
+
 ### Connecting to Supabase Postgres
 
 1. Create a Supabase project (or use an existing one).

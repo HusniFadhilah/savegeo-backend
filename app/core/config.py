@@ -58,6 +58,16 @@ class Settings(BaseSettings):
     # here, or configure AWS_* credentials in the process environment for S3.
     copernicus_cdse_access_token: str = ""
 
+    # --- Chloris carbon stock integration ---
+    # Do not store Chloris username/password here. Use API credentials from the
+    # Chloris profile page, or configure a direct dataPath/download URL.
+    chloris_base_url: str = "https://app.chloris.earth"
+    chloris_organization_id: str = ""
+    chloris_reporting_unit_id: str = ""
+    chloris_id_token: str = ""
+    chloris_refresh_token: str = ""
+    chloris_data_path: str = ""
+
     # --- Region API ---
     region_api_base_url: str = "https://api.sp3stab.id/api/en"
 

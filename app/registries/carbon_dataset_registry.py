@@ -396,6 +396,47 @@ CARBON_EXTERNAL_REGISTRY: dict[str, dict] = {
         "launch_date":      "2024-04",
         "data_open_date":   "2026-01-26",
     },
+    "CHLORIS_AGB_STOCK": {
+        "key":              "CHLORIS_AGB_STOCK",
+        "provider_type":    "chloris_platform",
+        "name":             "Chloris AGB Carbon Stock",
+        "full_name":        "Chloris Platform Annual Above-Ground Biomass Stock",
+        "service_url":      "https://app.chloris.earth/api/reportingUnit/",
+        "source_url":       "https://app.chloris.earth/",
+        # Optional override: set CHLORIS_AGB_STOCK_URL or CHLORIS_STOCK_URL to
+        # a direct HTTPS/gs:// GeoTIFF. Otherwise the adapter resolves
+        # CHLORIS_DATA_PATH/downloads.json, or dataPath from the Chloris API.
+        "raster_url":       None,
+        "band":             "stock",
+        "output_band":      "agb",
+        "unit":             "Mg C/ha",
+        "target_pool":      "aboveground_biomass_carbon",
+        "resolution":       30,
+        "year":             2025,
+        "year_range":       [2000, 2025],
+        "time_aware":       True,
+        "transform":        "multiply_0.47",
+        "ingestion_method": "chloris_downloads_index",
+        "chloris_product":  "stock",
+        "requires_auth":    True,
+        "experimental":     True,
+        "training_capable": False,
+        "description":      (
+            "Chloris annual above-ground biomass stock GeoTIFF resolved from the "
+            "licensed Chloris reporting unit downloads index. The stock product is "
+            "converted to carbon with x0.47 for comparison with AGB carbon models."
+        ),
+        "attribution":      "Chloris Geospatial",
+        "limitations":      [
+            "Requires a Chloris license/API credentials and a reporting unit with downloadable GeoTIFFs.",
+            "Earth Engine loadGeoTIFF can only load URLs it can fetch; if Chloris returns a private URL, set CHLORIS_AGB_STOCK_URL to an accessible signed/public GeoTIFF.",
+            "Uses above-ground biomass stock only; belowground and soil carbon are not included.",
+            "Availability and native resolution depend on the licensed Chloris reporting unit and year.",
+        ],
+        "vis_min":          0,
+        "vis_max":          250,
+        "vis_palette":      ["f7fcf5","e5f5e0","c7e9c0","a1d99b","74c476","41ab5d","238b45","006d2c","00441b"],
+    },
     "HANSEN_TREECOVER_AGB_PROXY": {
         "key":              "HANSEN_TREECOVER_AGB_PROXY",
         "provider_type":    "external_raster",
@@ -496,6 +537,7 @@ TRAINING_DATASET_KEYS: list[str] = [
     "SOILGRIDS_SOC_30CM",
     "HANSEN_TREECOVER_AGB_PROXY",
     "ESA_CCI_BIOMASS_COG",
+    "CHLORIS_AGB_STOCK",
 ]
 
 # Datasets whose GEE loaders genuinely select an annual image/composite from
@@ -519,7 +561,8 @@ def load_external_carbon_reference_ee(
 ):
     """Load an external cloud GeoTIFF carbon reference via ee.Image.loadGeoTIFF().
 
-    Supports datasets in CARBON_EXTERNAL_REGISTRY with ingestion_method='cloud_geotiff_ee'.
+    Supports datasets in CARBON_EXTERNAL_REGISTRY with ingestion_method='cloud_geotiff_ee'
+    or 'chloris_downloads_index'.
     URL resolved from (in priority order):
         1. Env var  {KEY}_URL  (e.g. ESA_BIOMASS_2026_URL)
         2. Registry field  raster_url
@@ -536,10 +579,11 @@ def load_external_carbon_reference_ee(
     if meta is None:
         raise ValueError(f"Unknown external carbon dataset: '{key}'. Not in CARBON_EXTERNAL_REGISTRY.")
 
-    if meta.get("ingestion_method") != "cloud_geotiff_ee":
+    ingestion_method = meta.get("ingestion_method")
+    if ingestion_method not in {"cloud_geotiff_ee", "chloris_downloads_index"}:
         raise ValueError(
             f"Dataset '{key}' does not use cloud_geotiff_ee loading "
-            f"(ingestion_method={meta.get('ingestion_method')!r}). "
+            f"(ingestion_method={ingestion_method!r}). "
             "Use ExternalRasterProvider for REST/rasterio-based datasets."
         )
 
@@ -548,6 +592,22 @@ def load_external_carbon_reference_ee(
         or os.getenv(f"{key.upper()}_URL")
         or meta.get("raster_url")
     )
+    if not raster_url and ingestion_method == "chloris_downloads_index":
+        from app.services.chloris_service import resolve_chloris_download
+
+        try:
+            raster_url = resolve_chloris_download(
+                product=meta.get("chloris_product", "stock"),
+                year=dataset_year,
+            ).url
+        except Exception as exc:  # noqa: BLE001 - surface a user-actionable setup error
+            raise ValueError(
+                f"Could not resolve Chloris download for '{key}'. "
+                "Set CHLORIS_AGB_STOCK_URL/CHLORIS_STOCK_URL directly, or configure "
+                "CHLORIS_DATA_PATH plus API token settings. Original error: "
+                f"{exc}"
+            ) from exc
+
     if not raster_url:
         raise ValueError(
             f"No raster URL configured for '{key}'. "
