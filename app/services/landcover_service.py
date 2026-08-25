@@ -32,6 +32,7 @@ from app.registries.landcover_dataset_registry import (
     supported_glc_fcs30d_year,
 )
 from app.services.arcgis_helpers import compute_arcgis_landcover_summary
+from app.services.geosave_landcover_service import probe_geotiff
 from app.services.gee_common import (
     AnalysisError,
     build_date_range,
@@ -49,6 +50,7 @@ _ESA_THRESHOLD_YEAR = 2021
 _ESRI_COLLECTION_ID = LAND_COVER_DATASET_OPTIONS.get("ESRI_LandCover", {}).get(
     "gee_id", "projects/sat-io/open-datasets/landcover/ESRI_Global-LULC_10m_TS"
 )
+_GEOSAVE_DYNAMIC_WORLD_DATASETS = {"GeoSave_Copernicus_DynamicWorld"}
 
 
 def _default_year_max() -> int:
@@ -212,7 +214,7 @@ def get_landcover_image(
     else:
         dw_start_date, dw_end_date = build_date_range(effective_year, start_month, end_month)
 
-    if dataset == "Dynamic_World":
+    if dataset == "Dynamic_World" or dataset in _GEOSAVE_DYNAMIC_WORLD_DATASETS:
         dw = (
             ee.ImageCollection("GOOGLE/DYNAMICWORLD/V1")
             .filterDate(dw_start_date, dw_end_date)
@@ -220,20 +222,32 @@ def get_landcover_image(
         )
         _dw_size = dw.size().getInfo()
         if _dw_size == 0:
-            raise ValueError(f"No Dynamic World data found for {effective_year} ({dw_start_date}-{dw_end_date})")
+            raise ValueError(f"No Sentinel-2 land-cover data found for {effective_year} ({dw_start_date}-{dw_end_date})")
         label_mode = dw.select("label").reduce(ee.Reducer.mode()).rename("landcover")
         if dw_probability_threshold is not None and 0 < dw_probability_threshold < 1:
             max_prob = dw.select(DW_PROB_BANDS).reduce(ee.Reducer.max()).reduce(ee.Reducer.max())
             confidence_mask = max_prob.gte(dw_probability_threshold)
             label_mode = label_mode.updateMask(confidence_mask)
         image = label_mode.clip(aoi)
+        dataset_name = (
+            "GeoSave Copernicus Sentinel-2 Land Cover"
+            if dataset in _GEOSAVE_DYNAMIC_WORLD_DATASETS
+            else "Dynamic World"
+        )
+        provider_type = (
+            "geosave_cdse_stac"
+            if dataset in _GEOSAVE_DYNAMIC_WORLD_DATASETS
+            else "gee_near_real_time"
+        )
         return image, {
             "dataset": dataset,
-            "dataset_name": "Dynamic World",
+            "dataset_name": dataset_name,
             "requested_year": requested_year,
             "year": effective_year,
             "date_range": {"start": dw_start_date, "end": display_end_date or dw_end_date},
-            "provider_type": "gee_near_real_time",
+            "provider_type": provider_type,
+            "source_kind": "geosave_cdse_stac" if dataset in _GEOSAVE_DYNAMIC_WORLD_DATASETS else "gee",
+            "classification_backend": "Dynamic_World",
             "dw_probability_threshold": dw_probability_threshold,
             "confidence": _dw_confidence_stats(dw, aoi, LAND_COVER_NATIVE_SCALE.get(dataset, 30), dw_probability_threshold),
             "coverage_note": _dw_coverage_note(dw_start_date, display_end_date or dw_end_date, _dw_size),
@@ -388,6 +402,24 @@ def get_landcover_image(
 
     # ── New provider types ──────────────────────────────────────────────
 
+    if dataset == "GeoSave_MapBiomas_Indonesia":
+        uri, mbi_meta = mapbiomas_indonesia_geotiff_uri(requested_year)
+        mbi_year = mbi_meta["year"]
+        geosave_probe = probe_geotiff(uri)
+        image = ee.Image.loadGeoTIFF(uri).clip(aoi).rename("landcover")
+        return image, {
+            "dataset": dataset,
+            "dataset_name": f"GeoSave MapBiomas Indonesia LANDY {mbi_meta['collection']}",
+            "requested_year": requested_year,
+            "year": mbi_year,
+            "date_range": {"start": f"{mbi_year}-01-01", "end": f"{mbi_year}-12-31"},
+            "provider_type": "geosave_geotiff",
+            "source_kind": "geosave_geotiff",
+            "classification_backend": "MapBiomas_Indonesia",
+            "source_uri": uri,
+            "geosave": geosave_probe.to_dict(),
+        }
+
     if dataset == "JRC_TMF":
         band_name = f"Dec{effective_year}"
         image = (
@@ -518,6 +550,11 @@ def summarize_landcover_image(dataset: str, image, aoi, lc_scale: int, metadata:
         "year": metadata["year"],
         "dataset_name": metadata["dataset_name"],
         "date_range": metadata.get("date_range"),
+        "provider_type": metadata.get("provider_type"),
+        "source_kind": metadata.get("source_kind"),
+        "classification_backend": metadata.get("classification_backend"),
+        "source_uri": metadata.get("source_uri"),
+        "geosave": metadata.get("geosave"),
     }
 
 
@@ -676,7 +713,16 @@ def analyze_landcover(data: dict) -> dict:
                     }
                 continue
             try:
-                lc_image, metadata = get_landcover_image(dataset, year, aoi, start_month, end_month)
+                lc_image, metadata = get_landcover_image(
+                    dataset,
+                    year,
+                    aoi,
+                    start_month,
+                    end_month,
+                    dw_probability_threshold=dw_probability_threshold,
+                    start_date=explicit_start,
+                    end_date=explicit_end,
+                )
                 summary = summarize_landcover_image(dataset, lc_image, aoi, lc_scale, metadata, include_improbable_classes)
                 if summary:
                     results[dataset] = summary
@@ -716,6 +762,9 @@ def analyze_landcover_transition(data: dict) -> dict:
 
     start_month = int(data.get("start_month", 1))
     end_month = int(data.get("end_month", 12))
+    dw_probability_threshold = data.get("dw_probability_threshold")
+    if dw_probability_threshold is not None:
+        dw_probability_threshold = float(dw_probability_threshold)
     lc_scale = int(data.get("scale", settings.default_landcover_scale))
     lc_scale = max(lc_scale, LAND_COVER_NATIVE_SCALE.get(dataset, lc_scale))
     include_improbable_classes = bool(data.get("include_improbable_classes", False))
@@ -876,14 +925,30 @@ def analyze_landcover_change_map(data: dict) -> dict:
         from_image, from_meta = get_landcover_image(
             dataset, from_year, aoi,
             start_date=_reyear_date(explicit_start, from_year), end_date=_reyear_date(explicit_end, from_year),
+            dw_probability_threshold=dw_probability_threshold,
         )
         to_image, to_meta = get_landcover_image(
             dataset, to_year, aoi,
             start_date=_reyear_date(explicit_start, to_year), end_date=_reyear_date(explicit_end, to_year),
+            dw_probability_threshold=dw_probability_threshold,
         )
     else:
-        from_image, from_meta = get_landcover_image(dataset, from_year, aoi, start_month, end_month)
-        to_image, to_meta = get_landcover_image(dataset, to_year, aoi, start_month, end_month)
+        from_image, from_meta = get_landcover_image(
+            dataset,
+            from_year,
+            aoi,
+            start_month,
+            end_month,
+            dw_probability_threshold=dw_probability_threshold,
+        )
+        to_image, to_meta = get_landcover_image(
+            dataset,
+            to_year,
+            aoi,
+            start_month,
+            end_month,
+            dw_probability_threshold=dw_probability_threshold,
+        )
 
     changed = from_image.neq(to_image).rename("changed").selfMask().clip(aoi)
     stable = from_image.eq(to_image).rename("stable").selfMask().clip(aoi)
@@ -1005,14 +1070,30 @@ def analyze_landcover_hotspots(data: dict) -> dict:
         from_image, from_meta = get_landcover_image(
             dataset, from_year, aoi,
             start_date=_reyear_date(explicit_start, from_year), end_date=_reyear_date(explicit_end, from_year),
+            dw_probability_threshold=dw_probability_threshold,
         )
         to_image, to_meta = get_landcover_image(
             dataset, to_year, aoi,
             start_date=_reyear_date(explicit_start, to_year), end_date=_reyear_date(explicit_end, to_year),
+            dw_probability_threshold=dw_probability_threshold,
         )
     else:
-        from_image, from_meta = get_landcover_image(dataset, from_year, aoi, start_month, end_month)
-        to_image, to_meta = get_landcover_image(dataset, to_year, aoi, start_month, end_month)
+        from_image, from_meta = get_landcover_image(
+            dataset,
+            from_year,
+            aoi,
+            start_month,
+            end_month,
+            dw_probability_threshold=dw_probability_threshold,
+        )
+        to_image, to_meta = get_landcover_image(
+            dataset,
+            to_year,
+            aoi,
+            start_month,
+            end_month,
+            dw_probability_threshold=dw_probability_threshold,
+        )
 
     changed = from_image.neq(to_image)
     transition_band = (
@@ -1040,7 +1121,7 @@ def analyze_landcover_hotspots(data: dict) -> dict:
     # across each polygon) - the only dataset in this catalog with a native
     # per-pixel probability surface. Other datasets have no per-pixel
     # confidence source, so `confidence` stays null for them (not fabricated).
-    if dataset == "Dynamic_World":
+    if dataset == "Dynamic_World" or dataset in _GEOSAVE_DYNAMIC_WORLD_DATASETS:
         dw_prob_bands = ["water", "trees", "grass", "flooded_vegetation",
                           "crops", "shrub_and_scrub", "built", "bare", "snow_and_ice"]
         to_start, to_end = build_date_range(to_meta.get("year", to_year), start_month, end_month)

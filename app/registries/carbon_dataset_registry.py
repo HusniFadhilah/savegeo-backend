@@ -103,6 +103,23 @@ CARBON_DATASET_REGISTRY: dict[str, dict] = {
         "description": "GEDI L4B with full predictor stack (S2, S1, DEM, Dynamic World). GEE model comparison workflow.",
         "notes":       "Same GEE source as GEDI key. Separate key for workflows that use the full predictor stack.",
     },
+    "GEDI_L4D": {
+        "key":         "GEDI_L4D",
+        "name":        "GEDI L4D Imputed AGBD",
+        "full_name":   "NASA GEDI Level 4D Imputed Waveforms AGBD",
+        "gee_id":      "LARSE/GEDI/GEDI04_D_002",
+        "gee_type":    "ImageCollection",
+        "band":        "agbd",
+        "output_band": "agb",
+        "unit":        "Mg C/ha",
+        "target_pool": "aboveground_biomass_carbon",
+        "resolution":  30,
+        "year":        2023,
+        "year_range":  [2019, 2023],
+        "transform":   "multiply_0.47",
+        "description": "GEDI L4D 30 m imputed AGBD from k-NN fusion of GEDI footprint products and Landsat time series. agbd × 0.47 for carbon density.",
+        "notes":       "Uses QA == 1 valid pixels where available. Product is centered on target year 2023; date range reflects source GEDI observations in the GEE catalog.",
+    },
     "SPAWN": {
         "key":         "SPAWN",
         "name":        "Spawn & Gibbs AGB Carbon",
@@ -466,6 +483,7 @@ TRAINING_DATASET_KEYS: list[str] = [
     "GEDI",
     "GEDI_L4A_MONTHLY",
     "GEDI_L4B_STACK",
+    "GEDI_L4D",
     "SPAWN",
     "ORNL_AGB_BGB",
     "OPENLANDMAP_SOC",
@@ -763,6 +781,27 @@ def _loader_gedi_l4b_stack(entry, dataset_year, roi, unmask, ee):
     return img.select("MU").multiply(0.47).rename("agb")
 
 
+def _loader_gedi_l4d(entry, dataset_year, roi, unmask, ee):
+    collection = ee.ImageCollection(entry["gee_id"])
+    if roi:
+        collection = collection.filterBounds(roi)
+
+    def mask_valid(img):
+        band_names = img.bandNames()
+        agbd = img.select("agbd")
+        qa_mask = ee.Image(
+            ee.Algorithms.If(
+                band_names.contains("QA"),
+                img.select("QA").eq(1),
+                ee.Image(1),
+            )
+        )
+        return agbd.updateMask(qa_mask)
+
+    img = collection.map(mask_valid).median()
+    return img.multiply(0.47).rename("agb")
+
+
 def _loader_spawn(entry, dataset_year, roi, unmask, ee):
     img = ee.ImageCollection(entry["gee_id"]).first()
     return img.select("agb").rename("agb")
@@ -811,6 +850,7 @@ _LOADERS = {
     "GEDI":               _loader_gedi,
     "GEDI_L4A_MONTHLY":   _loader_gedi_l4a_monthly,
     "GEDI_L4B_STACK":     _loader_gedi_l4b_stack,
+    "GEDI_L4D":           _loader_gedi_l4d,
     "SPAWN":              _loader_spawn,
     "ORNL_AGB_BGB":       _loader_ornl_agb_bgb,
     "OPENLANDMAP_SOC":    _loader_openlandmap_soc,

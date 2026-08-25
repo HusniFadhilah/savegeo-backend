@@ -45,6 +45,11 @@ pip install -e .          # or: pip install -e ".[dev]" for pytest/ruff/mypy
 cp .env.example .env       # then fill in real values
 ```
 
+The default backend install supports Python 3.11, matching the production
+Docker image. Optional Copernicus CDSE ingestion via GeoSave Engine can be
+installed separately with `pip install -e ".[cdse]"` in a Python 3.12+
+environment.
+
 ### Connecting to Supabase Postgres
 
 1. Create a Supabase project (or use an existing one).

@@ -9,6 +9,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -96,6 +97,17 @@ class Settings(BaseSettings):
     carbon_vis_max: float = 250
     carbon_vis_palette: str = "d73027,fee08b,1a9850"
     carbon_legend_bins: int = 6
+
+    @field_validator("debug", mode="before")
+    @classmethod
+    def parse_debug(cls, value: object) -> object:
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"release", "prod", "production"}:
+                return False
+            if normalized in {"dev", "development"}:
+                return True
+        return value
 
     @property
     def allowed_origins_list(self) -> list[str]:
