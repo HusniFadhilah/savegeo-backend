@@ -119,6 +119,38 @@ def get_current_user(
     return user
 
 
+def get_current_disaster_viewer(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+    db: Session = Depends(get_db),
+) -> User | AdminUser:
+    """Auth gate for read-only Disaster Mapping views.
+
+    The public disaster dashboard is still user-authenticated by default, but
+    active admins should be able to inspect the same published disaster pages
+    without creating a duplicate user account. This intentionally does not make
+    user tokens valid for admin routes; it is scoped only to disaster viewer
+    endpoints that explicitly depend on this function.
+    """
+    if credentials is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
+    payload = decode_access_token(credentials.credentials)
+    token_type = payload.get("typ")
+
+    if token_type == "user":
+        user = db.get(User, int(payload["sub"]))
+        if user is None or not user.is_active:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User account not found or inactive")
+        return user
+
+    if token_type in (None, "admin"):
+        admin = db.get(AdminUser, int(payload["sub"]))
+        if admin is None or not admin.is_active:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin account not found or inactive")
+        return admin
+
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token type")
+
+
 def require_permission(code: str):
     """Additive permission gate, layered on top of `get_current_admin`.
 

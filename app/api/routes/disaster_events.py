@@ -1,6 +1,7 @@
 """Public user-facing Disaster Intelligence Dashboard routes - prefix
 `/disasters` (NOT `/disaster`, the legacy BMKG/DEM/sources router in
-`disaster.py`). Every route requires `Depends(get_current_user)`.
+`disaster.py`). Every route requires a disaster viewer token (public user or
+admin).
 
 Publish boundary: every event/analysis/hotspot lookup here is published-only.
 An existing-but-unpublished/draft event 404s - it must never leak that a draft
@@ -13,9 +14,8 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.core.security import get_current_user
+from app.core.security import get_current_disaster_viewer
 from app.db.models.disaster_event import DisasterEvent
-from app.db.models.user import User
 from app.db.session import get_db
 from app.registries import disaster_model_registry
 from app.repositories import disaster_repo
@@ -70,7 +70,7 @@ def list_disasters(
     province: str | None = None,
     severity: str | None = None,
     search: str | None = None,
-    user: User = Depends(get_current_user),
+    viewer=Depends(get_current_disaster_viewer),
     db: Session = Depends(get_db),
 ):
     events = disaster_repo.list_events(
@@ -91,7 +91,7 @@ def list_disasters(
 
 
 @router.get("/{event_id}")
-def get_disaster(event_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def get_disaster(event_id: int, viewer=Depends(get_current_disaster_viewer), db: Session = Depends(get_db)):
     event = _get_published_event(db, event_id)
     aoi = disaster_repo.get_active_aoi(db, event_id)
     pre_imagery = disaster_repo.list_imagery(db, event_id, phase="pre")
@@ -113,13 +113,13 @@ def get_disaster(event_id: int, user: User = Depends(get_current_user), db: Sess
 
 
 @router.get("/{event_id}/analyses")
-def get_disaster_analyses(event_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def get_disaster_analyses(event_id: int, viewer=Depends(get_current_disaster_viewer), db: Session = Depends(get_db)):
     _get_published_event(db, event_id)
     return {"analyses": _build_analyses(db, event_id)}
 
 
 @router.get("/{event_id}/layers")
-def get_disaster_layers(event_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def get_disaster_layers(event_id: int, viewer=Depends(get_current_disaster_viewer), db: Session = Depends(get_db)):
     _get_published_event(db, event_id)
     primary_pre = disaster_repo.get_primary_imagery(db, event_id, "pre")
     primary_post = disaster_repo.get_primary_imagery(db, event_id, "post")
@@ -133,7 +133,7 @@ def get_disaster_layers(event_id: int, user: User = Depends(get_current_user), d
 
 
 @router.get("/{event_id}/statistics")
-def get_disaster_statistics(event_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def get_disaster_statistics(event_id: int, viewer=Depends(get_current_disaster_viewer), db: Session = Depends(get_db)):
     _get_published_event(db, event_id)
     kpis = {}
     for run, result in disaster_repo.list_published_analyses(db, event_id):
@@ -145,7 +145,7 @@ def get_disaster_statistics(event_id: int, user: User = Depends(get_current_user
 
 
 @router.get("/{event_id}/hotspots")
-def get_disaster_hotspots(event_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def get_disaster_hotspots(event_id: int, viewer=Depends(get_current_disaster_viewer), db: Session = Depends(get_db)):
     _get_published_event(db, event_id)
     hotspots = disaster_repo.list_hotspots(db, event_id, published_only=True)
     return {"hotspots": [h.to_dict() for h in hotspots]}
@@ -156,7 +156,7 @@ def get_disaster_features(
     event_id: int,
     analysis: str | None = None,
     bbox: str | None = None,
-    user: User = Depends(get_current_user),
+    viewer=Depends(get_current_disaster_viewer),
     db: Session = Depends(get_db),
 ):
     """Always an empty FeatureCollection for MVP - none of the 3 real models

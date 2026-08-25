@@ -27,6 +27,7 @@ metadata, not something this endpoint filters on beyond the optional
 from __future__ import annotations
 
 import logging
+from importlib.util import find_spec
 from datetime import UTC, datetime
 
 import ee
@@ -50,14 +51,40 @@ logger = logging.getLogger(__name__)
 # range over a big AOI could otherwise match hundreds of tiles' worth of
 # scenes; this is a browsing tool, not a bulk export, so keep it cheap.
 _MAX_SCENES = 200
+_COPERNICUS_PROVIDER_KEYS = {"copernicus_s2_l2a", "copernicus_s2_l1c"}
+
+
+def _copernicus_geosave_service():
+    try:
+        from app.services import copernicus_geosave_service
+    except ModuleNotFoundError:
+        return None
+    return copernicus_geosave_service
+
+
+def _copernicus_geosave_available() -> bool:
+    return find_spec("geosave_engine") is not None and _copernicus_geosave_service() is not None
 
 
 def list_providers() -> dict:
     """GET /imagery/providers - static (no GEE) catalog for the satellite picker."""
-    return {"providers": IMAGERY_PROVIDERS, "default": "sentinel2"}
+    providers = dict(IMAGERY_PROVIDERS)
+    copernicus_service = _copernicus_geosave_service()
+    if find_spec("geosave_engine") is not None and copernicus_service is not None:
+        providers.update(copernicus_service.COPERNICUS_PROVIDERS)
+    return {"providers": providers, "default": "sentinel2"}
 
 
 def list_scenes(data: dict) -> dict:
+    if data.get("satellite") in _COPERNICUS_PROVIDER_KEYS:
+        if not _copernicus_geosave_available():
+            raise AnalysisError(
+                "Provider Copernicus CDSE membutuhkan paket opsional geosave_engine. "
+                "Install paket tersebut atau gunakan provider GEE/Esri Wayback.",
+                503,
+            )
+        return _copernicus_geosave_service().list_scenes(data)
+
     if not data.get("aoi"):
         raise AnalysisError("aoi is required", 400)
     if not data.get("start_date") or not data.get("end_date"):
@@ -150,7 +177,18 @@ def _apply_s2_single_scene_mask(img: ee.Image, technique: str) -> ee.Image:
     return img.updateMask(mask)
 
 
-def get_scene_tile(data: dict) -> dict:
+def get_scene_tile(data: dict, request=None) -> dict:
+    if data.get("satellite") in _COPERNICUS_PROVIDER_KEYS:
+        if not _copernicus_geosave_available():
+            raise AnalysisError(
+                "Provider Copernicus CDSE membutuhkan paket opsional geosave_engine. "
+                "Install paket tersebut atau gunakan provider GEE/Esri Wayback.",
+                503,
+            )
+        if request is None:
+            raise AnalysisError("request context is required for Copernicus tile URLs", 500)
+        return _copernicus_geosave_service().get_scene_tile(data, request)
+
     if not data.get("scene_id"):
         raise AnalysisError("scene_id is required", 400)
 

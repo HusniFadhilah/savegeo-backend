@@ -9,10 +9,12 @@ from __future__ import annotations
 import logging
 
 import ee
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
 from app.api.deps import require_ee
+from app.services import copernicus_geosave_service
 from app.services import imagery_service
+from app.services.copernicus_geosave_service import CopernicusAnalysisError
 from app.services.gee_common import AnalysisError
 
 router = APIRouter(tags=["imagery"])
@@ -27,11 +29,19 @@ def imagery_providers():
     return imagery_service.list_providers()
 
 
-@router.post("/imagery/scenes", dependencies=[Depends(require_ee)])
+def _is_copernicus_request(data: dict) -> bool:
+    return copernicus_geosave_service.is_copernicus_provider(data.get("satellite"))
+
+
+@router.post("/imagery/scenes")
 async def imagery_scenes(request: Request):
     data = await request.json()
     try:
+        if not _is_copernicus_request(data):
+            require_ee(request)
         return imagery_service.list_scenes(data)
+    except CopernicusAnalysisError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e))
     except AnalysisError as e:
         raise HTTPException(status_code=e.status_code, detail=str(e))
     except ee.EEException as e:
@@ -41,11 +51,15 @@ async def imagery_scenes(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/imagery/scene-tile", dependencies=[Depends(require_ee)])
+@router.post("/imagery/scene-tile")
 async def imagery_scene_tile(request: Request):
     data = await request.json()
     try:
-        return imagery_service.get_scene_tile(data)
+        if not _is_copernicus_request(data):
+            require_ee(request)
+        return imagery_service.get_scene_tile(data, request)
+    except CopernicusAnalysisError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e))
     except AnalysisError as e:
         raise HTTPException(status_code=e.status_code, detail=str(e))
     except ee.EEException as e:
@@ -67,3 +81,24 @@ async def imagery_dem_tile(request: Request):
     except Exception as e:  # noqa: BLE001
         logger.error(f"Imagery DEM tile error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/imagery/copernicus-tiles/{provider_key}/{scene_id}/{z}/{x}/{y}.png")
+def imagery_copernicus_tile(provider_key: str, scene_id: str, z: int, x: int, y: int):
+    try:
+        png_bytes = copernicus_geosave_service.render_tile(provider_key, scene_id, z, x, y)
+    except CopernicusAnalysisError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e))
+    except AnalysisError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e))
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Imagery Copernicus tile error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    if png_bytes is None:
+        raise HTTPException(status_code=404, detail="Tile di luar cakupan raster")
+    return Response(
+        content=png_bytes,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )

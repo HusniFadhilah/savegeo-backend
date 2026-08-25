@@ -51,6 +51,12 @@ class Settings(BaseSettings):
     # ingestion (see savegeo/backend/docs/ntt-earthquake-integration-prompt.md).
     disaster_raster_dir: str = "./var/disaster_rasters"
 
+    # --- Copernicus Data Space Ecosystem (GeoSave Engine STAC ingestion) ---
+    # Public STAC metadata can be searched anonymously, but pixel assets expose
+    # authenticated S3 / OIDC HTTPS hrefs. Put a short-lived CDSE bearer token
+    # here, or configure AWS_* credentials in the process environment for S3.
+    copernicus_cdse_access_token: str = ""
+
     # --- Region API ---
     region_api_base_url: str = "https://api.sp3stab.id/api/en"
 

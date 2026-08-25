@@ -5,7 +5,7 @@ GeoTIFF on demand; no Earth Engine/GCS involved (built for BlackSky/BSG
 disaster imagery whose GCP billing account is closed - see
 savegeo/backend/docs/ntt-earthquake-integration-prompt.md).
 
-Requires `get_current_user` + the parent event's `status == "published"` -
+Requires `get_current_disaster_viewer` + the parent event's `status == "published"` -
 same publish boundary every other `/disasters/...` User route enforces (see
 `disaster_events.py`'s `_get_published_event`): a `source_kind="local_upload"`
 tile must not be fetchable by imagery_id alone while its event is still a
@@ -20,8 +20,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
 
-from app.core.security import get_current_user
-from app.db.models.user import User
+from app.core.security import get_current_disaster_viewer
 from app.db.session import get_db
 from app.repositories import disaster_repo
 from app.services import local_imagery_tile_service
@@ -38,7 +37,7 @@ def imagery_tile(
     z: int,
     x: int,
     y: int,
-    user: User = Depends(get_current_user),
+    viewer=Depends(get_current_disaster_viewer),
     db: Session = Depends(get_db),
 ):
     img = disaster_repo.get_imagery(db, imagery_id)

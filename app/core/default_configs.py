@@ -13,7 +13,7 @@ DEFAULT_CONFIGS: list[tuple[str, str, str, str, str, str, bool]] = [
     ("analysis.carbon_scale", os.getenv("DEFAULT_CARBON_SCALE", "250"), "int", "analysis",
      "Carbon analysis scale (m)", "Spatial resolution for carbon estimation", False),
 
-    ("analysis.veg_scale", os.getenv("DEFAULT_VEG_SCALE", "20"), "int", "analysis",
+    ("analysis.veg_scale", os.getenv("DEFAULT_VEG_SCALE", "10"), "int", "analysis",
      "Vegetation analysis scale (m)", "Spatial resolution for vegetation indices", False),
 
     ("analysis.lc_scale", os.getenv("DEFAULT_LC_SCALE", "10"), "int", "analysis",
