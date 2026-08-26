@@ -26,6 +26,14 @@ class ChlorisDownload:
     metadata: dict[str, Any]
 
 
+def is_chloris_configured() -> bool:
+    """Return True if enough non-password config exists to try a Chloris raster load."""
+    status = chloris_config_status()
+    has_direct_path = status["has_data_path"] or _has_direct_download_url()
+    has_api_path = status["has_organization_id"] and (status["has_id_token"] or status["has_refresh_token"])
+    return bool(has_direct_path or has_api_path)
+
+
 def chloris_config_status() -> dict[str, Any]:
     """Return non-secret Chloris configuration status for diagnostics."""
     settings = get_settings()
@@ -36,6 +44,7 @@ def chloris_config_status() -> dict[str, Any]:
         "has_id_token": bool(settings.chloris_id_token),
         "has_refresh_token": bool(settings.chloris_refresh_token),
         "has_data_path": bool(settings.chloris_data_path),
+        "has_direct_download_url": _has_direct_download_url(),
     }
 
 
@@ -103,10 +112,10 @@ def _get_reporting_unit() -> dict[str, Any]:
     settings = get_settings()
     if not settings.chloris_organization_id:
         raise ValueError("CHLORIS_ORGANIZATION_ID belum diisi.")
-    if not settings.chloris_id_token:
+    if not settings.chloris_id_token and not settings.chloris_refresh_token:
         raise ValueError(
-            "CHLORIS_ID_TOKEN belum diisi. Ambil API credentials dari profile Chloris, "
-            "lalu set token server-side di .env."
+            "CHLORIS_ID_TOKEN atau CHLORIS_REFRESH_TOKEN belum diisi. Ambil API credentials "
+            "dari profile Chloris, lalu set token server-side di .env."
         )
 
     url = _join_url(settings.chloris_base_url, "api/reportingUnit/")
@@ -222,7 +231,7 @@ def _join_url(base: str, path: str) -> str:
 
 
 def _auth_headers() -> dict[str, str]:
-    token = get_settings().chloris_id_token
+    token = _get_id_token()
     return {"Authorization": f"Bearer {token}"} if token else {}
 
 
@@ -230,3 +239,55 @@ def _request_json(url: str) -> Any:
     response = requests.get(url, headers=_auth_headers(), timeout=45)
     response.raise_for_status()
     return response.json()
+
+
+def _get_id_token() -> str:
+    settings = get_settings()
+    if settings.chloris_id_token:
+        return settings.chloris_id_token
+    if settings.chloris_refresh_token:
+        return _refresh_id_token(settings.chloris_refresh_token)
+    return ""
+
+
+def _refresh_id_token(refresh_token: str) -> str:
+    settings = get_settings()
+    api_info = _request_public_json(_join_url(settings.chloris_base_url, "api/info"))
+    region = api_info.get("awsRegion")
+    client_id = api_info.get("awsUserPoolWebClientId")
+    if not region or not client_id:
+        raise ValueError("Chloris /api/info tidak mengembalikan Cognito region/client id.")
+
+    endpoint = f"https://cognito-idp.{region}.amazonaws.com/"
+    payload = {
+        "AuthFlow": "REFRESH_TOKEN_AUTH",
+        "ClientId": client_id,
+        "AuthParameters": {"REFRESH_TOKEN": refresh_token},
+    }
+    response = requests.post(
+        endpoint,
+        json=payload,
+        headers={
+            "Content-Type": "application/x-amz-json-1.1",
+            "X-Amz-Target": "AWSCognitoIdentityProviderService.InitiateAuth",
+        },
+        timeout=45,
+    )
+    response.raise_for_status()
+    data = response.json()
+    id_token = data.get("AuthenticationResult", {}).get("IdToken")
+    if not id_token:
+        raise ValueError("Refresh token Chloris tidak menghasilkan IdToken.")
+    return str(id_token)
+
+
+def _request_public_json(url: str) -> Any:
+    response = requests.get(url, timeout=45)
+    response.raise_for_status()
+    return response.json()
+
+
+def _has_direct_download_url() -> bool:
+    import os
+
+    return bool(os.getenv("CHLORIS_AGB_STOCK_URL") or os.getenv("CHLORIS_STOCK_URL"))

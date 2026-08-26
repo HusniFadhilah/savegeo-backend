@@ -604,7 +604,8 @@ def load_external_carbon_reference_ee(
             raise ValueError(
                 f"Could not resolve Chloris download for '{key}'. "
                 "Set CHLORIS_AGB_STOCK_URL/CHLORIS_STOCK_URL directly, or configure "
-                "CHLORIS_DATA_PATH plus API token settings. Original error: "
+                "CHLORIS_DATA_PATH, or configure CHLORIS_ORGANIZATION_ID plus "
+                "CHLORIS_REFRESH_TOKEN/CHLORIS_ID_TOKEN. Original error: "
                 f"{exc}"
             ) from exc
 

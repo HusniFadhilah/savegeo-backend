@@ -125,9 +125,29 @@ def get_carbon_dataset_list(
             "compatible_model_count": len(model_names),
             "compatible_models": model_names,
             "training_capable": meta.get("training_capable", key in CARBON_DATASET_REGISTRY),
+            **_dataset_runtime_status(key, meta),
         })
 
     return result
+
+
+def _dataset_runtime_status(key: str, meta: dict) -> dict:
+    """Return lightweight runtime availability metadata for dataset pickers."""
+    if key == "CHLORIS_AGB_STOCK" or meta.get("ingestion_method") == "chloris_downloads_index":
+        from app.services.chloris_service import is_chloris_configured
+
+        configured = is_chloris_configured()
+        return {
+            "is_configured": configured,
+            "requires_configuration": True,
+            "availability_error": None
+            if configured
+            else (
+                "Isi CHLORIS_AGB_STOCK_URL atau CHLORIS_DATA_PATH. Alternatif: "
+                "CHLORIS_ORGANIZATION_ID + CHLORIS_REFRESH_TOKEN/CHLORIS_ID_TOKEN."
+            ),
+        }
+    return {"is_configured": True, "requires_configuration": False, "availability_error": None}
 
 
 # ─────────────────────────────────────────────
@@ -232,6 +252,9 @@ def analyze_carbon(db: Session, data: dict) -> dict:
     model_name = data.get("model_name")
     dataset_year = int(data.get("dataset_year", 2010))
     reference_dataset = data.get("reference_dataset", "WCMC")
+    reference_only = bool(data.get("reference_only")) or (
+        reference_dataset == "CHLORIS_AGB_STOCK" and not model_name
+    )
     vis_min = int(data.get("vis_min", config_service.get_analysis_defaults(db)["carbon_vis_min"]))
     vis_max = int(data.get("vis_max", config_service.get_analysis_defaults(db)["carbon_vis_max"]))
     vis_palette = data.get("vis_palette", config_service.get_analysis_defaults(db)["carbon_vis_palette"])
@@ -247,7 +270,7 @@ def analyze_carbon(db: Session, data: dict) -> dict:
     # 2015/2016 used to pass this check and fail confusingly deep inside GEE
     # processing instead; reject upfront with a clear reason.
     year_min, year_max = 2017, datetime.now(UTC).year
-    if not (year_min <= year <= year_max):
+    if not reference_only and not (year_min <= year <= year_max):
         raise AnalysisError(
             f"Year harus antara {year_min}-{year_max} (Sentinel-2 Surface Reflectance belum tersedia sebelum {year_min})",
             400,
@@ -294,6 +317,116 @@ def analyze_carbon(db: Session, data: dict) -> dict:
             raise AnalysisError(str(_ext_ee_err), 422, extra={"dataset": reference_dataset})
     else:
         carbon_reference = None
+
+    if reference_only:
+        if carbon_reference is None:
+            raise AnalysisError(
+                f"Dataset '{reference_dataset}' belum mendukung mode reference-only.",
+                422,
+                extra={"dataset": reference_dataset},
+            )
+
+        ref_vis_params = {
+            "min": dataset_info.get("vis_min", vis_min),
+            "max": dataset_info.get("vis_max", vis_max),
+            "palette": dataset_info.get("vis_palette", vis_palette),
+        }
+        reference_display = carbon_reference.clip(roi_for_calculation)
+        reference_tile_url = None
+        try:
+            reference_tile_url = (
+                reference_display.visualize(**_gee_visualize_params(ref_vis_params))
+                .getMapId()["tile_fetcher"].url_format
+            )
+        except Exception as ref_tile_err:  # noqa: BLE001
+            logger.warning(f"Reference-only tile failed for '{reference_dataset}': {ref_tile_err}")
+
+        try:
+            reference_stats_raw = reference_display.reduceRegion(
+                reducer=ee.Reducer.mean()
+                    .combine(ee.Reducer.stdDev(), "", True)
+                    .combine(ee.Reducer.min(), "", True)
+                    .combine(ee.Reducer.max(), "", True),
+                geometry=roi_for_calculation,
+                scale=carbon_scale,
+                maxPixels=config_service.get_analysis_defaults(db)["max_pixels"],
+                bestEffort=True,
+                tileScale=4,
+            ).getInfo()
+        except Exception as ref_stats_err:  # noqa: BLE001
+            logger.warning(f"Reference-only stats failed for '{reference_dataset}': {ref_stats_err}")
+            reference_stats_raw = {}
+
+        original_area = geometry_area_ha(roi_original)
+        calculation_area = geometry_area_ha(roi_for_calculation)
+        filtering_area = geometry_area_ha(roi_for_filtering)
+        mean_carbon = float(reference_stats_raw.get("agb_mean") or 0)
+        std_carbon = float(reference_stats_raw.get("agb_stdDev") or 0)
+        min_carbon = float(reference_stats_raw.get("agb_min") or 0)
+        max_carbon = float(reference_stats_raw.get("agb_max") or 0)
+        total_carbon_tons = mean_carbon * calculation_area
+        co2_factor = config_service.get_analysis_defaults(db)["carbon_co2_factor"]
+        stats_out = {
+            "mean": round(mean_carbon, 2),
+            "std_dev": round(std_carbon, 2),
+            "min": round(min_carbon, 2),
+            "max": round(max_carbon, 2),
+        }
+
+        return {
+            "carbon_estimated": {
+                "tile_url": None,
+                "statistics": stats_out,
+                "unit": dataset_info.get("unit", "Mg C/ha"),
+                "vis_params": ref_vis_params,
+                "inference_mode": "reference_only",
+            },
+            "carbon_reference": {
+                "tile_url": reference_tile_url,
+                "name": dataset_info["name"],
+                "full_name": dataset_info["full_name"],
+                "year": dataset_info["year"],
+                "resolution": dataset_info["resolution"],
+                "unit": dataset_info.get("unit", "Mg C/ha"),
+                "target_pool": dataset_info.get("target_pool"),
+                "gee_id": dataset_info.get("gee_id"),
+                "service_url": dataset_info.get("service_url"),
+                "provider_type": dataset_info.get("provider_type", "gee"),
+                "is_temporal": dataset_info.get("is_temporal", False),
+                "requested_year": dataset_info.get("requested_year"),
+                "description": dataset_info["description"],
+                "vis_params": ref_vis_params,
+                "statistics": stats_out,
+            },
+            "area_info": {
+                "calculation_mode": calculation_mode,
+                "original_aoi_area_ha": round(original_area, 2),
+                "filtering_area_ha": round(filtering_area, 2),
+                "calculation_area_ha": round(calculation_area, 2),
+                "total_carbon_tons": round(total_carbon_tons, 2),
+                "carbon_dioxide_equivalent_tons": round(total_carbon_tons * co2_factor, 2),
+                "description": "Mode reference-only: total dihitung langsung dari raster referensi Chloris, tanpa model estimasi SAVEGEO.",
+            },
+            "model_info": {
+                "model_name": "reference_only",
+                "algorithm": "direct_raster",
+                "calculation_mode": calculation_mode,
+                "display_mode": "reference_only",
+                "scale": carbon_scale,
+                "reference_dataset": reference_dataset,
+                "reference_dataset_year": dataset_info.get("year"),
+                "target_pool": dataset_info.get("target_pool"),
+                "analysis_year": year,
+            },
+            "data_quality": {
+                "valid_pixel_pct": None,
+                "gap_filled": None,
+                "images_used": None,
+                "coefficient_of_variation_pct": round((std_carbon / mean_carbon) * 100, 1) if mean_carbon else None,
+                "model_r2": None,
+                "model_rmse": None,
+            },
+        }
 
     # Cari model dari DB
     model_path = get_active_model_path(db, "carbon", model_name)

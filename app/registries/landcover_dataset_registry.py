@@ -461,6 +461,8 @@ LAND_COVER_DATASET_OPTIONS: dict[str, dict] = {
         "gee_id":              None,
         "arcgis_item_id":      "cfcb7609de5f478eb7666240902d4d3d",
         "arcgis_service_url":  "https://ic.imagery1.arcgis.com/arcgis/rest/services/Sentinel2_10m_LandCover/ImageServer",
+        "arcgis_rendering_rule": "Cartographic Renderer for Visualization and Analysis",
+        "arcgis_year_field":   "Year",
         "requires_auth":       False,
         "supports_summary":    True,
         "supports_transition": True,

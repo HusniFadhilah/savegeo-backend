@@ -170,8 +170,17 @@ def compute_arcgis_landcover_summary(dataset_key: str, ds_meta: dict, aoi_payloa
         "pixelSize": json.dumps({"x": stat_deg, "y": stat_deg, "spatialReference": {"wkid": 4326}}),
         "f": "json",
     }
+    if ds_meta.get("arcgis_year_field"):
+        year_field = ds_meta["arcgis_year_field"]
+        params["mosaicRule"] = json.dumps({
+            "mosaicMethod": "esriMosaicAttribute",
+            "sortField": year_field,
+            "sortValue": str(year_clamped),
+            "ascending": True,
+            "where": f"{year_field} = {int(year_clamped)}",
+        })
     # only add time filter for time-aware services
-    if ds_meta.get("time_aware", True):
+    elif ds_meta.get("time_aware", True):
         params["time"] = _year_ms_range(year_clamped)
     if ds_meta.get("requires_auth", False):
         params.update(client._get_auth_params())

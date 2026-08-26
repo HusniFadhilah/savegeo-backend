@@ -106,6 +106,10 @@ def arcgis_tile_proxy(
             "rasterFunction": "Colormap",
             "rasterFunctionArguments": {"colormap": colormap_entries},
         })
+    elif ds_meta.get("arcgis_rendering_rule"):
+        params["renderingRule"] = json.dumps({
+            "rasterFunction": ds_meta["arcgis_rendering_rule"],
+        })
     elif ds_meta.get("class_schema"):
         # Categorical land cover: explicit class colormap
         legend = LAND_COVER_LEGENDS.get(dataset_key, {})
@@ -144,7 +148,16 @@ def arcgis_tile_proxy(
         params["renderingRule"] = json.dumps(clip_rule)
 
     # Only send time filter for time-aware services
-    if year and ds_meta.get("time_aware", True) and not _is_carbon_tile:
+    if year and ds_meta.get("arcgis_year_field") and not _is_carbon_tile:
+        year_field = ds_meta["arcgis_year_field"]
+        params["mosaicRule"] = json.dumps({
+            "mosaicMethod": "esriMosaicAttribute",
+            "sortField": year_field,
+            "sortValue": str(year),
+            "ascending": True,
+            "where": f"{year_field} = {int(year)}",
+        })
+    elif year and ds_meta.get("time_aware", True) and not _is_carbon_tile:
         params["time"] = _year_ms_range(year)
 
     if ds_meta.get("requires_auth", False):

@@ -23,6 +23,10 @@ logger = logging.getLogger(__name__)
 
 S2_BANDS = ['B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B8', 'B8A', 'B11', 'B12']
 S2_INDEX_BANDS = ['NDVI', 'NDWI', 'NDMI', 'NBR', 'NDRE', 'EVI', 'SAVI', 'BSI', 'brightness']
+GEDI_L4D_PROXY_BANDS = [
+    'rh10', 'rh20', 'rh30', 'rh40', 'rh50', 'rh60', 'rh70', 'rh80', 'rh90', 'rh95', 'rh98',
+    'cover_z_000', 'sensitivity_a2',
+]
 GEE_LINEAR_ALGORITHMS = {'linear', 'ridge', 'lasso', 'elasticnet', 'elastic_net'}
 
 
@@ -391,12 +395,45 @@ class CarbonInferenceEngine:
         )
         return stack.addBands(neighborhood_stats)
 
+    def _build_gedi_l4d_proxy_feature_stack(self, roi: ee.Geometry, year: int, start_month: int,
+                                            end_month: int, cloud_threshold: int) -> ee.Image:
+        """S2/DEM/land-cover predictors plus GEDI L4D canopy-structure metrics.
+
+        This stack deliberately excludes the GEDI `agbd` target band to avoid
+        target leakage, but keeps relative-height and canopy-cover bands that
+        are useful for local GEDI L4D calibration models.
+        """
+        stack = self._build_s2_dem_landcover_feature_stack(
+            roi, year, start_month, end_month, cloud_threshold
+        )
+
+        def mask_valid(img: ee.Image) -> ee.Image:
+            band_names = img.bandNames()
+            qa_mask = ee.Image(
+                ee.Algorithms.If(band_names.contains('QA'), img.select('QA').eq(1), ee.Image(1))
+            )
+            return img.select(GEDI_L4D_PROXY_BANDS).updateMask(qa_mask)
+
+        gedi_proxy = (
+            ee.ImageCollection('LARSE/GEDI/GEDI04_D_002')
+            .filterBounds(roi)
+            .filterDate('2019-04-17', f'{max(year + 1, 2024)}-01-01')
+            .map(mask_valid)
+            .median()
+            .rename(GEDI_L4D_PROXY_BANDS)
+        )
+        return stack.addBands(gedi_proxy)
+
     def _build_predictors(self, roi: ee.Geometry, year: int, start_month: int,
                           end_month: int, cloud_threshold: int) -> ee.Image:
         expected_features = self._get_expected_features()
 
         if any(name.startswith(('dry_', 'wet_')) for name in expected_features):
             predictors = self._build_robust_feature_stack(roi, year, cloud_threshold)
+        elif any(name in GEDI_L4D_PROXY_BANDS for name in expected_features):
+            predictors = self._build_gedi_l4d_proxy_feature_stack(
+                roi, year, start_month, end_month, cloud_threshold
+            )
         elif any(name in ('TPI', 'TRI', 'elevation_local_mean') for name in expected_features):
             predictors = self._build_s2_dem_terrain_feature_stack(
                 roi, year, start_month, end_month, cloud_threshold
