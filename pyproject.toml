@@ -75,6 +75,7 @@ dependencies = [
     "openai>=1.55.3",
     "google-genai>=1.0.0",
     "tenacity>=8.2.0",
+    "msgpack>=1.2.1",
 ]
 
 [project.optional-dependencies]
@@ -92,7 +93,7 @@ dev = [
 ]
 
 [build-system]
-requires = ["setuptools>=68.0"]
+requires = ["setuptools>=78.1.1"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
