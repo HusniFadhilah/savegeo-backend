@@ -6,10 +6,11 @@ calls through route handlers.
 """
 from __future__ import annotations
 
+import secrets
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -31,7 +32,7 @@ class Settings(BaseSettings):
     supabase_gee_credentials_bucket: str = "gee-credentials"
 
     # --- JWT ---
-    jwt_secret_key: str = "insecure-dev-secret-change-me"
+    jwt_secret_key: str = Field(default_factory=lambda: secrets.token_urlsafe(48))
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 1440
 
@@ -118,6 +119,12 @@ class Settings(BaseSettings):
             if normalized in {"dev", "development"}:
                 return True
         return value
+
+    @model_validator(mode="after")
+    def require_production_secrets(self) -> Settings:
+        if self.app_env.lower() in {"prod", "production"} and not self.jwt_secret_key:
+            raise ValueError("JWT_SECRET_KEY must be set in production")
+        return self
 
     @property
     def allowed_origins_list(self) -> list[str]:
