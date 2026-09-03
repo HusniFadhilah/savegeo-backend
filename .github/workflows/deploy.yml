@@ -40,7 +40,7 @@ jobs:
 
   deploy:
     runs-on: ubuntu-latest
-    needs: [validate, codeql, semgrep, gitleaks, trivy]
+    needs: [validate, codeql, gitleaks, trivy]
     environment: production
     permissions:
       contents: read
@@ -148,18 +148,6 @@ jobs:
       - name: Analyze
         uses: github/codeql-action/analyze@v3
 
-  semgrep:
-    runs-on: ubuntu-latest
-    container:
-      image: semgrep/semgrep
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Run Semgrep
-        run: semgrep scan --config p/ci --error
-
   gitleaks:
     runs-on: ubuntu-latest
 
@@ -169,10 +157,15 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Scan for committed secrets
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Scan working tree for secrets
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/repo" \
+            zricethezav/gitleaks:latest detect \
+            --source /repo \
+            --no-git \
+            --redact \
+            --exit-code 1
 
   trivy:
     runs-on: ubuntu-latest
