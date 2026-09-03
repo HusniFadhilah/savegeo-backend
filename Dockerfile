@@ -4,6 +4,7 @@ WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc g++ libpq-dev gdal-bin libgdal-dev \
+    && (apt-get purge -y --auto-remove python3-msgpack python3-setuptools || true) \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml README.md ./
