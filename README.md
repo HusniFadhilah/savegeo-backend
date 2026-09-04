@@ -80,7 +80,7 @@ curl "http://localhost:8086/api/carbon/chloris/status?product=stock&year=2025"
 1. Create a Supabase project (or use an existing one).
 2. Project Settings -> Database -> Connection string -> URI. Copy it into `.env` as:
    ```
-   DATABASE_URL=postgresql+psycopg://postgres:YOUR_PASSWORD@YOUR_PROJECT_REF.supabase.co:5432/postgres
+   DATABASE_URL=<supabase-postgres-uri-with-psycopg-driver>
    ```
    (Note the `+psycopg` driver suffix — required, do not use the bare `postgresql://` URI
    Supabase gives you directly.)
@@ -105,7 +105,7 @@ alembic upgrade head
 
 ```bash
 # Admin user (no hardcoded default credential — you must supply one)
-SEED_ADMIN_USERNAME=youradmin SEED_ADMIN_PASSWORD='a-strong-password' python -m scripts.seed_admin
+SEED_ADMIN_USERNAME=<admin-username> SEED_ADMIN_PASSWORD=<admin-password> python -m scripts.seed_admin
 
 # Default system_config rows (rate limits, analysis defaults, AI provider config, etc.)
 python -m scripts.seed_config

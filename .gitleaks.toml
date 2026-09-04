@@ -1,0 +1,10 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Allow local-only and templated credential placeholders"
+regexes = [
+  '''postgresql\+psycopg://postgres:postgres@localhost:5432/postgres''',
+  '''postgresql\+psycopg://savegeo:\$\{POSTGRES_PASSWORD\}@db:5432/savegeo''',
+  '''JWT_SECRET_KEY=change_''',
+]
