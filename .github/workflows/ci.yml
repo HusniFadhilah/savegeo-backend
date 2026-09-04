@@ -35,6 +35,27 @@ jobs:
           pip-audit . --ignore-vuln PYSEC-2024-110
           pytest
 
+  codeql:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v3
+
   gitleaks:
     runs-on: ubuntu-latest
 
@@ -56,6 +77,9 @@ jobs:
 
   trivy:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
 
     steps:
       - name: Checkout
@@ -68,7 +92,14 @@ jobs:
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: savegeo-backend:ci
-          format: table
+          format: sarif
+          output: trivy-results.sarif
           severity: HIGH,CRITICAL
           exit-code: "1"
           ignore-unfixed: true
+
+      - name: Upload Trivy results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
