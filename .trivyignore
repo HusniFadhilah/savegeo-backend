@@ -1,3 +1,0 @@
-# scikit-learn is pinned for existing pickle model compatibility.
-# Remove this exception after retraining models on a patched scikit-learn version.
-PYSEC-2024-110

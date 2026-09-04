@@ -86,9 +86,6 @@ dev = [
     "pytest-asyncio>=0.23.0",
     "ruff>=0.5.0",
     "mypy>=1.10.0",
-    "bandit[toml]>=1.7.9",
-    "pip-audit>=2.7.3",
-    "types-requests>=2.31.0",
 ]
 
 [build-system]
@@ -101,16 +98,6 @@ include = ["app*"]
 [tool.ruff]
 line-length = 110
 target-version = "py311"
-
-[tool.ruff.lint]
-select = ["E", "F", "B"]
-ignore = ["E501", "B904", "B905"]
-
-[tool.ruff.lint.per-file-ignores]
-"app/main.py" = ["E402"]
-"app/providers/external_carbon_provider.py" = ["E741"]
-"app/providers/local_raster_provider.py" = ["E731"]
-"app/registries/map_layer_registry.py" = ["E741"]
 
 [tool.ruff.lint.flake8-bugbear]
 # FastAPI's DI pattern is `def route(db: Session = Depends(get_db))` - the
@@ -136,31 +123,3 @@ extend-immutable-calls = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-
-[tool.mypy]
-python_version = "3.11"
-ignore_missing_imports = true
-warn_unused_ignores = true
-warn_redundant_casts = true
-warn_unused_configs = true
-no_implicit_optional = true
-follow_imports = "silent"
-exclude = [
-    "alembic/",
-    "scripts/",
-    "tests/",
-    "app/agentic/",
-    "app/api/routes/",
-    "app/inference/",
-    "app/providers/",
-    "app/registries/",
-    "app/reporting/",
-    "app/services/",
-]
-
-[tool.bandit]
-exclude_dirs = [
-    "tests",
-    ".venv",
-    ".venv-py312-test",
-]
