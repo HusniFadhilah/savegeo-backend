@@ -52,6 +52,11 @@ logger = logging.getLogger(__name__)
 # scenes; this is a browsing tool, not a bulk export, so keep it cheap.
 _MAX_SCENES = 200
 _COPERNICUS_PROVIDER_KEYS = {"copernicus_s2_l2a", "copernicus_s2_l1c"}
+_SUPER_RESOLUTION_FACTORS = {
+    "off": 1,
+    "bicubic_2x": 2,
+    "bicubic_4x": 4,
+}
 
 
 def _copernicus_geosave_service():
@@ -177,6 +182,33 @@ def _apply_s2_single_scene_mask(img: ee.Image, technique: str) -> ee.Image:
     return img.updateMask(mask)
 
 
+def _apply_super_resolution(img: ee.Image, meta: dict, mode: str | None) -> tuple[ee.Image, dict | None]:
+    """Visual super-resolution for GEE-backed scene tiles.
+
+    This is intentionally an image-resampling enhancement (bicubic), not an AI
+    hallucination/detail-recovery model. It improves tile smoothness at high
+    zoom while preserving the original scene values and provenance.
+    """
+    factor = _SUPER_RESOLUTION_FACTORS.get(str(mode or "off"), 1)
+    if factor <= 1:
+        return img, None
+
+    native_scale = float(meta.get("resolution_m") or 10)
+    target_scale = max(native_scale / factor, 0.25)
+    projection = img.select(0).projection()
+    enhanced = img.resample("bicubic").setDefaultProjection(
+        crs=projection.crs(),
+        scale=target_scale,
+    )
+    return enhanced, {
+        "mode": f"bicubic_{factor}x",
+        "factor": factor,
+        "native_resolution_m": native_scale,
+        "render_scale_m": target_scale,
+        "method": "Earth Engine bicubic resampling",
+    }
+
+
 def get_scene_tile(data: dict, request=None) -> dict:
     if data.get("satellite") in _COPERNICUS_PROVIDER_KEYS:
         if not _copernicus_geosave_available():
@@ -248,6 +280,8 @@ def get_scene_tile(data: dict, request=None) -> dict:
     else:  # pragma: no cover - guarded by the registry itself, defensive only
         raise AnalysisError(f"Unknown visualization strategy '{visualization}' for {meta['name']}", 500)
 
+    img, super_resolution = _apply_super_resolution(img, meta, data.get("super_resolution"))
+
     if data.get("aoi"):
         aoi = create_geometry_from_payload(data["aoi"])
         img = img.clip(aoi)
@@ -256,7 +290,12 @@ def get_scene_tile(data: dict, request=None) -> dict:
     if not tile:
         raise AnalysisError("Gagal membuat tile untuk scene ini", 500)
 
-    return {"scene_id": scene_id, "tile_url": tile["tile_url"], "satellite": meta}
+    return {
+        "scene_id": scene_id,
+        "tile_url": tile["tile_url"],
+        "satellite": meta,
+        "super_resolution": super_resolution,
+    }
 
 
 def get_dem_tile(data: dict) -> dict:

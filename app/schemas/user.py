@@ -18,3 +18,12 @@ class UserRegisterRequest(BaseModel):
 class UserLoginRequest(BaseModel):
     username: str
     password: str
+
+
+class PasswordForgotRequest(BaseModel):
+    identifier: str
+
+
+class PasswordResetRequest(BaseModel):
+    token: str
+    password: str

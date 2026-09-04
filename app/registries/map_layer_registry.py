@@ -65,6 +65,26 @@ MAP_LAYER_REGISTRY: list[dict] = [
         "order":           2,
     },
     {
+        "key":             "satellite_roads",
+        "name":            "Satellite + roads",
+        "type":            TYPE_BASEMAP,
+        "module":          None,
+        "provider":        "Esri",
+        "source":          "ArcGIS World Imagery + transportation",
+        "tile_url":        "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        "overlay_tile_url": "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}",
+        "attribution":     "Tiles &copy; Esri, Maxar, Earthstar Geographics",
+        "overlay_attribution": "Road reference &copy; Esri",
+        "default_opacity": 1.0,
+        "min_zoom":        1,
+        "max_zoom":        19,
+        "legend_mode":     LEGEND_NONE,
+        "vis_params":      {},
+        "unit":            None,
+        "enabled":         True,
+        "order":           3,
+    },
+    {
         "key":             "topo",
         "name":            "Topographic",
         "type":            TYPE_BASEMAP,
@@ -80,7 +100,7 @@ MAP_LAYER_REGISTRY: list[dict] = [
         "vis_params":      {},
         "unit":            None,
         "enabled":         True,
-        "order":           3,
+        "order":           4,
     },
     {
         "key":             "terrain",
@@ -98,7 +118,7 @@ MAP_LAYER_REGISTRY: list[dict] = [
         "vis_params":      {},
         "unit":            None,
         "enabled":         True,
-        "order":           4,
+        "order":           5,
     },
     {
         "key":             "dark",
@@ -116,7 +136,7 @@ MAP_LAYER_REGISTRY: list[dict] = [
         "vis_params":      {},
         "unit":            None,
         "enabled":         True,
-        "order":           5,
+        "order":           6,
     },
     {
         "key":             "light",
@@ -134,7 +154,7 @@ MAP_LAYER_REGISTRY: list[dict] = [
         "vis_params":      {},
         "unit":            None,
         "enabled":         True,
-        "order":           6,
+        "order":           7,
     },
 
     # ── Carbon — analysis layer (tile_url is dynamic, set per GEE response) ──

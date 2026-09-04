@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     debug: bool = True
     api_prefix: str = "/api"
     port: int = 8086
+    app_name: str = "SAVEGEO"
+    frontend_base_url: str = "http://localhost:5501"
 
     # --- Database ---
     database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/postgres"
@@ -35,6 +37,17 @@ class Settings(BaseSettings):
     jwt_secret_key: str = Field(default_factory=lambda: secrets.token_urlsafe(48))
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 1440
+    password_reset_token_expire_minutes: int = 30
+
+    # --- Mail / SMTP ---
+    mail_mailer: str = "smtp"
+    mail_host: str = ""
+    mail_port: int = 587
+    mail_username: str = ""
+    mail_password: str = ""
+    mail_encryption: str = "tls"
+    mail_from_address: str = ""
+    mail_from_name: str = ""
 
     # --- CORS ---
     allowed_origins: str = "http://localhost:5500,http://localhost:3000,http://localhost:5501,https://savegeo.len.co.id,https://begeo.len.co.id"

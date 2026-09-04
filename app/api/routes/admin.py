@@ -17,7 +17,14 @@ from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.core.security import create_access_token, get_current_admin, hash_password, verify_password
+from app.core.security import (
+    create_access_token,
+    create_admin_password_reset_token,
+    decode_admin_password_reset_token,
+    get_current_admin,
+    hash_password,
+    verify_password,
+)
 from app.db.models.admin_user import AdminUser
 from app.db.models.company_boundary import CompanyBoundary
 from app.db.models.gee_credential import GEECredential
@@ -35,15 +42,21 @@ from app.schemas.admin import (
     ChangePasswordRequest,
     LoginRequest,
     ModelUpdateRequest,
+    PasswordForgotRequest,
+    PasswordResetRequest,
     SatelliteProviderUpdateRequest,
 )
 from app.services import audit_service, config_service, gee_service, storage_service
 from app.services.arcgis_service import get_arcgis_client
 from app.services.datatable_service import datatables_response, is_datatables_request
+from app.services.email_service import EmailDeliveryError, send_password_reset_email
 from app.services.geo_utils import estimate_area_ha
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 logger = logging.getLogger(__name__)
+RESET_REQUEST_MESSAGE = (
+    "Jika akun ditemukan, link reset password sudah dikirim ke email terdaftar."
+)
 
 
 # -- Auth --
@@ -75,6 +88,45 @@ def change_password(
     admin.password_hash = hash_password(payload.new_password)
     db.commit()
     return {"message": "Password updated"}
+
+
+@router.post("/auth/forgot-password")
+def forgot_password(payload: PasswordForgotRequest, db: Session = Depends(get_db)):
+    identifier = payload.identifier.strip()
+    if not identifier:
+        raise HTTPException(status_code=400, detail="Email atau username wajib diisi")
+
+    admin = (
+        db.query(AdminUser)
+        .filter((AdminUser.email == identifier) | (AdminUser.username == identifier))
+        .first()
+    )
+    if not admin or not admin.is_active or not admin.email:
+        return {"message": RESET_REQUEST_MESSAGE}
+
+    settings = get_settings()
+    token = create_admin_password_reset_token(admin)
+    reset_url = f"{settings.frontend_base_url.rstrip('/')}/reset-password?token={token}"
+    try:
+        send_password_reset_email(admin.email, admin.username, reset_url)
+    except EmailDeliveryError as exc:
+        raise HTTPException(status_code=503, detail=f"Gagal mengirim email reset password: {exc}") from exc
+
+    return {"message": RESET_REQUEST_MESSAGE}
+
+
+@router.post("/auth/reset-password")
+def reset_password(payload: PasswordResetRequest, db: Session = Depends(get_db)):
+    if len(payload.password) < 8:
+        raise HTTPException(status_code=400, detail="Password baru minimal 8 karakter")
+    reset_payload = decode_admin_password_reset_token(payload.token)
+    admin = db.get(AdminUser, int(reset_payload["sub"]))
+    if not admin or not admin.is_active:
+        raise HTTPException(status_code=401, detail="Token reset password tidak valid")
+
+    admin.password_hash = hash_password(payload.password)
+    db.commit()
+    return {"message": "Password berhasil diperbarui. Silakan login dengan password baru."}
 
 
 # -- GEE credentials --

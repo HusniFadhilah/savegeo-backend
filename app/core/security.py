@@ -74,6 +74,48 @@ def create_user_access_token(user: User) -> str:
     return jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
 
 
+def create_password_reset_token(user: User) -> str:
+    settings = get_settings()
+    now = dt.datetime.now(dt.UTC)
+    payload = {
+        "sub": str(user.id),
+        "username": user.username,
+        "typ": "user_password_reset",
+        "purpose": "password_reset",
+        "iat": now,
+        "exp": now + dt.timedelta(minutes=settings.password_reset_token_expire_minutes),
+    }
+    return jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
+
+
+def create_admin_password_reset_token(admin: AdminUser) -> str:
+    settings = get_settings()
+    now = dt.datetime.now(dt.UTC)
+    payload = {
+        "sub": str(admin.id),
+        "username": admin.username,
+        "typ": "admin_password_reset",
+        "purpose": "password_reset",
+        "iat": now,
+        "exp": now + dt.timedelta(minutes=settings.password_reset_token_expire_minutes),
+    }
+    return jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
+
+
+def decode_password_reset_token(token: str) -> dict:
+    payload = decode_access_token(token)
+    if payload.get("typ") != "user_password_reset" or payload.get("purpose") != "password_reset":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid password reset token")
+    return payload
+
+
+def decode_admin_password_reset_token(token: str) -> dict:
+    payload = decode_access_token(token)
+    if payload.get("typ") != "admin_password_reset" or payload.get("purpose") != "password_reset":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid password reset token")
+    return payload
+
+
 def decode_access_token(token: str) -> dict:
     settings = get_settings()
     try:

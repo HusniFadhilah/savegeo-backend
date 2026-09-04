@@ -15,6 +15,15 @@ class ChangePasswordRequest(BaseModel):
     new_password: str
 
 
+class PasswordForgotRequest(BaseModel):
+    identifier: str
+
+
+class PasswordResetRequest(BaseModel):
+    token: str
+    password: str
+
+
 class ConfigUpdateItem(BaseModel):
     key: str
     value: Any

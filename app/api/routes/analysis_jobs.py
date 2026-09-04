@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import ee
+import requests
 from fastapi import APIRouter, Body, Depends, HTTPException
 
 from app.api.deps import require_ee
@@ -30,6 +31,11 @@ logger = logging.getLogger(__name__)
 
 _executor = ThreadPoolExecutor(max_workers=int(os.getenv("ANALYSIS_JOB_WORKERS", "2")))
 _ALLOWED_JOB_TYPES = {"carbon", "carbon_local", "vegetation", "landcover", "crop_monitoring"}
+_UPSTREAM_CONNECTION_ERROR = (
+    "Koneksi ke layanan data eksternal terputus sebelum respons diterima. "
+    "Coba jalankan ulang analisis; jika berulang, kecilkan AOI/rentang waktu "
+    "atau cek koneksi ke Earth Engine/penyedia raster."
+)
 
 
 def _jobs_dir() -> Path:
@@ -112,6 +118,19 @@ def _run_job(job_id: str, job_type: str, payload: dict[str, Any]) -> None:
         _write_job(
             job_id,
             {"job_id": job_id, "type": job_type, "status": "failed", "finished_at": _now(), "error": str(exc), "status_code": 400},
+        )
+    except requests.RequestException as exc:
+        logger.warning("Analysis job %s upstream connection failed: %s", job_id, exc)
+        _write_job(
+            job_id,
+            {
+                "job_id": job_id,
+                "type": job_type,
+                "status": "failed",
+                "finished_at": _now(),
+                "error": f"{_UPSTREAM_CONNECTION_ERROR} Detail teknis: {exc}",
+                "status_code": 503,
+            },
         )
     except Exception as exc:
         logger.exception("Analysis job %s failed", job_id)

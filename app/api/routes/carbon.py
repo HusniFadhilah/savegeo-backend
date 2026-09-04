@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 
 import ee
+import requests
 from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -14,6 +15,11 @@ from app.services.gee_common import AnalysisError
 
 router = APIRouter(tags=["carbon"])
 logger = logging.getLogger(__name__)
+UPSTREAM_CONNECTION_ERROR = (
+    "Koneksi ke layanan data eksternal terputus sebelum respons diterima. "
+    "Coba jalankan ulang analisis; jika berulang, kecilkan AOI/rentang waktu "
+    "atau cek koneksi ke Earth Engine/penyedia raster."
+)
 
 
 @router.post("/analyze/carbon", dependencies=[Depends(require_ee)])
@@ -33,6 +39,9 @@ def analyze_carbon(data: dict = Body(...), db: Session = Depends(get_db)):
         # EEException is not a ValueError subclass so it needs its own branch,
         # otherwise it falls through to the generic 500 handler below.
         raise HTTPException(status_code=400, detail=str(e))
+    except requests.RequestException as e:
+        logger.warning("Carbon upstream connection error: %s", e)
+        raise HTTPException(status_code=503, detail=f"{UPSTREAM_CONNECTION_ERROR} Detail teknis: {e}")
     except Exception as e:  # noqa: BLE001
         logger.error(f"Carbon analysis error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -54,6 +63,9 @@ def analyze_carbon_local(data: dict = Body(...), db: Session = Depends(get_db)):
         # EEException is not a ValueError subclass so it needs its own branch,
         # otherwise it falls through to the generic 500 handler below.
         raise HTTPException(status_code=400, detail=str(e))
+    except requests.RequestException as e:
+        logger.warning("Non-GEE carbon upstream connection error: %s", e)
+        raise HTTPException(status_code=503, detail=f"{UPSTREAM_CONNECTION_ERROR} Detail teknis: {e}")
     except Exception as e:  # noqa: BLE001
         logger.error(f"Non-GEE carbon analysis error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -76,6 +88,9 @@ def analyze_carbon_delta(data: dict = Body(...), db: Session = Depends(get_db)):
         # EEException is not a ValueError subclass so it needs its own branch,
         # otherwise it falls through to the generic 500 handler below.
         raise HTTPException(status_code=400, detail=str(e))
+    except requests.RequestException as e:
+        logger.warning("Carbon delta upstream connection error: %s", e)
+        raise HTTPException(status_code=503, detail=f"{UPSTREAM_CONNECTION_ERROR} Detail teknis: {e}")
     except Exception as e:  # noqa: BLE001
         logger.error(f"Carbon delta error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
