@@ -50,7 +50,6 @@ jobs:
             -v "${{ github.workspace }}:/repo" \
             zricethezav/gitleaks:latest detect \
             --source /repo \
-            --config /repo/.gitleaks.toml \
             --no-git \
             --redact \
             --exit-code 1

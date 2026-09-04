@@ -9,7 +9,6 @@ __pycache__/
 
 .venv/
 venv/
-*.egg-info/
 
 # Local SQLite fallback (never used in prod — Postgres/Supabase only)
 *.db
