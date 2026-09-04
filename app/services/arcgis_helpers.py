@@ -26,7 +26,7 @@ _CLIP_POLY_CACHE: dict = {}
 
 
 def _store_clip_poly(esri_polygon: dict) -> str:
-    key = hashlib.md5(json.dumps(esri_polygon, sort_keys=True).encode()).hexdigest()[:12]
+    key = hashlib.md5(json.dumps(esri_polygon, sort_keys=True).encode(), usedforsecurity=False).hexdigest()[:12]
     _CLIP_POLY_CACHE[key] = esri_polygon
     return key
 
