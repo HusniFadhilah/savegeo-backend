@@ -21,8 +21,7 @@ RUN pip install --no-cache-dir --upgrade \
     "jaraco.context>=6.1.0" \
     "msgpack>=1.2.1" \
     "setuptools>=78.1.1" \
-    "wheel>=0.46.2" \
-    && rm -rf /tmp/* /root/.cache/pip
+    "wheel>=0.46.2"
 
 ENV PORT=8086
 EXPOSE 8086
