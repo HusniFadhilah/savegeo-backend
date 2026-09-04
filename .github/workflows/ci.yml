@@ -46,7 +46,6 @@ jobs:
 
       - name: Scan working tree for secrets
         run: |
-          set +e
           docker run --rm \
             -v "${{ github.workspace }}:/repo" \
             zricethezav/gitleaks:latest detect \
@@ -54,14 +53,7 @@ jobs:
             --config /repo/.gitleaks.toml \
             --no-git \
             --redact \
-            --report-format json \
-            --report-path /repo/gitleaks-report.json \
             --exit-code 1
-          status=$?
-          if [ -s gitleaks-report.json ]; then
-            jq '[.[] | {RuleID, File, StartLine, Description}]' gitleaks-report.json
-          fi
-          exit "$status"
 
   trivy:
     runs-on: ubuntu-latest
