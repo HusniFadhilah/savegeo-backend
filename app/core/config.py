@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 1440
 
     # --- CORS ---
-    allowed_origins: str = "http://localhost:5500,http://localhost:3000,http://localhost:5501,https://savegeo.len.co.id"
+    allowed_origins: str = "http://localhost:5500,http://localhost:3000,http://localhost:5501,https://savegeo.len.co.id,https://begeo.len.co.id"
 
     # --- GEE fallback (used only if no active DB credential row exists) ---
     gee_service_account: str = ""
