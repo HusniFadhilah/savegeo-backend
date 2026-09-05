@@ -106,6 +106,8 @@ def list_providers() -> dict:
 def _aoi_payload_to_bbox(aoi_payload: dict) -> list[float]:
     if not isinstance(aoi_payload, dict):
         raise AnalysisError("AOI payload must be an object", 400)
+    if aoi_payload.get("type") in {"Feature", "FeatureCollection", "Polygon", "MultiPolygon"}:
+        aoi_payload = {"geojson": aoi_payload}
     if "geojson" in aoi_payload:
         bbox, _centroid = bbox_and_centroid(aoi_payload["geojson"])
         if not bbox:
@@ -997,9 +999,9 @@ def _parse_cog_bands(value: str | None) -> list[int] | None:
         bands = [int(part.strip()) for part in value.split(",") if part.strip()]
     except ValueError as exc:
         raise AnalysisError("Format band COG harus berupa angka dipisah koma, contoh: 1,2,3", 400) from exc
-    if not bands or any(band < 1 for band in bands):
-        raise AnalysisError("Band COG harus dimulai dari indeks 1", 400)
-    return bands[:3]
+    if len(bands) not in {1, 3} or any(band < 1 for band in bands):
+        raise AnalysisError("Pilih satu band atau tiga band RGB, dengan indeks mulai dari 1", 400)
+    return bands
 
 
 def _parse_cog_rescale(value: str | None, band_count: int) -> list[tuple[float, float]] | None:
@@ -1011,7 +1013,7 @@ def _parse_cog_rescale(value: str | None, band_count: int) -> list[tuple[float, 
             if not part.strip():
                 continue
             low, high = [float(v.strip()) for v in part.split(",", 1)]
-            if high <= low:
+            if not np.isfinite([low, high]).all() or high <= low:
                 raise ValueError("invalid range")
             ranges.append((low, high))
     except ValueError as exc:
@@ -1020,7 +1022,9 @@ def _parse_cog_rescale(value: str | None, band_count: int) -> list[tuple[float, 
         return None
     if len(ranges) == 1 and band_count > 1:
         ranges = ranges * band_count
-    return ranges[:band_count]
+    if len(ranges) != band_count:
+        raise AnalysisError("Jumlah rentang rescale harus satu atau sama dengan jumlah band", 400)
+    return ranges
 
 
 def _render_cog_tile(item_url: str, z: int, x: int, y: int, asset_key: str, bands: str | None, rescale: str | None) -> bytes | None:

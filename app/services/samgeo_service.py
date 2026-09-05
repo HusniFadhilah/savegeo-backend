@@ -76,10 +76,13 @@ def start_job(data: dict) -> dict:
     imagery._aoi_payload_to_bbox(data["aoi"])
     imagery._parse_cog_bands(data.get("bands"))
     imagery._parse_cog_rescale(data.get("rescale"), 3)
-    if not capabilities()["available"]:
-        raise AnalysisError(capabilities()["message"], 503)
+    capability = capabilities()
+    if not capability["available"]:
+        raise AnalysisError(capability["message"], 503)
     JOB_ROOT.mkdir(parents=True, exist_ok=True)
     lock = JOB_ROOT / "running.lock"
+    if lock.exists() and time.time() - lock.stat().st_mtime > 1800:
+        lock.unlink(missing_ok=True)
     try:
         # A filesystem lock also limits concurrent inference across API workers.
         with lock.open("x") as stream:
@@ -164,4 +167,4 @@ def segment(data: dict, folder: Path) -> dict:
                          "properties": {"segment_id": int(label), "model": "SAM ViT-B"}})
     return {"type": "FeatureCollection", "features": features,
             "metadata": {"scene": data["item_url"], "asset": data.get("asset_key"), "width": rgb.shape[2],
-                         "height": rgb.shape[1], "model": "SAM ViT-B", "object_count": len(set(labels[labels > 0].tolist()))}}
+                         "height": rgb.shape[1], "model": "SAM ViT-B", "object_count": int(np.unique(labels[labels > 0]).size)}}
