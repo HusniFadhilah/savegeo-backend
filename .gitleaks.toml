@@ -11,4 +11,5 @@ regexes = [
   '''sentinel5p_ch4''',
   '''copernicus_s2_l2a''',
   '''copernicus_s2_l1c''',
+  '''gedi_l4a_monthly_direct_s2_dem_landcover_2021''',
 ]
