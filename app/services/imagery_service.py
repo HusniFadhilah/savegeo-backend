@@ -75,11 +75,6 @@ _OAM_TILE_URL_TEMPLATE = (
 )
 _MAXAR_EVENTS_CATALOG_URL = "https://maxar-opendata.s3.amazonaws.com/events/catalog.json"
 _PLANET_OPEN_DATA_CATALOG_URL = "https://data.source.coop/planet/disasterdata/catalog.json"
-_COG_PROVIDER_KEYS = {
-    _MAXAR_OPEN_DATA_PROVIDER_KEY,
-    _PLANET_OPEN_DATA_PROVIDER_KEY,
-    _GENERIC_STAC_PROVIDER_KEY,
-}
 _SUPER_RESOLUTION_FACTORS = {
     "off": 1,
     "bicubic_2x": 2,
