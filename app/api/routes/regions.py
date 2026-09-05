@@ -2,8 +2,10 @@
 
 Provinces/cities/districts/villages/geometry proxy an external REST API
 (REGION_API_BASE_URL, default api.sp3stab.id). Islands and the whole-Indonesia
-geometry are served from local static GeoJSON files (project-specific island
-groupings, not an official administrative level). Ported from app.py.
+geometry are served from local static GeoJSON files. The whole-Indonesia AOI
+is refreshed from BIG's official BAPANAS/Batas_Administrasi service; island
+groupings remain project-specific, not an official administrative level.
+Ported from app.py.
 """
 from __future__ import annotations
 

@@ -33,11 +33,15 @@ def _is_copernicus_request(data: dict) -> bool:
     return copernicus_geosave_service.is_copernicus_provider(data.get("satellite"))
 
 
+def _requires_ee(data: dict) -> bool:
+    return data.get("satellite") != "openaerialmap" and not _is_copernicus_request(data)
+
+
 @router.post("/imagery/scenes")
 async def imagery_scenes(request: Request):
     data = await request.json()
     try:
-        if not _is_copernicus_request(data):
+        if _requires_ee(data):
             require_ee(request)
         return imagery_service.list_scenes(data)
     except CopernicusAnalysisError as e:
@@ -55,7 +59,7 @@ async def imagery_scenes(request: Request):
 async def imagery_scene_tile(request: Request):
     data = await request.json()
     try:
-        if not _is_copernicus_request(data):
+        if _requires_ee(data):
             require_ee(request)
         return imagery_service.get_scene_tile(data, request)
     except CopernicusAnalysisError as e:

@@ -27,10 +27,12 @@ metadata, not something this endpoint filters on beyond the optional
 from __future__ import annotations
 
 import logging
+from urllib.parse import quote
 from importlib.util import find_spec
 from datetime import UTC, datetime
 
 import ee
+import httpx
 
 from app.core.config import get_settings
 from app.registries.imagery_provider_registry import (
@@ -44,6 +46,7 @@ from app.services.gee_common import (
     get_tile_url,
     resolve_cloud_mask_technique,
 )
+from app.services.geo_utils import bbox_and_centroid
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +55,12 @@ logger = logging.getLogger(__name__)
 # scenes; this is a browsing tool, not a bulk export, so keep it cheap.
 _MAX_SCENES = 200
 _COPERNICUS_PROVIDER_KEYS = {"copernicus_s2_l2a", "copernicus_s2_l1c"}
+_OPENAERIALMAP_PROVIDER_KEY = "openaerialmap"
+_OAM_STAC_SEARCH_URL = "https://api.imagery.hotosm.org/stac/search"
+_OAM_TILE_URL_TEMPLATE = (
+    "https://api.imagery.hotosm.org/raster/collections/openaerialmap/items/"
+    "{item_id}/tiles/WebMercatorQuad/{z}/{x}/{y}?assets=visual&nodata=0"
+)
 _SUPER_RESOLUTION_FACTORS = {
     "off": 1,
     "bicubic_2x": 2,
@@ -80,7 +89,110 @@ def list_providers() -> dict:
     return {"providers": providers, "default": "sentinel2"}
 
 
+def _aoi_payload_to_bbox(aoi_payload: dict) -> list[float]:
+    if not isinstance(aoi_payload, dict):
+        raise AnalysisError("AOI payload must be an object", 400)
+    if "geojson" in aoi_payload:
+        bbox, _centroid = bbox_and_centroid(aoi_payload["geojson"])
+        if not bbox:
+            raise AnalysisError("AOI GeoJSON tidak valid untuk pencarian OpenAerialMap", 400)
+        return bbox
+
+    required = {"west", "south", "east", "north"}
+    if not required.issubset(aoi_payload.keys()):
+        raise AnalysisError("AOI bounds missing west/south/east/north", 400)
+    return [
+        float(aoi_payload["west"]),
+        float(aoi_payload["south"]),
+        float(aoi_payload["east"]),
+        float(aoi_payload["north"]),
+    ]
+
+
+def _format_stac_datetime(value: str | None) -> str | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed.astimezone(UTC).isoformat().replace("+00:00", "Z")
+    except ValueError:
+        return value
+
+
+def _date_to_stac_boundary(value: str, end_of_day: bool = False) -> str:
+    if "T" in value:
+        return value
+    suffix = "T23:59:59Z" if end_of_day else "T00:00:00Z"
+    return f"{value}{suffix}"
+
+
+def _list_openaerialmap_scenes(data: dict) -> dict:
+    if not data.get("aoi"):
+        raise AnalysisError("aoi is required", 400)
+    if not data.get("start_date") or not data.get("end_date"):
+        raise AnalysisError("start_date and end_date are required", 400)
+
+    meta = get_imagery_provider_meta(_OPENAERIALMAP_PROVIDER_KEY)
+    bbox = _aoi_payload_to_bbox(data["aoi"])
+    body = {
+        "collections": ["openaerialmap"],
+        "bbox": bbox,
+        "datetime": f"{_date_to_stac_boundary(data['start_date'])}/{_date_to_stac_boundary(data['end_date'], end_of_day=True)}",
+        "limit": _MAX_SCENES,
+    }
+
+    try:
+        with httpx.Client(timeout=30) as client:
+            response = client.post(_OAM_STAC_SEARCH_URL, json=body)
+            response.raise_for_status()
+            payload = response.json()
+    except httpx.HTTPStatusError as exc:
+        detail = exc.response.text[:500].strip()
+        suffix = f" - {detail}" if detail else ""
+        raise AnalysisError(f"OpenAerialMap menolak pencarian STAC: HTTP {exc.response.status_code}{suffix}", 502)
+    except httpx.HTTPError as exc:
+        raise AnalysisError(f"Gagal menghubungi OpenAerialMap STAC: {exc}", 502)
+    except ValueError as exc:
+        raise AnalysisError(f"Respons OpenAerialMap STAC tidak valid: {exc}", 502)
+
+    scenes = []
+    for feature in payload.get("features", []):
+        props = feature.get("properties") or {}
+        scene_id = feature.get("id")
+        if not scene_id:
+            continue
+        acquired_at = (
+            _format_stac_datetime(props.get("datetime"))
+            or _format_stac_datetime(props.get("start_datetime"))
+            or _format_stac_datetime(props.get("end_datetime"))
+            or ""
+        )
+        scenes.append(
+            {
+                "id": scene_id,
+                "acquired_at": acquired_at,
+                "cloud_cover_pct": None,
+                "resolution_m": props.get("gsd"),
+                "platform": props.get("oam:platform_type"),
+                "producer": props.get("oam:producer_name"),
+                "title": props.get("title"),
+            }
+        )
+    scenes.sort(key=lambda scene: scene.get("acquired_at") or "", reverse=True)
+
+    matched = payload.get("context", {}).get("matched")
+    return {
+        "scenes": scenes,
+        "count": len(scenes),
+        "satellite": meta,
+        "truncated": len(scenes) >= _MAX_SCENES if matched is None else matched > len(scenes),
+    }
+
+
 def list_scenes(data: dict) -> dict:
+    if data.get("satellite") == _OPENAERIALMAP_PROVIDER_KEY:
+        return _list_openaerialmap_scenes(data)
+
     if data.get("satellite") in _COPERNICUS_PROVIDER_KEYS:
         if not _copernicus_geosave_available():
             raise AnalysisError(
@@ -210,6 +322,18 @@ def _apply_super_resolution(img: ee.Image, meta: dict, mode: str | None) -> tupl
 
 
 def get_scene_tile(data: dict, request=None) -> dict:
+    if data.get("satellite") == _OPENAERIALMAP_PROVIDER_KEY:
+        if not data.get("scene_id"):
+            raise AnalysisError("scene_id is required", 400)
+        meta = get_imagery_provider_meta(_OPENAERIALMAP_PROVIDER_KEY)
+        scene_id = data["scene_id"]
+        return {
+            "scene_id": scene_id,
+            "tile_url": _OAM_TILE_URL_TEMPLATE.format(item_id=quote(scene_id, safe=""), z="{z}", x="{x}", y="{y}"),
+            "satellite": meta,
+            "super_resolution": None,
+        }
+
     if data.get("satellite") in _COPERNICUS_PROVIDER_KEYS:
         if not _copernicus_geosave_available():
             raise AnalysisError(

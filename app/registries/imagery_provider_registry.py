@@ -38,6 +38,22 @@ from typing import Any
 _GAS_PALETTE = ["black", "blue", "purple", "cyan", "green", "yellow", "red"]
 
 IMAGERY_PROVIDERS: dict[str, dict[str, Any]] = {
+    "openaerialmap": {
+        "key": "openaerialmap",
+        "name": "OpenAerialMap - Open UAV/Aerial Imagery",
+        "provider": "HOT / OpenAerialMap",
+        "group": "Open Aerial",
+        "gee_collection": "",
+        "source_kind": "oam_stac",
+        "visualization": "rgb",
+        "color_mode": "natural",
+        "resolution_m": 0.05,
+        "revisit_days": 0,
+        "start_year": 2015,
+        "cloud_property": None,
+        "cloud_mask_techniques": None,
+        "description": "Katalog imagery terbuka berbasis STAC: UAV, aerial, dan beberapa citra satelit open-data. Resolusi bisa centimeter, tetapi cakupan dan tanggal sangat bergantung kontribusi komunitas/event.",
+    },
     "sentinel2": {
         "key": "sentinel2",
         "name": "Sentinel-2 - Surface Reflectance (L2A)",

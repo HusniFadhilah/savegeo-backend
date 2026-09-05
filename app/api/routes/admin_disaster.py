@@ -21,12 +21,17 @@ this file.
 from __future__ import annotations
 
 import datetime as dt
+import re
+import uuid
+import zipfile
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.core.security import get_current_admin, require_permission
 from app.db.models.admin_user import AdminUser
 from app.db.models.analysis_run import RUN_STATUSES
@@ -146,6 +151,28 @@ def _get_event_or_404(db: Session, event_id: int):
     if event is None:
         raise HTTPException(status_code=404, detail="Disaster event not found")
     return event
+
+
+def _safe_file_stem(filename: str) -> str:
+    stem = Path(filename).stem or "upload"
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._-") or "upload"
+
+
+def _select_zip_geotiff(zip_path: Path) -> str:
+    with zipfile.ZipFile(zip_path) as zf:
+        names = [n for n in zf.namelist() if n.lower().endswith((".tif", ".tiff"))]
+    if not names:
+        raise ValueError("ZIP tidak berisi file .tif/.tiff")
+
+    def usable(name: str) -> bool:
+        lower = Path(name).name.lower()
+        return not any(marker in lower for marker in ("-pan", "_pan", "-mask", "_mask"))
+
+    preferred = [n for n in names if usable(n) and "_ortho" in Path(n).name.lower()]
+    preferred += [n for n in names if usable(n) and "pregeoreferenced" in Path(n).name.lower()]
+    preferred += [n for n in names if usable(n)]
+    selected = preferred[0] if preferred else names[0]
+    return f"/vsizip/{zip_path.resolve().as_posix()}/{selected}"
 
 
 def _get_run_or_404(db: Session, run_id: int):
@@ -317,6 +344,109 @@ def admin_add_imagery(
     audit_service.log_audit(
         db, admin.id, "disaster_imagery.create", "disaster_event", str(id),
         detail={"imagery_id": img.id, "phase": img.phase, "satellite": img.satellite},
+    )
+    return img.to_dict()
+
+
+@router.post("/disasters/{id}/imagery/upload", status_code=201)
+async def admin_upload_imagery(
+    id: int,
+    phase: str = Form(...),
+    satellite: str = Form("Custom GeoTIFF"),
+    acquisition_date: dt.date = Form(...),
+    sensor: str | None = Form(None),
+    resolution_m: float | None = Form(None),
+    cloud_coverage_pct: float | None = Form(None),
+    data_source: str | None = Form(None),
+    is_primary: bool = Form(False),
+    file: UploadFile = File(...),
+    admin: AdminUser = Depends(get_current_admin),
+    _perm: AdminUser = Depends(require_permission("disaster.imagery.write")),
+    db: Session = Depends(get_db),
+):
+    _get_event_or_404(db, id)
+    if phase not in ("pre", "post"):
+        raise HTTPException(status_code=400, detail="phase harus 'pre' atau 'post'")
+
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix not in {".tif", ".tiff", ".zip"}:
+        raise HTTPException(status_code=400, detail="File harus GeoTIFF (.tif/.tiff) atau ZIP berisi GeoTIFF")
+
+    settings = get_settings()
+    event_dir = settings.disaster_raster_path / f"event_{id}"
+    event_dir.mkdir(parents=True, exist_ok=True)
+
+    token = uuid.uuid4().hex[:12]
+    stem = _safe_file_stem(file.filename or "geotiff")
+    raw_path = event_dir / f"{stem}_{token}{suffix}"
+    cog_path = event_dir / f"{stem}_{token}_cog.tif"
+
+    max_bytes = 2 * 1024 * 1024 * 1024
+    written = 0
+    try:
+        with raw_path.open("wb") as out:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > max_bytes:
+                    raise HTTPException(status_code=400, detail="File GeoTIFF/ZIP terlalu besar (maks 2 GB)")
+                out.write(chunk)
+        if written == 0:
+            raise HTTPException(status_code=400, detail="File GeoTIFF/ZIP kosong")
+
+        source_path = str(raw_path)
+        selected_zip_member = None
+        if suffix == ".zip":
+            try:
+                source_path = _select_zip_geotiff(raw_path)
+                selected_zip_member = source_path.rsplit("/", 1)[-1]
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=f"Gagal menemukan GeoTIFF utama di ZIP: {exc}") from exc
+
+        local_imagery_tile_service.ensure_cog(source_path, str(cog_path))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Gagal membaca/konversi GeoTIFF: {exc}") from exc
+
+    img = disaster_repo.add_imagery(
+        db,
+        id,
+        {
+            "phase": phase,
+            "satellite": satellite,
+            "acquisition_date": acquisition_date,
+            "sensor": sensor,
+            "resolution_m": resolution_m,
+            "cloud_coverage_pct": cloud_coverage_pct,
+            "data_source": data_source or file.filename or "Local GeoTIFF upload",
+            "is_primary": is_primary,
+            "source_kind": "local_upload",
+            "local_file_path": str(cog_path.resolve()),
+        },
+    )
+    img = disaster_repo.set_preview_tile_url(
+        db,
+        img.id,
+        f"/api/admin/disasters/imagery-tiles/{img.id}/{{z}}/{{x}}/{{y}}.png",
+    )
+    audit_service.log_audit(
+        db,
+        admin.id,
+        "disaster_imagery.upload",
+        "disaster_event",
+        str(id),
+        detail={
+            "imagery_id": img.id,
+            "phase": img.phase,
+            "satellite": img.satellite,
+            "filename": file.filename,
+            "bytes": written,
+            "selected_zip_member": selected_zip_member,
+            "local_file_path": str(cog_path.resolve()),
+        },
     )
     return img.to_dict()
 
