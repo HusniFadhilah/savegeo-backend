@@ -1,8 +1,6 @@
 name: Test and deploy SAVEGEO backend
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 concurrency:
