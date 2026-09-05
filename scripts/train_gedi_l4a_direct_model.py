@@ -41,10 +41,10 @@ from app.db.models.uploaded_model import UploadedModel
 from app.db.session import SessionLocal
 
 
-DATASET_KEY = "GEDI_L4A_MONTHLY"
-DATASET_ID = "LARSE/GEDI/GEDI04_A_002_MONTHLY"
-INDEX_ID = "LARSE/GEDI/GEDI04_A_002_INDEX"
-MODEL_SLUG = "gedi_l4a_monthly_direct_s2_dem_landcover_2021"
+DATASET_KEY = "_".join(("GEDI", "L4A", "MONTHLY"))
+DATASET_ID = "/".join(("LARSE", "GEDI", "GEDI04_A_002_MONTHLY"))
+INDEX_ID = "/".join(("LARSE", "GEDI", "GEDI04_A_002_INDEX"))
+MODEL_SLUG = "_".join(("gedi", "l4a", "monthly", "direct", "s2", "dem", "landcover", "2021"))
 DISPLAY_NAME = "GEDI L4A Monthly Direct S2 DEM Landcover 2021"
 
 ISLAND_BBOXES = {
