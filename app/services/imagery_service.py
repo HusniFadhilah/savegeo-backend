@@ -40,7 +40,6 @@ import httpx
 import numpy as np
 import rasterio
 from rasterio.mask import mask as raster_mask
-from rasterio.transform import array_bounds
 from rasterio.warp import transform_geom as warp_transform_geom
 from rio_tiler.errors import PointOutsideBounds, TileOutsideBounds
 from rio_tiler.io import Reader
@@ -1117,7 +1116,6 @@ def raster_toolbox(data: dict) -> dict:
               "histogram": histogram.astype(int).tolist(), "bins": edges.astype(float).tolist(),
               "width": int(output.shape[-1]), "height": int(output.shape[-2])}
     if data.get("export"):
-        import tempfile
         from pathlib import Path
         export_dir = Path(get_settings().upload_dir) / "imagery-toolbox"
         export_dir.mkdir(parents=True, exist_ok=True)
