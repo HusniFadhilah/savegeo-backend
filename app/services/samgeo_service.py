@@ -66,7 +66,10 @@ def get_job(job_id: str) -> dict:
     path = JOB_ROOT / job_id / "status.json"
     if not path.exists():
         raise AnalysisError("Hasil segmentasi tidak ditemukan atau sudah kedaluwarsa", 404)
-    return json.loads(path.read_text(encoding="utf-8"))
+    status = json.loads(path.read_text(encoding="utf-8"))
+    if status["status"] == "running" and time.time() - path.stat().st_mtime > 1800:
+        return {"job_id": job_id, "status": "failed", "message": "Pekerjaan terhenti atau melewati batas waktu server."}
+    return status
 
 
 def start_job(data: dict) -> dict:

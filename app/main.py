@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -17,6 +18,7 @@ load_dotenv()
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.api.router import api_router
 from app.core.config import get_settings
@@ -51,6 +53,17 @@ app = FastAPI(
 )
 
 setup_cors(app, settings)
+backend_root = Path(__file__).resolve().parent.parent
+disaster_raster_dir = Path(settings.disaster_raster_dir)
+if not disaster_raster_dir.is_absolute():
+    disaster_raster_dir = backend_root / disaster_raster_dir
+disaster_thumbnail_dir = disaster_raster_dir / "thumbnails"
+disaster_thumbnail_dir.mkdir(parents=True, exist_ok=True)
+app.mount(
+    "/disaster-thumbnails",
+    StaticFiles(directory=str(disaster_thumbnail_dir)),
+    name="disaster-thumbnails",
+)
 app.include_router(api_router, prefix=settings.api_prefix)
 
 

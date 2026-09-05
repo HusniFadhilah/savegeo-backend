@@ -39,6 +39,9 @@ import ee
 import httpx
 import numpy as np
 import rasterio
+from rasterio.mask import mask as raster_mask
+from rasterio.transform import array_bounds
+from rasterio.warp import transform_geom as warp_transform_geom
 from rio_tiler.errors import PointOutsideBounds, TileOutsideBounds
 from rio_tiler.io import Reader
 from rio_tiler.models import ImageData
@@ -1072,6 +1075,67 @@ def render_stac_cog_tile(
     except Exception as exc:  # noqa: BLE001
         logger.exception("STAC COG tile render failed")
         raise AnalysisError(f"Gagal merender tile STAC COG: {exc}", 502)
+
+
+def raster_toolbox(data: dict) -> dict:
+    """Run small, bounded raster operations against the selected COG."""
+    item_url = str(data.get("item_url") or "")
+    asset_key = str(data.get("asset_key") or "visual")
+    operation = str(data.get("operation") or "stretch").lower()
+    href = _readable_stac_asset_href(item_url, asset_key)
+    geometry = (data.get("aoi") or {}).get("geometry") or data.get("aoi")
+    if not geometry:
+        raise AnalysisError("AOI diperlukan untuk Raster Toolbox", 400)
+    bands = _parse_cog_bands(data.get("bands")) or [1, 2, 3]
+    with rasterio.Env(GDAL_HTTP_TIMEOUT=60, GDAL_HTTP_MAX_RETRY=2):
+        with rasterio.open(href) as source:
+            selected = [band for band in bands if band <= source.count]
+            if not selected:
+                raise AnalysisError("Band tidak tersedia pada asset COG", 400)
+            source_geometry = warp_transform_geom("EPSG:4326", source.crs, geometry)
+            clipped, transform = raster_mask(source, [source_geometry], crop=True, indexes=selected, filled=False)
+            profile = source.profile.copy()
+            profile.update(height=clipped.shape[1], width=clipped.shape[2], transform=transform, count=clipped.shape[0])
+    values = clipped.compressed().astype("float32")
+    if values.size == 0:
+        raise AnalysisError("AOI tidak memotong area raster", 400)
+    if operation in {"ndvi", "ndwi", "band_math"}:
+        if clipped.shape[0] < 2:
+            raise AnalysisError("Operasi indeks membutuhkan minimal dua band", 400)
+        left = clipped[0].astype("float32")
+        right = clipped[1].astype("float32")
+        denominator = left + right
+        result = np.ma.masked_where(denominator == 0, (left - right) / denominator)
+        stats = {"min": float(result.min()), "mean": float(result.mean()), "max": float(result.max())}
+        output = result.filled(np.nan).astype("float32")
+    else:
+        low, high = np.percentile(values, [2, 98])
+        output = clipped[0].astype("float32")
+        stats = {"min": float(low), "mean": float(np.mean(values)), "max": float(high)}
+    histogram, edges = np.histogram(values, bins=32)
+    result = {"operation": operation, "bands": selected, "stats": stats,
+              "histogram": histogram.astype(int).tolist(), "bins": edges.astype(float).tolist(),
+              "width": int(output.shape[-1]), "height": int(output.shape[-2])}
+    if data.get("export"):
+        import tempfile
+        from pathlib import Path
+        export_dir = Path(get_settings().upload_dir) / "imagery-toolbox"
+        export_dir.mkdir(parents=True, exist_ok=True)
+        output_path = export_dir / f"toolbox-{datetime.now(UTC).strftime('%Y%m%d%H%M%S%f')}.tif"
+        out_profile = profile.copy()
+        out_profile.update(dtype="float32", count=1, nodata=np.nan)
+        with rasterio.open(output_path, "w", **out_profile) as target:
+            target.write(output, 1)
+        result["download_url"] = f"/api/imagery/toolbox-export/{quote(output_path.name)}"
+    return result
+
+
+def nasa_gibs_layers() -> list[dict[str, str]]:
+    return [
+        {"id": "MODIS_Terra_CorrectedReflectance_TrueColor", "name": "NASA MODIS True Color", "date_mode": "daily"},
+        {"id": "VIIRS_SNPP_CorrectedReflectance_TrueColor", "name": "NASA VIIRS True Color", "date_mode": "daily"},
+        {"id": "MODIS_Terra_Land_Surface_Temp_Day", "name": "NASA MODIS Land Surface Temperature", "date_mode": "daily"},
+    ]
 
 
 def render_maxar_open_data_tile(

@@ -11,6 +11,7 @@ import logging
 import ee
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
+from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import require_ee
 from app.services import copernicus_geosave_service
@@ -52,6 +53,29 @@ def imagery_providers():
     return imagery_service.list_providers()
 
 
+@router.get("/imagery/nasa-gibs/layers")
+def imagery_nasa_gibs_layers():
+    return {"layers": imagery_service.nasa_gibs_layers()}
+
+
+@router.post("/imagery/raster-toolbox")
+async def imagery_raster_toolbox(request: Request):
+    try:
+        return await run_in_threadpool(imagery_service.raster_toolbox, await request.json())
+    except AnalysisError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e))
+
+
+@router.get("/imagery/toolbox-export/{filename}")
+def imagery_toolbox_export(filename: str):
+    from pathlib import Path
+    from fastapi.responses import FileResponse
+    path = Path(imagery_service.get_settings().upload_dir) / "imagery-toolbox" / Path(filename).name
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Export raster tidak ditemukan")
+    return FileResponse(path, media_type="image/tiff", filename=path.name)
+
+
 def _is_copernicus_request(data: dict) -> bool:
     return copernicus_geosave_service.is_copernicus_provider(data.get("satellite"))
 
@@ -71,7 +95,7 @@ async def imagery_scenes(request: Request):
     try:
         if _requires_ee(data):
             require_ee(request)
-        return imagery_service.list_scenes(data, request)
+        return await run_in_threadpool(imagery_service.list_scenes, data, request)
     except CopernicusAnalysisError as e:
         raise HTTPException(status_code=e.status_code, detail=str(e))
     except AnalysisError as e:
@@ -89,7 +113,7 @@ async def imagery_scene_tile(request: Request):
     try:
         if _requires_ee(data):
             require_ee(request)
-        return imagery_service.get_scene_tile(data, request)
+        return await run_in_threadpool(imagery_service.get_scene_tile, data, request)
     except CopernicusAnalysisError as e:
         raise HTTPException(status_code=e.status_code, detail=str(e))
     except AnalysisError as e:
