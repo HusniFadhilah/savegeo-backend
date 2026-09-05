@@ -44,7 +44,7 @@ from app.db.session import SessionLocal
 DATASET_KEY = "GEDI_L4A_MONTHLY"
 DATASET_ID = "LARSE/GEDI/GEDI04_A_002_MONTHLY"
 INDEX_ID = "LARSE/GEDI/GEDI04_A_002_INDEX"
-MODEL_NAME = "gedi_l4a_monthly_direct_s2_dem_landcover_2021"
+MODEL_SLUG = "gedi_l4a_monthly_direct_s2_dem_landcover_2021"
 DISPLAY_NAME = "GEDI L4A Monthly Direct S2 DEM Landcover 2021"
 
 ISLAND_BBOXES = {
@@ -364,9 +364,9 @@ def train_gee_native_classifier(df: pd.DataFrame, algorithm: str, seed: int):
 def register_model(model_path: Path, clf_path: Path, metadata: dict, metrics: dict) -> None:
     db = SessionLocal()
     try:
-        row = db.query(UploadedModel).filter_by(name=MODEL_NAME).first()
+        row = db.query(UploadedModel).filter_by(name=MODEL_SLUG).first()
         if row is None:
-            row = UploadedModel(name=MODEL_NAME, model_type="carbon")
+            row = UploadedModel(name=MODEL_SLUG, model_type="carbon")
             db.add(row)
         row.display_name = DISPLAY_NAME
         row.algorithm = metadata["algorithm"]
@@ -409,7 +409,7 @@ def main() -> None:
     settings = get_settings()
     out_dir = settings.model_path
     out_dir.mkdir(parents=True, exist_ok=True)
-    experiment_dir = Path("var") / "training_runs" / MODEL_NAME
+    experiment_dir = Path("var") / "training_runs" / MODEL_SLUG
     experiment_dir.mkdir(parents=True, exist_ok=True)
 
     df = sample_l4a_direct(
@@ -434,9 +434,9 @@ def main() -> None:
     if best["selection_r2"] < args.min_r2:
         raise RuntimeError(f"Best direct L4A R2={best['selection_r2']:.4f}, below threshold {args.min_r2}.")
 
-    model_path = out_dir / f"{MODEL_NAME}.pkl"
-    json_path = out_dir / f"{MODEL_NAME}.json"
-    clf_path = out_dir / f"{MODEL_NAME}.gee_clf.json"
+    model_path = out_dir / f"{MODEL_SLUG}.pkl"
+    json_path = out_dir / f"{MODEL_SLUG}.json"
+    clf_path = out_dir / f"{MODEL_SLUG}.gee_clf.json"
 
     joblib.dump({"model": estimator, "scaler": None, "feature_names": FEATURE_NAMES}, model_path)
     serialized = train_gee_native_classifier(df, best["algorithm"], args.seed)
@@ -444,7 +444,7 @@ def main() -> None:
 
     now = datetime.now(UTC).isoformat()
     metadata = {
-        "model_name": MODEL_NAME,
+        "model_name": MODEL_SLUG,
         "display_name": DISPLAY_NAME,
         "algorithm": best["algorithm"],
         "version": f"gedi-l4a-direct-{args.year}",
@@ -499,7 +499,7 @@ def main() -> None:
         "scaled_features": False,
     }
     register_model(model_path, clf_path, metadata, metrics)
-    print(f"registered {MODEL_NAME} algorithm={best['algorithm']} R2={metrics['cv_metrics']['r2_mean']:.4f}")
+    print(f"registered {MODEL_SLUG} algorithm={best['algorithm']} R2={metrics['cv_metrics']['r2_mean']:.4f}")
 
 
 if __name__ == "__main__":
