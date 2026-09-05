@@ -10,6 +10,7 @@ import logging
 
 import ee
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.responses import RedirectResponse
 
 from app.api.deps import require_ee
 from app.services import copernicus_geosave_service
@@ -34,7 +35,12 @@ def _is_copernicus_request(data: dict) -> bool:
 
 
 def _requires_ee(data: dict) -> bool:
-    return data.get("satellite") != "openaerialmap" and not _is_copernicus_request(data)
+    return data.get("satellite") not in {
+        "openaerialmap",
+        "vantor_open_data",
+        "planet_open_data",
+        "stac_catalog",
+    } and not _is_copernicus_request(data)
 
 
 @router.post("/imagery/scenes")
@@ -43,7 +49,7 @@ async def imagery_scenes(request: Request):
     try:
         if _requires_ee(data):
             require_ee(request)
-        return imagery_service.list_scenes(data)
+        return imagery_service.list_scenes(data, request)
     except CopernicusAnalysisError as e:
         raise HTTPException(status_code=e.status_code, detail=str(e))
     except AnalysisError as e:
@@ -106,3 +112,66 @@ def imagery_copernicus_tile(provider_key: str, scene_id: str, z: int, x: int, y:
         media_type="image/png",
         headers={"Cache-Control": "public, max-age=86400"},
     )
+
+
+@router.get("/imagery/maxar-open-data-tiles/{z}/{x}/{y}.png")
+def imagery_maxar_open_data_tile(
+    z: int,
+    x: int,
+    y: int,
+    item_url: str,
+    asset_key: str = "visual",
+    bands: str | None = None,
+    rescale: str | None = None,
+):
+    try:
+        png_bytes = imagery_service.render_maxar_open_data_tile(item_url, z, x, y, asset_key, bands, rescale)
+    except AnalysisError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e))
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Imagery Vantor/Maxar Open Data tile error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    if png_bytes is None:
+        raise HTTPException(status_code=404, detail="Tile di luar cakupan raster")
+    return Response(
+        content=png_bytes,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+@router.get("/imagery/stac-cog-tiles/{z}/{x}/{y}.png")
+def imagery_stac_cog_tile(
+    z: int,
+    x: int,
+    y: int,
+    item_url: str,
+    asset_key: str = "visual",
+    bands: str | None = None,
+    rescale: str | None = None,
+):
+    try:
+        png_bytes = imagery_service.render_stac_cog_tile(item_url, z, x, y, asset_key, bands, rescale)
+    except AnalysisError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e))
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Imagery STAC COG tile error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    if png_bytes is None:
+        raise HTTPException(status_code=404, detail="Tile di luar cakupan raster")
+    return Response(
+        content=png_bytes,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+@router.get("/imagery/stac-source")
+def imagery_stac_source(item_url: str, asset_key: str = "visual"):
+    try:
+        href = imagery_service.get_stac_asset_download_url(item_url, asset_key)
+    except AnalysisError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e))
+    return RedirectResponse(href)

@@ -114,7 +114,6 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     needs: [validate_backend, gitleaks, trivy]
-    environment: beta-doltinuku
     permissions:
       contents: read
     env:
@@ -200,7 +199,7 @@ jobs:
           .venv/bin/python -m pip install -e .
           .venv/bin/alembic upgrade head
 
-          if ! systemctl list-unit-files savegeo-backend.service >/dev/null 2>&1; then
+          if ! systemctl cat savegeo-backend.service >/dev/null 2>&1; then
             cat >/etc/systemd/system/savegeo-backend.service <<SERVICE
           [Unit]
           Description=SaveGeo FastAPI backend
@@ -225,7 +224,10 @@ jobs:
             systemctl enable savegeo-backend.service
           fi
 
-          pkill -f '/home/doltinuku/geomoka/backend/venv/bin/python -m gunicorn.*127.0.0.1:8086' || true
+          if command -v pm2 >/dev/null 2>&1; then
+            pm2 delete backend-savegeo || true
+            pm2 save --force || true
+          fi
           systemctl restart savegeo-backend.service
 
           for i in $(seq 1 40); do
