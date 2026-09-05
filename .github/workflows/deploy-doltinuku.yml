@@ -1,0 +1,469 @@
+name: Beta Doltinuku Deployment
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: savegeo-doltinuku-beta
+  cancel-in-progress: false
+
+env:
+  BACKEND_REMOTE_DIR: /home/doltinuku/savegeo/backend
+  FRONTEND_REMOTE_DIR: /home/doltinuku/savegeo/frontend
+  SAVEGEO_DOMAIN: savegeo.husnifd.my.id
+  BEGEO_DOMAIN: begeo.husnifd.my.id
+
+jobs:
+  validate_backend:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout backend
+        uses: actions/checkout@v4
+        with:
+          path: backend
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+
+      - name: Install, lint, typecheck, security audit, and test backend
+        working-directory: backend
+        env:
+          DEBUG: "false"
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          ruff check . --ignore E501 --ignore B904 --ignore B905
+          mypy app
+          bandit -r app -lll
+          # scikit-learn is pinned for existing pickle model compatibility; remove this ignore after retraining.
+          pip-audit . --ignore-vuln PYSEC-2024-110
+          pytest
+
+  validate_frontend:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout frontend
+        uses: actions/checkout@v4
+        with:
+          repository: HusniFadhilah/savegeo-frontend
+          token: ${{ secrets.SAVEGEO_FRONTEND_REPO_TOKEN || github.token }}
+          path: frontend
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install, lint, test, audit, and build frontend
+        working-directory: frontend
+        env:
+          VITE_API_BASE_URL: /api
+          VITE_APP_ENV: beta
+        run: |
+          npm ci
+          npm run lint
+          npm test
+          npm audit --audit-level=high
+          npm run build
+
+      - name: Upload frontend build
+        uses: actions/upload-artifact@v4
+        with:
+          name: savegeo-doltinuku-frontend-dist
+          path: frontend/dist/
+          if-no-files-found: error
+
+  gitleaks:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout backend
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          path: backend
+
+      - name: Checkout frontend
+        uses: actions/checkout@v4
+        with:
+          repository: HusniFadhilah/savegeo-frontend
+          token: ${{ secrets.SAVEGEO_FRONTEND_REPO_TOKEN || github.token }}
+          path: frontend
+
+      - name: Scan backend and frontend working trees for secrets
+        run: |
+          set +e
+          docker run --rm \
+            -v "${{ github.workspace }}/backend:/repo" \
+            zricethezav/gitleaks:latest detect \
+            --source /repo \
+            --config /repo/.gitleaks.toml \
+            --no-git \
+            --redact \
+            --report-format json \
+            --report-path /repo/gitleaks-report.json \
+            --exit-code 1
+          backend_status=$?
+          docker run --rm \
+            -v "${{ github.workspace }}/frontend:/repo" \
+            zricethezav/gitleaks:latest detect \
+            --source /repo \
+            --no-git \
+            --redact \
+            --report-format json \
+            --report-path /repo/gitleaks-report.json \
+            --exit-code 1
+          frontend_status=$?
+          if [ -s backend/gitleaks-report.json ]; then
+            jq '[.[] | {RuleID, File, StartLine, Description}]' backend/gitleaks-report.json
+          fi
+          if [ -s frontend/gitleaks-report.json ]; then
+            jq '[.[] | {RuleID, File, StartLine, Description}]' frontend/gitleaks-report.json
+          fi
+          if [ "$backend_status" -ne 0 ] || [ "$frontend_status" -ne 0 ]; then
+            exit 1
+          fi
+
+  trivy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout backend
+        uses: actions/checkout@v4
+        with:
+          path: backend
+
+      - name: Build backend image
+        working-directory: backend
+        run: docker build -t savegeo-backend:doltinuku-ci .
+
+      - name: Scan backend image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: savegeo-backend:doltinuku-ci
+          format: json
+          output: trivy-results.json
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true
+
+      - name: Report Trivy findings
+        if: failure()
+        run: |
+          jq '[.Results[]? | {Target, Vulnerabilities: [.Vulnerabilities[]? | {VulnerabilityID, PkgName, InstalledVersion, FixedVersion, Severity}] } | select(.Vulnerabilities | length > 0)]' trivy-results.json
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: [validate_backend, validate_frontend, gitleaks, trivy]
+    environment: beta-doltinuku
+    permissions:
+      contents: read
+    env:
+      DOLTINUKU_SERVER: ${{ secrets.SFTP_DOLTINUKU_SERVER }}
+      DOLTINUKU_USERNAME: ${{ secrets.SFTP_DOLTINUKU_USERNAME }}
+      DOLTINUKU_PASSWORD: ${{ secrets.SFTP_DOLTINUKU_PASSWORD }}
+      DOLTINUKU_SSH_PORT: ${{ secrets.SFTP_DOLTINUKU_PORT }}
+
+    steps:
+      - name: Checkout backend
+        uses: actions/checkout@v4
+        with:
+          path: backend
+
+      - name: Checkout frontend deploy files
+        uses: actions/checkout@v4
+        with:
+          repository: HusniFadhilah/savegeo-frontend
+          token: ${{ secrets.SAVEGEO_FRONTEND_REPO_TOKEN || github.token }}
+          path: frontend
+
+      - name: Download frontend build
+        uses: actions/download-artifact@v4
+        with:
+          name: savegeo-doltinuku-frontend-dist
+          path: frontend/dist/
+
+      - name: Install deployment tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lftp sshpass netcat-openbsd
+
+      - name: Verify Doltinuku SSH is reachable
+        run: |
+          set -euo pipefail
+          nc -z -w 15 "$DOLTINUKU_SERVER" "${DOLTINUKU_SSH_PORT:-22}"
+
+      - name: Upload backend source
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          lftp -u "$DOLTINUKU_USERNAME,$DOLTINUKU_PASSWORD" \
+            "sftp://$DOLTINUKU_SERVER:${DOLTINUKU_SSH_PORT:-22}" <<EOF
+          set sftp:auto-confirm yes
+          set net:max-retries 3
+          set net:timeout 30
+
+          mirror --reverse \
+            --verbose \
+            --overwrite \
+            --delete \
+            --no-perms \
+            --exclude-glob '.git/**' \
+            --exclude-glob '.github/**' \
+            --exclude-glob '.mypy_cache/**' \
+            --exclude-glob '.pytest_cache/**' \
+            --exclude-glob '.ruff_cache/**' \
+            --exclude-glob '.venv/**' \
+            --exclude-glob '.venv-py312-test/**' \
+            --exclude-glob '__pycache__/**' \
+            --exclude-glob 'var/**' \
+            --exclude-glob '.env' \
+            ./ "$BACKEND_REMOTE_DIR"
+
+          bye
+          EOF
+
+      - name: Upload frontend build and deploy files
+        working-directory: frontend
+        run: |
+          set -euo pipefail
+          lftp -u "$DOLTINUKU_USERNAME,$DOLTINUKU_PASSWORD" \
+            "sftp://$DOLTINUKU_SERVER:${DOLTINUKU_SSH_PORT:-22}" <<EOF
+          set sftp:auto-confirm yes
+          set net:max-retries 3
+          set net:timeout 30
+
+          mirror --reverse \
+            --verbose \
+            --overwrite \
+            --delete \
+            --no-perms \
+            ./dist "$FRONTEND_REMOTE_DIR/dist"
+
+          mirror --reverse \
+            --verbose \
+            --overwrite \
+            --no-perms \
+            ./deploy "$FRONTEND_REMOTE_DIR/deploy"
+
+          bye
+          EOF
+
+      - name: Configure Doltinuku web server and deploy backend
+        env:
+          SSHPASS: ${{ secrets.SFTP_DOLTINUKU_PASSWORD }}
+        run: |
+          set -euo pipefail
+          sshpass -e ssh \
+            -p "${DOLTINUKU_SSH_PORT:-22}" \
+            -o StrictHostKeyChecking=accept-new \
+            "$DOLTINUKU_USERNAME@$DOLTINUKU_SERVER" \
+            "BACKEND_REMOTE_DIR='$BACKEND_REMOTE_DIR' FRONTEND_REMOTE_DIR='$FRONTEND_REMOTE_DIR' SAVEGEO_DOMAIN='$SAVEGEO_DOMAIN' BEGEO_DOMAIN='$BEGEO_DOMAIN' bash -s" <<'REMOTE_DEPLOY'
+          set -euo pipefail
+
+          test -d "$BACKEND_REMOTE_DIR"
+          test -d "$FRONTEND_REMOTE_DIR/dist"
+          test -s "$BACKEND_REMOTE_DIR/.env"
+
+          mkdir -p "$BACKEND_REMOTE_DIR/var/exports" \
+            "$BACKEND_REMOTE_DIR/var/uploads" \
+            "$BACKEND_REMOTE_DIR/var/saved_models" \
+            "$BACKEND_REMOTE_DIR/var/gee-credentials"
+
+          cd "$BACKEND_REMOTE_DIR"
+          if docker compose -f docker-compose.prod.yml ps --status running db | grep -q db; then
+            docker compose -f docker-compose.prod.yml exec -T db \
+              pg_dump -U savegeo -Fc savegeo \
+              > "var/exports/predeploy_$(date +%Y%m%d_%H%M%S).dump"
+          fi
+          docker compose -f docker-compose.prod.yml up -d --build
+
+          for i in $(seq 1 40); do
+            curl --fail --silent http://127.0.0.1:8086/api/health >/dev/null && break
+            if [ "$i" -eq 40 ]; then
+              docker compose -f docker-compose.prod.yml logs --tail=150 api
+              exit 1
+            fi
+            sleep 3
+          done
+
+          if command -v apache2ctl >/dev/null 2>&1; then
+            a2enmod headers proxy proxy_http rewrite >/dev/null
+            cat >/etc/apache2/sites-available/000-savegeo-doltinuku.conf <<APACHECONF
+          <VirtualHost *:80>
+              ServerName $SAVEGEO_DOMAIN
+              DocumentRoot $FRONTEND_REMOTE_DIR/dist
+
+              ProxyPreserveHost On
+              Timeout 650
+              ProxyTimeout 650
+              ProxyPass /api/ http://127.0.0.1:8086/api/ connectiontimeout=15 timeout=650 retry=0
+              ProxyPassReverse /api/ http://127.0.0.1:8086/api/
+
+              <Directory $FRONTEND_REMOTE_DIR/dist>
+                  Options -Indexes +FollowSymLinks
+                  AllowOverride None
+                  Require all granted
+                  FallbackResource /index.html
+              </Directory>
+
+              Header always set X-Content-Type-Options "nosniff"
+              Header always set Referrer-Policy "strict-origin-when-cross-origin"
+
+              ErrorLog \${APACHE_LOG_DIR}/savegeo-doltinuku-error.log
+              CustomLog \${APACHE_LOG_DIR}/savegeo-doltinuku-access.log combined
+          </VirtualHost>
+
+          <VirtualHost *:80>
+              ServerName $BEGEO_DOMAIN
+
+              ProxyPreserveHost On
+              Timeout 650
+              ProxyTimeout 650
+              ProxyPass / http://127.0.0.1:8086/ connectiontimeout=15 timeout=650 retry=0
+              ProxyPassReverse / http://127.0.0.1:8086/
+
+              Header always set X-Content-Type-Options "nosniff"
+              Header always set Referrer-Policy "strict-origin-when-cross-origin"
+
+              ErrorLog \${APACHE_LOG_DIR}/begeo-doltinuku-error.log
+              CustomLog \${APACHE_LOG_DIR}/begeo-doltinuku-access.log combined
+          </VirtualHost>
+          APACHECONF
+            a2ensite 000-savegeo-doltinuku.conf >/dev/null
+            apache2ctl configtest
+            systemctl reload apache2
+
+            if command -v certbot >/dev/null 2>&1; then
+              if [ ! -d "/etc/letsencrypt/live/$SAVEGEO_DOMAIN" ] || [ ! -d "/etc/letsencrypt/live/$BEGEO_DOMAIN" ]; then
+                certbot --apache \
+                  --non-interactive \
+                  --agree-tos \
+                  --register-unsafely-without-email \
+                  --redirect \
+                  -d "$SAVEGEO_DOMAIN" \
+                  -d "$BEGEO_DOMAIN"
+              fi
+            fi
+
+            if [ -d "/etc/letsencrypt/live/$SAVEGEO_DOMAIN" ] && [ -d "/etc/letsencrypt/live/$BEGEO_DOMAIN" ]; then
+              cat >/etc/apache2/sites-available/000-savegeo-doltinuku-le-ssl.conf <<APACHESSLCONF
+          <IfModule mod_ssl.c>
+          <VirtualHost *:443>
+              ServerName $SAVEGEO_DOMAIN
+              DocumentRoot $FRONTEND_REMOTE_DIR/dist
+
+              ProxyPreserveHost On
+              Timeout 650
+              ProxyTimeout 650
+              ProxyPass /api/ http://127.0.0.1:8086/api/ connectiontimeout=15 timeout=650 retry=0
+              ProxyPassReverse /api/ http://127.0.0.1:8086/api/
+
+              <Directory $FRONTEND_REMOTE_DIR/dist>
+                  Options -Indexes +FollowSymLinks
+                  AllowOverride None
+                  Require all granted
+                  FallbackResource /index.html
+              </Directory>
+
+              Header always set X-Content-Type-Options "nosniff"
+              Header always set Referrer-Policy "strict-origin-when-cross-origin"
+
+              ErrorLog \${APACHE_LOG_DIR}/savegeo-doltinuku-ssl-error.log
+              CustomLog \${APACHE_LOG_DIR}/savegeo-doltinuku-ssl-access.log combined
+              SSLCertificateFile /etc/letsencrypt/live/$SAVEGEO_DOMAIN/fullchain.pem
+              SSLCertificateKeyFile /etc/letsencrypt/live/$SAVEGEO_DOMAIN/privkey.pem
+          </VirtualHost>
+
+          <VirtualHost *:443>
+              ServerName $BEGEO_DOMAIN
+
+              ProxyPreserveHost On
+              Timeout 650
+              ProxyTimeout 650
+              ProxyPass / http://127.0.0.1:8086/ connectiontimeout=15 timeout=650 retry=0
+              ProxyPassReverse / http://127.0.0.1:8086/
+
+              Header always set X-Content-Type-Options "nosniff"
+              Header always set Referrer-Policy "strict-origin-when-cross-origin"
+
+              ErrorLog \${APACHE_LOG_DIR}/begeo-doltinuku-ssl-error.log
+              CustomLog \${APACHE_LOG_DIR}/begeo-doltinuku-ssl-access.log combined
+              SSLCertificateFile /etc/letsencrypt/live/$BEGEO_DOMAIN/fullchain.pem
+              SSLCertificateKeyFile /etc/letsencrypt/live/$BEGEO_DOMAIN/privkey.pem
+          </VirtualHost>
+          </IfModule>
+          APACHESSLCONF
+              a2ensite 000-savegeo-doltinuku-le-ssl.conf >/dev/null
+              apache2ctl configtest
+              systemctl reload apache2
+            fi
+          elif command -v nginx >/dev/null 2>&1; then
+            cat >/etc/nginx/conf.d/savegeo-doltinuku.conf <<NGINXCONF
+          server {
+              listen 80;
+              server_name $SAVEGEO_DOMAIN;
+              root $FRONTEND_REMOTE_DIR/dist;
+              index index.html;
+
+              location /api/ {
+                  proxy_pass http://127.0.0.1:8086/api/;
+                  proxy_http_version 1.1;
+                  proxy_set_header Host \$host;
+                  proxy_set_header X-Real-IP \$remote_addr;
+                  proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto \$scheme;
+                  proxy_read_timeout 650s;
+              }
+
+              location / {
+                  try_files \$uri \$uri/ /index.html;
+              }
+          }
+
+          server {
+              listen 80;
+              server_name $BEGEO_DOMAIN;
+
+              location / {
+                  proxy_pass http://127.0.0.1:8086/;
+                  proxy_http_version 1.1;
+                  proxy_set_header Host \$host;
+                  proxy_set_header X-Real-IP \$remote_addr;
+                  proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto \$scheme;
+                  proxy_read_timeout 650s;
+              }
+          }
+          NGINXCONF
+            nginx -t
+            systemctl reload nginx
+          else
+            echo "Neither Apache nor Nginx is installed on Doltinuku." >&2
+            exit 1
+          fi
+          REMOTE_DEPLOY
+
+      - name: Verify public domains
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --max-time 30 "https://$SAVEGEO_DOMAIN/" >/dev/null
+          curl --fail --silent --show-error --max-time 30 "https://$BEGEO_DOMAIN/api/health" >/dev/null
