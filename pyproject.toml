@@ -79,6 +79,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+samgeo = [
+    "segment-geospatial>=1.4.2,<2",
+]
 cdse = [
     "geosave-engine>=0.1.1",
 ]

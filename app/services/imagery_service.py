@@ -335,17 +335,41 @@ def _stac_api_search(
     elif isinstance(collections, list) and collections:
         body["collections"] = collections
 
-    response = client.post(search_url, json=body)
-    response.raise_for_status()
-    payload = response.json()
     scenes = []
-    for feature in payload.get("features", []):
-        scene_url = _stac_item_url(search_url, feature)
-        scene = _scene_from_stac_item(scene_url, feature, meta, producer, request)
-        if scene:
-            scenes.append(scene)
-    matched = payload.get("context", {}).get("matched")
-    return scenes, (matched > len(scenes) if matched is not None else None)
+    seen = set()
+    method = "POST"
+    url = search_url
+    for _ in range(20):
+        _validate_public_http_url(url)
+        if method == "GET":
+            response = client.get(url)
+        else:
+            response = client.post(url, json=body)
+            if response.status_code in {405, 501}:
+                params = {key: ",".join(map(str, value)) if isinstance(value, list) else value for key, value in body.items()}
+                response = client.get(url, params=params)
+        response.raise_for_status()
+        payload = response.json()
+        for feature in payload.get("features", []):
+            scene_url = _stac_item_url(url, feature)
+            if scene_url in seen:
+                continue
+            seen.add(scene_url)
+            cloud = (feature.get("properties") or {}).get("eo:cloud_cover")
+            if data.get("max_cloud_cover") is not None and cloud is not None and float(cloud) > float(data["max_cloud_cover"]):
+                continue
+            scene = _scene_from_stac_item(scene_url, feature, meta, producer, request)
+            if scene:
+                scenes.append(scene)
+            if len(scenes) >= _MAX_SCENES:
+                return scenes, True
+        next_link = next((link for link in payload.get("links", []) if link.get("rel") == "next"), None)
+        if not next_link:
+            return scenes, False
+        url = _abs_stac_href(url, next_link["href"])
+        method = next_link.get("method", "GET").upper()
+        body = {**body, **next_link.get("body", {})} if next_link.get("merge") else next_link.get("body", {})
+    return scenes, True
 
 
 def _list_static_stac_scenes(
@@ -365,7 +389,7 @@ def _list_static_stac_scenes(
     visited: set[str] = set()
     truncated = False
 
-    while queue and len(scenes) < _MAX_SCENES:
+    while queue and len(scenes) < _MAX_SCENES and len(visited) < 1000:
         url = queue.pop(0)
         if url in visited:
             continue
@@ -428,7 +452,7 @@ def _list_static_stac_scenes(
                 continue
             queue.append(absolute)
 
-    if queue and len(scenes) >= _MAX_SCENES:
+    if queue:
         truncated = True
     return scenes, truncated
 
@@ -946,6 +970,16 @@ def _stac_asset_href(item_url: str, asset_key: str) -> str:
     return _abs_stac_href(item_url, asset["href"])
 
 
+def _readable_stac_asset_href(item_url: str, asset_key: str) -> str:
+    href = _stac_asset_href(item_url, asset_key)
+    _validate_public_http_url(href, "URL asset COG")
+    # Cache the stable asset URL, never an expiring SAS token.
+    if urlparse(item_url).hostname == "planetarycomputer.microsoft.com":
+        import planetary_computer
+        href = planetary_computer.sign(href)
+    return href
+
+
 def _cog_tile_query(data: dict, item_url: str, default_asset_key: str = "visual") -> str:
     asset_key = str(data.get("cog_asset_key") or default_asset_key).strip() or default_asset_key
     parts = [f"item_url={quote(item_url, safe='')}", f"asset_key={quote(asset_key, safe='')}"]
@@ -990,7 +1024,7 @@ def _parse_cog_rescale(value: str | None, band_count: int) -> list[tuple[float, 
 
 
 def _render_cog_tile(item_url: str, z: int, x: int, y: int, asset_key: str, bands: str | None, rescale: str | None) -> bytes | None:
-    href = _stac_asset_href(item_url, asset_key)
+    href = _readable_stac_asset_href(item_url, asset_key)
     _validate_public_http_url(href, "URL asset COG")
     indexes = _parse_cog_bands(bands)
     with rasterio.Env():
@@ -1004,14 +1038,14 @@ def _render_cog_tile(item_url: str, z: int, x: int, y: int, asset_key: str, band
     if data.shape[0] == 1:
         data = np.repeat(data, 3, axis=0)
     rescale_ranges = _parse_cog_rescale(rescale, data.shape[0])
-    rendered = ImageData(data, mask=img.mask)
+    rendered = ImageData(np.ma.array(data, mask=np.broadcast_to(img.mask == 0, data.shape)))
     if rescale_ranges:
         rendered.rescale(in_range=rescale_ranges)
     return rendered.render(img_format="PNG")
 
 
 def get_stac_asset_download_url(item_url: str, asset_key: str) -> str:
-    href = _stac_asset_href(item_url, asset_key)
+    href = _readable_stac_asset_href(item_url, asset_key)
     _validate_public_http_url(href, "URL asset COG")
     return href
 

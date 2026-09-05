@@ -151,16 +151,17 @@ jobs:
           mirror --reverse \
             --verbose \
             --overwrite \
-            --delete \
             --no-perms \
             --exclude-glob '.git/**' \
             --exclude-glob '.github/**' \
+            --exclude-glob '.claude/**' \
             --exclude-glob '.mypy_cache/**' \
             --exclude-glob '.pytest_cache/**' \
             --exclude-glob '.ruff_cache/**' \
             --exclude-glob '.venv/**' \
             --exclude-glob '.venv-py312-test/**' \
             --exclude-glob '__pycache__/**' \
+            --exclude-glob 'savegeo_backend.egg-info/**' \
             --exclude-glob 'var/**' \
             --exclude-glob '.env' \
             ./ "$BACKEND_REMOTE_DIR"
@@ -183,6 +184,8 @@ jobs:
           test -d "$BACKEND_REMOTE_DIR"
           test -d "$FRONTEND_REMOTE_DIR/dist"
           test -s "$BACKEND_REMOTE_DIR/.env"
+
+          rm -rf "$BACKEND_REMOTE_DIR/savegeo_backend.egg-info" "$BACKEND_REMOTE_DIR/.claude"
 
           mkdir -p "$BACKEND_REMOTE_DIR/var/exports" \
             "$BACKEND_REMOTE_DIR/var/uploads" \

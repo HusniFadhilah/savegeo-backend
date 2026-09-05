@@ -15,11 +15,33 @@ from fastapi.responses import RedirectResponse
 from app.api.deps import require_ee
 from app.services import copernicus_geosave_service
 from app.services import imagery_service
+from app.services import samgeo_service
 from app.services.copernicus_geosave_service import CopernicusAnalysisError
 from app.services.gee_common import AnalysisError
 
 router = APIRouter(tags=["imagery"])
 logger = logging.getLogger(__name__)
+
+
+@router.get("/imagery/samgeo/status")
+def imagery_samgeo_status():
+    return samgeo_service.capabilities()
+
+
+@router.post("/imagery/samgeo/jobs", status_code=202)
+def imagery_samgeo_start(data: dict):
+    try:
+        return samgeo_service.start_job(data)
+    except AnalysisError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc))
+
+
+@router.get("/imagery/samgeo/jobs/{job_id}")
+def imagery_samgeo_result(job_id: str):
+    try:
+        return samgeo_service.get_job(job_id)
+    except AnalysisError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc))
 
 
 @router.get("/imagery/providers")
