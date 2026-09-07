@@ -9,6 +9,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_ee
+from app.core.security import get_current_app_viewer
 from app.db.session import get_db
 from app.services import carbon_service
 from app.services.gee_common import AnalysisError
@@ -22,7 +23,7 @@ UPSTREAM_CONNECTION_ERROR = (
 )
 
 
-@router.post("/analyze/carbon", dependencies=[Depends(require_ee)])
+@router.post("/analyze/carbon", dependencies=[Depends(get_current_app_viewer), Depends(require_ee)])
 def analyze_carbon(data: dict = Body(...), db: Session = Depends(get_db)):
     if "aoi" not in data:
         raise HTTPException(status_code=400, detail="Missing required field: aoi")
@@ -47,7 +48,7 @@ def analyze_carbon(data: dict = Body(...), db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/analyze/carbon-local")
+@router.post("/analyze/carbon-local", dependencies=[Depends(get_current_app_viewer)])
 def analyze_carbon_local(data: dict = Body(...), db: Session = Depends(get_db)):
     """Non-GEE carbon estimation path — does NOT require Earth Engine."""
     try:
@@ -71,7 +72,7 @@ def analyze_carbon_local(data: dict = Body(...), db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/analyze/carbon-delta", dependencies=[Depends(require_ee)])
+@router.post("/analyze/carbon-delta", dependencies=[Depends(get_current_app_viewer), Depends(require_ee)])
 def analyze_carbon_delta(data: dict = Body(...), db: Session = Depends(get_db)):
     if "aoi" not in data:
         raise HTTPException(status_code=400, detail="Missing required field: aoi")

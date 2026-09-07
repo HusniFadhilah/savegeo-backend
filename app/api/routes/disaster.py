@@ -37,7 +37,7 @@ def get_bmkg_alerts(limit: int = 30, viewer=Depends(get_current_disaster_viewer)
         raise HTTPException(status_code=e.status_code, detail=str(e))
 
 
-@router.post("/dem-slope", dependencies=[Depends(require_ee), Depends(get_current_disaster_viewer)])
+@router.post("/dem-slope", dependencies=[Depends(get_current_disaster_viewer), Depends(require_ee)])
 async def get_disaster_dem_slope(request: Request):
     data = await request.json()
     try:

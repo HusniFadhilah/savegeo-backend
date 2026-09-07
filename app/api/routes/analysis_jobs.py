@@ -22,6 +22,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 
 from app.api.deps import require_ee
 from app.core.config import get_settings
+from app.core.security import get_current_app_viewer
 from app.db.session import SessionLocal
 from app.services import carbon_service, crop_monitoring_service, landcover_service, vegetation_service
 from app.services.gee_common import AnalysisError
@@ -142,7 +143,7 @@ def _run_job(job_id: str, job_type: str, payload: dict[str, Any]) -> None:
         db.close()
 
 
-@router.post("/analysis-jobs", dependencies=[Depends(require_ee)])
+@router.post("/analysis-jobs", dependencies=[Depends(get_current_app_viewer), Depends(require_ee)])
 def create_analysis_job(data: dict[str, Any] = Body(...)):
     job_type = str(data.get("type") or "")
     payload = data.get("payload")
@@ -157,7 +158,7 @@ def create_analysis_job(data: dict[str, Any] = Body(...)):
     return {"job_id": job_id, "status": "queued", "status_url": f"/analysis-jobs/{job_id}"}
 
 
-@router.get("/analysis-jobs/{job_id}")
+@router.get("/analysis-jobs/{job_id}", dependencies=[Depends(get_current_app_viewer)])
 def get_analysis_job(job_id: str):
     job = _read_job(job_id)
     if job.get("status") == "failed":

@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_ee
+from app.core.security import get_current_app_viewer
 from app.db.session import get_db
 from app.registries.satellite_provider_registry import DEFAULT_SATELLITE
 from app.registries.vegetation_index_registry import get_catalog_payload
@@ -46,7 +47,7 @@ def vegetation_cloud_mask_techniques():
     return {"techniques": CLOUD_MASK_TECHNIQUE_INFO, "default": DEFAULT_CLOUD_MASK_TECHNIQUE}
 
 
-@router.post("/analyze/vegetation", dependencies=[Depends(require_ee)])
+@router.post("/analyze/vegetation", dependencies=[Depends(get_current_app_viewer), Depends(require_ee)])
 async def analyze_vegetation(request: Request, db: Session = Depends(get_db)):
     data = await request.json()
     try:
@@ -64,7 +65,7 @@ async def analyze_vegetation(request: Request, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/analyze/vegetation/compare", dependencies=[Depends(require_ee)])
+@router.post("/analyze/vegetation/compare", dependencies=[Depends(get_current_app_viewer), Depends(require_ee)])
 async def analyze_vegetation_compare(request: Request, db: Session = Depends(get_db)):
     data = await request.json()
     try:
@@ -82,7 +83,7 @@ async def analyze_vegetation_compare(request: Request, db: Session = Depends(get
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/analyze/vegetation/change-hotspots", dependencies=[Depends(require_ee)])
+@router.post("/analyze/vegetation/change-hotspots", dependencies=[Depends(get_current_app_viewer), Depends(require_ee)])
 async def analyze_vegetation_change_hotspots(request: Request, db: Session = Depends(get_db)):
     """Ranked, vectorized vegetation-index change polygons (P0 hotspot detection,
     SaveGeo Assistant's `find_hotspots(metric="vegetation_change")`) - see

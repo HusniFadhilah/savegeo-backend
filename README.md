@@ -99,7 +99,6 @@ GitHub Actions juga menjalankan Gitleaks dan Trivy sebelum deployment.
 ## Deployment
 
 - `.github/workflows/deploy-production.yml`: server production.
-- `.github/workflows/deploy-doltinuku.yml`: server Doltinuku.
 - `.github/workflows/ci.yml`: validasi Pull Request.
 - `.github/workflows/code-review.yml`: Alibaba OpenCodeReview.
 

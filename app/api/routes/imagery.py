@@ -14,6 +14,7 @@ from fastapi.responses import RedirectResponse
 from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import require_ee
+from app.core.security import get_current_app_viewer
 from app.services import copernicus_geosave_service
 from app.services import imagery_service
 from app.services import samgeo_service
@@ -58,7 +59,7 @@ def imagery_nasa_gibs_layers():
     return {"layers": imagery_service.nasa_gibs_layers()}
 
 
-@router.post("/imagery/raster-toolbox")
+@router.post("/imagery/raster-toolbox", dependencies=[Depends(get_current_app_viewer)])
 async def imagery_raster_toolbox(request: Request):
     try:
         return await run_in_threadpool(imagery_service.raster_toolbox, await request.json())
@@ -89,7 +90,7 @@ def _requires_ee(data: dict) -> bool:
     } and not _is_copernicus_request(data)
 
 
-@router.post("/imagery/scenes")
+@router.post("/imagery/scenes", dependencies=[Depends(get_current_app_viewer)])
 async def imagery_scenes(request: Request):
     data = await request.json()
     try:
@@ -107,7 +108,7 @@ async def imagery_scenes(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/imagery/scene-tile")
+@router.post("/imagery/scene-tile", dependencies=[Depends(get_current_app_viewer)])
 async def imagery_scene_tile(request: Request):
     data = await request.json()
     try:
@@ -125,7 +126,7 @@ async def imagery_scene_tile(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/imagery/dem-tile", dependencies=[Depends(require_ee)])
+@router.post("/imagery/dem-tile", dependencies=[Depends(get_current_app_viewer), Depends(require_ee)])
 async def imagery_dem_tile(request: Request):
     data = await request.json()
     try:

@@ -195,6 +195,21 @@ def get_current_disaster_viewer(
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token type")
 
 
+def get_current_app_viewer(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+    token: str | None = Query(default=None, description="JWT untuk permintaan tile atau client geospasial"),
+    db: Session = Depends(get_db),
+) -> User | AdminUser:
+    """Authentication dependency for the protected SaveGeo application.
+
+    Public users and active admins may use the analysis workspace, while the
+    admin-only routes continue to depend on ``get_current_admin``. Keeping
+    this as a named dependency makes the access policy explicit instead of
+    relying only on the SPA route guard.
+    """
+    return get_current_disaster_viewer(credentials=credentials, token=token, db=db)
+
+
 def require_permission(code: str):
     """Additive permission gate, layered on top of `get_current_admin`.
 

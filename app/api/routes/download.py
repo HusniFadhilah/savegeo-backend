@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_ee
+from app.core.security import get_current_app_viewer
 from app.db.session import get_db
 from app.services import download_service
 from app.services.gee_common import AnalysisError
@@ -16,7 +17,7 @@ router = APIRouter(prefix="/download", tags=["download"])
 logger = logging.getLogger(__name__)
 
 
-@router.post("/geotiff", dependencies=[Depends(require_ee)])
+@router.post("/geotiff", dependencies=[Depends(get_current_app_viewer), Depends(require_ee)])
 async def download_geotiff(request: Request, db: Session = Depends(get_db)):
     data = await request.json()
     try:
