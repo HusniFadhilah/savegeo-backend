@@ -252,6 +252,8 @@ jobs:
               ProxyTimeout 650
               ProxyPass /api/ http://127.0.0.1:8086/api/ connectiontimeout=15 timeout=650 retry=0
               ProxyPassReverse /api/ http://127.0.0.1:8086/api/
+              ProxyPass /disaster-thumbnails/ http://127.0.0.1:8086/disaster-thumbnails/ connectiontimeout=15 timeout=650 retry=0
+              ProxyPassReverse /disaster-thumbnails/ http://127.0.0.1:8086/disaster-thumbnails/
 
               <Directory $FRONTEND_REMOTE_DIR/dist>
                   Options -Indexes +FollowSymLinks
@@ -311,6 +313,8 @@ jobs:
               ProxyTimeout 650
               ProxyPass /api/ http://127.0.0.1:8086/api/ connectiontimeout=15 timeout=650 retry=0
               ProxyPassReverse /api/ http://127.0.0.1:8086/api/
+              ProxyPass /disaster-thumbnails/ http://127.0.0.1:8086/disaster-thumbnails/ connectiontimeout=15 timeout=650 retry=0
+              ProxyPassReverse /disaster-thumbnails/ http://127.0.0.1:8086/disaster-thumbnails/
 
               <Directory $FRONTEND_REMOTE_DIR/dist>
                   Options -Indexes +FollowSymLinks
