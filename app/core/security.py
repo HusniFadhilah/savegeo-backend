@@ -12,7 +12,7 @@ import datetime as dt
 
 import bcrypt
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Query, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
@@ -163,6 +163,7 @@ def get_current_user(
 
 def get_current_disaster_viewer(
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+    token: str | None = Query(default=None, description="JWT untuk permintaan tile Leaflet"),
     db: Session = Depends(get_db),
 ) -> User | AdminUser:
     """Auth gate for read-only Disaster Mapping views.
@@ -173,9 +174,10 @@ def get_current_disaster_viewer(
     user tokens valid for admin routes; it is scoped only to disaster viewer
     endpoints that explicitly depend on this function.
     """
-    if credentials is None:
+    raw_token = credentials.credentials if credentials is not None else token
+    if raw_token is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
-    payload = decode_access_token(credentials.credentials)
+    payload = decode_access_token(raw_token)
     token_type = payload.get("typ")
 
     if token_type == "user":

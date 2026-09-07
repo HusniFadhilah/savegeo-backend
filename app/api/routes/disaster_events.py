@@ -24,6 +24,17 @@ from app.services.disaster_cross_layer_service import get_available_cross_layer_
 router = APIRouter(prefix="/disasters", tags=["disasters"])
 
 
+def _viewer_imagery_dict(img) -> dict:
+    data = img.to_dict()
+    # Rows created before the public local-raster route existed still contain
+    # the admin-only preview URL. Normalize them at the published boundary so
+    # existing BlackSky/GeoTIFF events start working without a data migration.
+    old_prefix = "/api/admin/disasters/imagery-tiles/"
+    if data.get("source_kind") == "local_upload" and str(data.get("preview_tile_url") or "").startswith(old_prefix):
+        data["preview_tile_url"] = data["preview_tile_url"].replace(old_prefix, "/api/disasters/imagery-tiles/", 1)
+    return data
+
+
 def _get_published_event(db: Session, event_id: int) -> DisasterEvent:
     event = disaster_repo.get_event(db, event_id)
     if event is None or event.status != "published":
@@ -102,12 +113,12 @@ def get_disaster(event_id: int, viewer=Depends(get_current_disaster_viewer), db:
         "event": event.to_dict(),
         "aoi": aoi.to_dict() if aoi else None,
         "imagery": {
-            "pre": [img.to_dict() for img in pre_imagery],
-            "post": [img.to_dict() for img in post_imagery],
+            "pre": [_viewer_imagery_dict(img) for img in pre_imagery],
+            "post": [_viewer_imagery_dict(img) for img in post_imagery],
         },
         "primary_imagery": {
-            "pre": primary_pre.to_dict() if primary_pre else None,
-            "post": primary_post.to_dict() if primary_post else None,
+            "pre": _viewer_imagery_dict(primary_pre) if primary_pre else None,
+            "post": _viewer_imagery_dict(primary_post) if primary_post else None,
         },
     }
 
@@ -125,8 +136,8 @@ def get_disaster_layers(event_id: int, viewer=Depends(get_current_disaster_viewe
     primary_post = disaster_repo.get_primary_imagery(db, event_id, "post")
     return {
         "satellite": {
-            "pre_tile_url": primary_pre.preview_tile_url if primary_pre else None,
-            "post_tile_url": primary_post.preview_tile_url if primary_post else None,
+            "pre_tile_url": _viewer_imagery_dict(primary_pre).get("preview_tile_url") if primary_pre else None,
+            "post_tile_url": _viewer_imagery_dict(primary_post).get("preview_tile_url") if primary_post else None,
         },
         "analyses": _build_analyses(db, event_id),
     }

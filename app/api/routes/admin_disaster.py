@@ -430,7 +430,10 @@ async def admin_upload_imagery(
     img = disaster_repo.set_preview_tile_url(
         db,
         img.id,
-        f"/api/admin/disasters/imagery-tiles/{img.id}/{{z}}/{{x}}/{{y}}.png",
+        # The admin route is only for draft previews. Published user views
+        # must use the public disaster tile route, otherwise the post layer
+        # silently returns 401 for ordinary disaster viewers.
+        f"/api/disasters/imagery-tiles/{img.id}/{{z}}/{{x}}/{{y}}.png",
     )
     audit_service.log_audit(
         db,

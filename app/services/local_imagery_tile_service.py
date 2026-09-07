@@ -83,8 +83,6 @@ def render_tile(local_file_path: str, z: int, x: int, y: int) -> bytes | None:
     overlap the raster's coverage at all (caller should 404)."""
     try:
         with Reader(local_file_path) as reader:
-            if not reader.tile_exists(x, y, z):
-                return None
             img = reader.tile(x, y, z, tilesize=TILE_SIZE)
     except (TileOutsideBounds, PointOutsideBounds):
         return None
