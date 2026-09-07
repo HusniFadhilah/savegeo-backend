@@ -1,0 +1,41 @@
+name: AI Code Review
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  opencode-review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check OpenCodeReview configuration
+        id: config
+        env:
+          OCR_LLM_URL: ${{ secrets.OCR_LLM_URL }}
+          OCR_LLM_AUTH_TOKEN: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
+          OCR_LLM_MODEL: ${{ vars.OCR_LLM_MODEL }}
+        run: |
+          if [ -n "$OCR_LLM_URL" ] && [ -n "$OCR_LLM_AUTH_TOKEN" ] && [ -n "$OCR_LLM_MODEL" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "OpenCodeReview skipped: configure OCR_LLM_URL, OCR_LLM_AUTH_TOKEN, and OCR_LLM_MODEL."
+          fi
+
+      - name: Review Pull Request with Alibaba OpenCodeReview
+        if: steps.config.outputs.enabled == 'true' && github.event_name == 'pull_request_target'
+        uses: alibaba/open-code-review@04284b5dc19e0f52528ca466a767e4a2c100e5f5 # main
+        with:
+          llm_url: ${{ secrets.OCR_LLM_URL }}
+          llm_auth_token: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
+          llm_model: ${{ vars.OCR_LLM_MODEL }}
+          llm_use_anthropic: ${{ vars.OCR_LLM_USE_ANTHROPIC || 'false' }}
+          ocr_version: '1.9.10'
+          language: Indonesian
+          sticky_summary: 'true'
