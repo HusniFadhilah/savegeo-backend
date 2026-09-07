@@ -2,6 +2,8 @@
 
 Backend API SAVEGEO berbasis FastAPI, SQLAlchemy, PostgreSQL, Google Earth Engine, dan layanan analisis geospasial.
 
+Runbook deployment dan operasi tersedia di [OPERATIONS.md](OPERATIONS.md).
+
 ## Prasyarat
 
 - Python 3.11
