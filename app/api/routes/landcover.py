@@ -69,6 +69,20 @@ async def analyze_landcover_change_map(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/analyze/landcover-identify", dependencies=[Depends(get_current_app_viewer), Depends(require_ee)])
+async def identify_landcover(request: Request):
+    data = await request.json()
+    try:
+        return landcover_service.identify_landcover_point(data)
+    except AnalysisError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e))
+    except ee.EEException as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Land cover identify error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/analyze/landcover-hotspots", dependencies=[Depends(get_current_app_viewer), Depends(require_ee)])
 async def analyze_landcover_hotspots(request: Request):
     """Ranked, vectorized pixel-change polygons (P0 hotspot detection) - see

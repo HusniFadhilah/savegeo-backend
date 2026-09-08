@@ -1023,6 +1023,89 @@ def analyze_landcover_change_map(data: dict) -> dict:
 _TRANSITION_CODE_MULTIPLIER = 1000
 
 
+def identify_landcover_point(data: dict) -> dict:
+    """Identify the class at a clicked point and its share of the AOI."""
+    dataset = data.get("dataset")
+    if dataset not in LAND_COVER_LEGENDS:
+        raise AnalysisError(f"Dataset land cover tidak didukung: {dataset}", 400)
+
+    try:
+        latitude = float(data["latitude"])
+        longitude = float(data["longitude"])
+        year = int(data["year"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise AnalysisError("Koordinat dan tahun wajib diisi untuk identifikasi peta.", 400) from exc
+
+    if not -90 <= latitude <= 90 or not -180 <= longitude <= 180:
+        raise AnalysisError("Koordinat titik peta tidak valid.", 400)
+
+    settings = get_settings()
+    lc_scale = max(
+        int(data.get("scale", LAND_COVER_NATIVE_SCALE.get(dataset, settings.default_landcover_scale))),
+        LAND_COVER_NATIVE_SCALE.get(dataset, int(data.get("scale", settings.default_landcover_scale))),
+    )
+    aoi = create_geometry_from_payload(data["aoi"]) if data.get("aoi") else None
+    point = ee.Geometry.Point([longitude, latitude])
+    image_aoi = aoi or point.buffer(lc_scale)
+    threshold = data.get("dw_probability_threshold")
+
+    explicit_start = data.get("start_date")
+    explicit_end = data.get("end_date")
+    if explicit_start and explicit_end:
+        image, metadata = get_landcover_image(
+            dataset,
+            year,
+            image_aoi,
+            start_date=_reyear_date(explicit_start, year),
+            end_date=_reyear_date(explicit_end, year),
+            dw_probability_threshold=threshold,
+        )
+    else:
+        image, metadata = get_landcover_image(
+            dataset,
+            year,
+            image_aoi,
+            int(data.get("start_month", 1)),
+            int(data.get("end_month", 12)),
+            dw_probability_threshold=threshold,
+        )
+
+    sampled = image.select(0).reduceRegion(
+        reducer=ee.Reducer.first(),
+        geometry=point,
+        scale=lc_scale,
+        maxPixels=1,
+    ).getInfo() or {}
+    raw_value = next(iter(sampled.values()), None)
+
+    distribution = None
+    if aoi:
+        summary = summarize_landcover_classes(dataset, image, aoi, lc_scale)
+        if summary:
+            classes, total_area_ha, _ = summary
+            distribution = {"classes": classes, "total_area_ha": total_area_ha}
+
+    class_value = str(int(float(raw_value))) if raw_value is not None else None
+    class_info = LAND_COVER_LEGENDS[dataset].get(class_value) if class_value else None
+    label = class_info["label"] if class_info else None
+    stats = distribution["classes"].get(label) if distribution and label else None
+
+    return {
+        "dataset": dataset,
+        "dataset_name": LAND_COVER_DATASET_OPTIONS.get(dataset, {}).get("name", dataset),
+        "year": year,
+        "effective_year": metadata.get("year"),
+        "latitude": latitude,
+        "longitude": longitude,
+        "class_value": int(class_value) if class_value is not None else None,
+        "class_name": label,
+        "color": class_info["color"] if class_info else None,
+        "area_ha": stats.get("area") if stats else None,
+        "percentage": stats.get("percentage") if stats else None,
+        "total_area_ha": distribution["total_area_ha"] if distribution else None,
+    }
+
+
 def analyze_landcover_hotspots(data: dict) -> dict:
     """Vectorize the from_image.neq(to_image) pixel-change mask (same mask
     analyze_landcover_change_map already computes as a raster) into individual

@@ -1,5 +1,6 @@
 import io
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import httpx
@@ -12,6 +13,28 @@ from app.services import samgeo_service
 
 
 class StacTests(unittest.TestCase):
+    def test_big_ctsrt_lists_intersecting_mosaics_and_builds_tile_url(self):
+        service_meta = {
+            "fullExtent": {"xmin": 114.4, "ymin": -8.9, "xmax": 115.8, "ymax": -8.0},
+            "pixelSizeX": 0.0000045,
+            "description": "CTSRT Bali 2022",
+        }
+        with patch.object(service, "_big_ctsrt_service_names", return_value=("CTSRT_2022_BALI", "CTSRT_2021_JAWA_BARAT")), \
+             patch.object(service, "_big_ctsrt_service_meta", return_value=service_meta):
+            result = service._list_big_ctsrt_scenes({
+                "aoi": {"west": 114.5, "south": -8.8, "east": 115.2, "north": -8.2},
+                "start_date": "2022-01-01",
+                "end_date": "2022-12-31",
+            })
+
+        self.assertEqual([scene["id"] for scene in result["scenes"]], ["big-ctsrt:CTSRT_2022_BALI"])
+        self.assertAlmostEqual(result["scenes"][0]["resolution_m"], 0.5, places=1)
+        tile = service.get_scene_tile(
+            {"satellite": "big_ctsrt", "scene_id": "big-ctsrt:CTSRT_2022_BALI"},
+            SimpleNamespace(base_url="https://api.example/"),
+        )
+        self.assertIn("big-ctsrt-tiles/{z}/{x}/{y}.png?service=CTSRT_2022_BALI", tile["tile_url"])
+
     def test_get_fallback_pagination_and_cloud_filter(self):
         calls = []
 

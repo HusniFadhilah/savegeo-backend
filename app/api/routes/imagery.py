@@ -83,6 +83,7 @@ def _is_copernicus_request(data: dict) -> bool:
 
 def _requires_ee(data: dict) -> bool:
     return data.get("satellite") not in {
+        "big_ctsrt",
         "openaerialmap",
         "vantor_open_data",
         "planet_open_data",
@@ -212,6 +213,18 @@ def imagery_stac_cog_tile(
         content=png_bytes,
         media_type="image/png",
         headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+@router.get("/imagery/big-ctsrt-tiles/{z}/{x}/{y}.png")
+def imagery_big_ctsrt_tile(z: int, x: int, y: int, service: str):
+    png_bytes = imagery_service.render_big_ctsrt_tile(z, x, y, service)
+    if png_bytes is None:
+        raise HTTPException(status_code=404, detail="Tile BIG/CTSRT tidak tersedia")
+    return Response(
+        content=png_bytes,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=3600"},
     )
 
 

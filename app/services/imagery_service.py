@@ -27,6 +27,7 @@ metadata, not something this endpoint filters on beyond the optional
 from __future__ import annotations
 
 import logging
+import re
 import socket
 from ipaddress import ip_address
 from functools import lru_cache
@@ -70,6 +71,11 @@ _OPENAERIALMAP_PROVIDER_KEY = "openaerialmap"
 _MAXAR_OPEN_DATA_PROVIDER_KEY = "vantor_open_data"
 _PLANET_OPEN_DATA_PROVIDER_KEY = "planet_open_data"
 _GENERIC_STAC_PROVIDER_KEY = "stac_catalog"
+_BIG_CTSRT_PROVIDER_KEY = "big_ctsrt"
+_BIG_CTSRT_INDEX_MAP_URL = "https://geoservices.big.go.id/rbi/rest/services/INDEKS/CTSRT/MapServer"
+_BIG_CTSRT_IMAGERY_FOLDER_URL = "https://geoservices.big.go.id/raster/rest/services/IMAGERY"
+_BIG_CTSRT_IMAGERY_ROOT_URL = "https://geoservices.big.go.id/raster/rest/services/IMAGERY"
+_BIG_CTSRT_SERVICE_PATTERN = re.compile(r"^CTSRT_(?:19|20)\d{2}_[A-Z0-9_]+$")
 _OAM_STAC_SEARCH_URL = "https://api.imagery.hotosm.org/stac/search"
 _OAM_TILE_URL_TEMPLATE = (
     "https://api.imagery.hotosm.org/raster/collections/openaerialmap/items/"
@@ -669,7 +675,150 @@ def _asset_resolution_m(asset: dict[str, Any]) -> float | None:
     return None
 
 
+@lru_cache(maxsize=1)
+def _big_ctsrt_service_names() -> tuple[str, ...]:
+    """Discover the currently published CTSRT ImageServer mosaics."""
+    try:
+        with httpx.Client(timeout=45, follow_redirects=True) as client:
+            response = client.get(_BIG_CTSRT_IMAGERY_FOLDER_URL)
+            response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise AnalysisError(f"Gagal membaca katalog service BIG/CTSRT: {exc}", 502) from exc
+
+    names = {
+        match.group(1)
+        for match in re.finditer(r"/IMAGERY/(CTSRT_[A-Za-z0-9_]+)/ImageServer", response.text)
+        if _BIG_CTSRT_SERVICE_PATTERN.fullmatch(match.group(1).upper())
+    }
+    if not names:
+        raise AnalysisError("Katalog service BIG/CTSRT tidak mengembalikan mosaic CTSRT", 502)
+    return tuple(sorted(names))
+
+
+@lru_cache(maxsize=256)
+def _big_ctsrt_service_meta(service_name: str) -> dict[str, Any]:
+    if not _BIG_CTSRT_SERVICE_PATTERN.fullmatch(service_name.upper()):
+        raise AnalysisError("Nama service BIG/CTSRT tidak valid", 400)
+    url = f"{_BIG_CTSRT_IMAGERY_ROOT_URL}/{quote(service_name, safe='')}/ImageServer"
+    try:
+        with httpx.Client(timeout=30, follow_redirects=True) as client:
+            response = client.get(url, params={"f": "json"})
+            response.raise_for_status()
+            payload = response.json()
+    except httpx.HTTPError as exc:
+        raise AnalysisError(f"Gagal membaca metadata {service_name}: {exc}", 502) from exc
+    except ValueError as exc:
+        raise AnalysisError(f"Metadata {service_name} tidak valid", 502) from exc
+    if payload.get("error"):
+        raise AnalysisError(f"BIG/CTSRT service error: {payload['error']}", 502)
+    return payload
+
+
+def _list_big_ctsrt_scenes(data: dict) -> dict:
+    """List actual BIG CTSRT ImageServer mosaics intersecting the AOI/year."""
+    if not data.get("aoi"):
+        raise AnalysisError("aoi is required", 400)
+    if not data.get("start_date") or not data.get("end_date"):
+        raise AnalysisError("start_date and end_date are required", 400)
+
+    meta = get_imagery_provider_meta(_BIG_CTSRT_PROVIDER_KEY)
+    bbox = _aoi_payload_to_bbox(data["aoi"])
+    try:
+        start_year = int(str(data["start_date"])[:4])
+        end_year = int(str(data["end_date"])[:4])
+    except (TypeError, ValueError) as exc:
+        raise AnalysisError("Rentang tanggal tidak valid untuk BIG/CTSRT", 400) from exc
+
+    scenes = []
+    for service_name in _big_ctsrt_service_names():
+        year_match = re.match(r"CTSRT_(\d{4})_", service_name, re.IGNORECASE)
+        year = int(year_match.group(1)) if year_match else None
+        if year is None or not (start_year <= year <= end_year):
+            continue
+
+        service_meta = _big_ctsrt_service_meta(service_name)
+        extent = service_meta.get("fullExtent") or service_meta.get("extent") or {}
+        bbox_value = [extent.get("xmin"), extent.get("ymin"), extent.get("xmax"), extent.get("ymax")]
+        if not all(isinstance(value, (int, float)) for value in bbox_value):
+            continue
+        if not _bbox_intersects(bbox_value, bbox):
+            continue
+
+        service_url = f"{_BIG_CTSRT_IMAGERY_ROOT_URL}/{quote(service_name, safe='')}/ImageServer"
+        pixel_size = service_meta.get("pixelSizeX") or service_meta.get("pixelSizeY")
+        resolution_m = float(pixel_size) * 111_320 if isinstance(pixel_size, (int, float)) else 0.5
+        title = service_meta.get("description") or service_name.replace("_", " ")
+        scenes.append(
+            {
+                "id": f"big-ctsrt:{service_name}",
+                "acquired_at": f"{year:04d}-01-01T00:00:00Z",
+                "cloud_cover_pct": None,
+                "bbox": bbox_value,
+                "resolution_m": round(max(resolution_m, 0.1), 2),
+                "platform": "CTSRT",
+                "producer": "BIG",
+                "title": str(title),
+                "download_url": service_url,
+            }
+        )
+        if len(scenes) >= _MAX_SCENES:
+            break
+
+    scenes.sort(key=lambda scene: scene.get("acquired_at") or "", reverse=True)
+    return {
+        "scenes": scenes,
+        "count": len(scenes),
+        "satellite": meta,
+        "truncated": len(scenes) >= _MAX_SCENES,
+    }
+
+
+def _big_ctsrt_tile_bbox(z: int, x: int, y: int) -> str:
+    origin = 20037508.342789244
+    tile_size = (origin * 2) / (256 * (2 ** z))
+    xmin = -origin + x * 256 * tile_size
+    xmax = xmin + 256 * tile_size
+    ymax = origin - y * 256 * tile_size
+    ymin = ymax - 256 * tile_size
+    return f"{xmin},{ymin},{xmax},{ymax}"
+
+
+def render_big_ctsrt_tile(z: int, x: int, y: int, service_name: str | None = None) -> bytes | None:
+    """Render one XYZ tile from a BIG CTSRT ImageServer mosaic."""
+    if service_name:
+        if not _BIG_CTSRT_SERVICE_PATTERN.fullmatch(service_name.upper()):
+            raise AnalysisError("Nama service BIG/CTSRT tidak valid", 400)
+        export_url = f"{_BIG_CTSRT_IMAGERY_ROOT_URL}/{quote(service_name, safe='')}/ImageServer/exportImage"
+    else:
+        export_url = f"{_BIG_CTSRT_INDEX_MAP_URL}/export"
+    params = {
+        "bbox": _big_ctsrt_tile_bbox(z, x, y),
+        "bboxSR": "3857",
+        "size": "256,256",
+        "imageSR": "3857",
+        "format": "png32",
+        "transparent": "true",
+        "f": "image",
+    }
+    if service_name:
+        params["renderingRule"] = '{"rasterFunction":"Stretch","rasterFunctionArguments":{"StretchType":3,"Min":0,"Max":3000,"Gamma":1}}'
+    else:
+        params["layers"] = "show:0"
+    try:
+        with httpx.Client(timeout=20, follow_redirects=True) as client:
+            response = client.get(export_url, params=params)
+            response.raise_for_status()
+            content_type = response.headers.get("content-type", "")
+            return response.content if content_type.startswith("image/") else None
+    except httpx.HTTPError as exc:
+        logger.warning("BIG/CTSRT tile request failed z=%s x=%s y=%s: %s", z, x, y, exc)
+        return None
+
+
 def list_scenes(data: dict, request=None) -> dict:
+    if data.get("satellite") == _BIG_CTSRT_PROVIDER_KEY:
+        return _list_big_ctsrt_scenes(data)
+
     if data.get("satellite") == _OPENAERIALMAP_PROVIDER_KEY:
         return _list_openaerialmap_scenes(data)
 
@@ -820,6 +969,23 @@ def _apply_super_resolution(img: ee.Image, meta: dict, mode: str | None) -> tupl
 
 
 def get_scene_tile(data: dict, request=None) -> dict:
+    if data.get("satellite") == _BIG_CTSRT_PROVIDER_KEY:
+        if not data.get("scene_id"):
+            raise AnalysisError("scene_id is required", 400)
+        if request is None:
+            raise AnalysisError("request context is required for BIG/CTSRT tile URLs", 500)
+        meta = get_imagery_provider_meta(_BIG_CTSRT_PROVIDER_KEY)
+        service_name = str(data["scene_id"]).removeprefix("big-ctsrt:")
+        if not _BIG_CTSRT_SERVICE_PATTERN.fullmatch(service_name.upper()):
+            raise AnalysisError("Scene BIG/CTSRT tidak valid", 400)
+        base = str(request.base_url).rstrip("/")
+        return {
+            "scene_id": data["scene_id"],
+            "tile_url": f"{base}/api/imagery/big-ctsrt-tiles/{{z}}/{{x}}/{{y}}.png?service={quote(service_name, safe='')}",
+            "satellite": meta,
+            "super_resolution": None,
+        }
+
     if data.get("satellite") == _OPENAERIALMAP_PROVIDER_KEY:
         if not data.get("scene_id"):
             raise AnalysisError("scene_id is required", 400)

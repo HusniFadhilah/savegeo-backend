@@ -38,6 +38,22 @@ from typing import Any
 _GAS_PALETTE = ["black", "blue", "purple", "cyan", "green", "yellow", "red"]
 
 IMAGERY_PROVIDERS: dict[str, dict[str, Any]] = {
+    "big_ctsrt": {
+        "key": "big_ctsrt",
+        "name": "BIG / CTSRT - Citra Satelit Resolusi Tinggi",
+        "provider": "Badan Informasi Geospasial (BIG)",
+        "group": "BIG / CTSRT",
+        "gee_collection": "",
+        "source_kind": "big_ctsrt",
+        "visualization": "rgb",
+        "color_mode": "natural",
+        "resolution_m": 0.5,
+        "revisit_days": 0,
+        "start_year": 2014,
+        "cloud_property": None,
+        "cloud_mask_techniques": None,
+        "description": "Katalog mosaic Citra Tegak Satelit Resolusi Tinggi (CTSRT) BIG per wilayah/tahun. Citra dirender langsung dari layanan publik ArcGIS ImageServer BIG.",
+    },
     "stac_catalog": {
         "key": "stac_catalog",
         "name": "Generic STAC Catalog Browser",
