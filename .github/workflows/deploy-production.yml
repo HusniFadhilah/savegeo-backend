@@ -55,6 +55,44 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Validate production deployment secrets
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_SSH_PORT: ${{ secrets.DEPLOY_SSH_PORT }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          BACKEND_REMOTE_DIR: ${{ secrets.BACKEND_REMOTE_DIR }}
+          BACKEND_HEALTH_URL: ${{ secrets.BACKEND_HEALTH_URL }}
+          VPN_CONFIG_B64: ${{ secrets.VPN_CONFIG_B64 }}
+          VPN_AUTH_B64: ${{ secrets.VPN_AUTH_B64 }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in \
+            DEPLOY_HOST DEPLOY_SSH_PORT DEPLOY_USER BACKEND_REMOTE_DIR \
+            BACKEND_HEALTH_URL VPN_CONFIG_B64 VPN_AUTH_B64 SSH_KNOWN_HOSTS SSH_PASSWORD; do
+            if [[ -z "${!name:-}" ]]; then
+              missing+=("$name")
+            fi
+          done
+
+          if (( ${#missing[@]} > 0 )); then
+            printf 'Missing production GitHub Secrets: %s\n' "${missing[*]}" >&2
+            exit 1
+          fi
+
+          if ! [[ "$DEPLOY_SSH_PORT" =~ ^[0-9]+$ ]] || (( DEPLOY_SSH_PORT < 1 || DEPLOY_SSH_PORT > 65535 )); then
+            echo 'DEPLOY_SSH_PORT must be a valid TCP port.' >&2
+            exit 1
+          fi
+
+          printf '%s' "$VPN_CONFIG_B64" | base64 --decode > "$RUNNER_TEMP/vpn-config-check.ovpn"
+          printf '%s' "$VPN_AUTH_B64" | base64 --decode > "$RUNNER_TEMP/vpn-auth-check.txt"
+          test -s "$RUNNER_TEMP/vpn-config-check.ovpn"
+          test -s "$RUNNER_TEMP/vpn-auth-check.txt"
+          rm -f "$RUNNER_TEMP/vpn-config-check.ovpn" "$RUNNER_TEMP/vpn-auth-check.txt"
+
       - name: Install VPN and deployment tools
         run: |
           sudo apt-get update
