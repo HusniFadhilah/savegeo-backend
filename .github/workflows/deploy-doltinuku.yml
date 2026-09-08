@@ -199,6 +199,9 @@ jobs:
           .venv/bin/python -m pip install --upgrade pip
           .venv/bin/python -m pip install -e .
           .venv/bin/alembic upgrade head
+          # Keep model files already stored outside Git synchronized with the
+          # uploaded_models registry after every backend deployment.
+          .venv/bin/python -m scripts.import_legacy_models "$BACKEND_REMOTE_DIR/var/saved_models"
 
           if ! systemctl cat savegeo-backend.service >/dev/null 2>&1; then
             cat >/etc/systemd/system/savegeo-backend.service <<SERVICE
