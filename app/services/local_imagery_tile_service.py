@@ -31,9 +31,11 @@ from __future__ import annotations
 import logging
 import os
 from functools import lru_cache
+from pathlib import Path
 
 import rasterio
 import rasterio.shutil
+from app.core.config import get_settings
 from rio_tiler.errors import PointOutsideBounds, TileOutsideBounds
 from rio_tiler.io import Reader
 
@@ -41,6 +43,33 @@ logger = logging.getLogger(__name__)
 
 TILE_SIZE = 256
 _STRETCH_PERCENTILES = [2, 98]
+
+
+def resolve_local_raster_path(stored_path: str) -> str:
+    """Resolve a DB-stored raster path across Windows/local and Linux/prod.
+
+    Older rows contain absolute Windows paths, while production stores the
+    same artifacts under the mounted ``var/disaster_rasters`` directory.
+    Preserve the relative suffix after ``disaster_rasters`` when the original
+    path is unavailable.
+    """
+    original = Path(stored_path)
+    if original.exists():
+        return str(original)
+
+    normalized = stored_path.replace("\\", "/")
+    marker = "/disaster_rasters/"
+    if marker in normalized:
+        relative = normalized.split(marker, 1)[1]
+        candidate = get_settings().disaster_raster_path / Path(relative)
+        if candidate.is_file():
+            return str(candidate)
+
+    candidate = get_settings().disaster_raster_path / Path(normalized).name
+    if candidate.is_file():
+        return str(candidate)
+
+    raise FileNotFoundError(f"Local raster tidak ditemukan: {stored_path}")
 
 
 def ensure_cog(src_path: str, dst_path: str, overview_resampling: str = "average") -> None:
@@ -81,15 +110,16 @@ def _stretch_bounds(path: str) -> tuple[tuple[float, float], ...]:
 def render_tile(local_file_path: str, z: int, x: int, y: int) -> bytes | None:
     """Returns PNG bytes for one XYZ tile, or None if the tile doesn't
     overlap the raster's coverage at all (caller should 404)."""
+    resolved_path = resolve_local_raster_path(local_file_path)
     try:
-        with Reader(local_file_path) as reader:
+        with Reader(resolved_path) as reader:
             img = reader.tile(x, y, z, tilesize=TILE_SIZE)
     except (TileOutsideBounds, PointOutsideBounds):
         return None
     except Exception:
-        logger.exception(f"render_tile: failed for '{local_file_path}' z={z} x={x} y={y}")
+        logger.exception(f"render_tile: failed for '{resolved_path}' z={z} x={x} y={y}")
         return None
 
-    in_range = _stretch_bounds(local_file_path)[: img.data.shape[0]]
+    in_range = _stretch_bounds(resolved_path)[: img.data.shape[0]]
     img.rescale(in_range=in_range)
     return img.render(img_format="PNG")

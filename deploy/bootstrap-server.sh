@@ -15,6 +15,8 @@ sudo usermod -aG docker ubuntu
 mkdir -p \
   "$BACKEND_DIR/var/uploads" \
   "$BACKEND_DIR/var/saved_models" \
+  "$BACKEND_DIR/var/disaster_rasters" \
+  "$BACKEND_DIR/var/samgeo" \
   "$BACKEND_DIR/var/gee-credentials" \
   "$BACKEND_DIR/var/exports" \
   "$FRONTEND_DIR/dist"

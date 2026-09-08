@@ -45,6 +45,8 @@ services:
     volumes:
       - ./var/uploads:/app/var/uploads
       - ./var/saved_models:/app/var/saved_models
+      - ./var/disaster_rasters:/app/var/disaster_rasters
+      - ./var/samgeo:/app/var/samgeo
       - ./var/gee-credentials:/app/var/gee-credentials
 
 volumes:

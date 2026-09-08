@@ -150,7 +150,7 @@ jobs:
             set -euo pipefail
             cd "$BACKEND_REMOTE_DIR"
             test -s .env
-            mkdir -p var/exports var/uploads var/saved_models var/gee-credentials
+            mkdir -p var/exports var/uploads var/saved_models var/disaster_rasters var/samgeo var/gee-credentials
             if docker compose -f docker-compose.prod.yml ps --status running db | grep -q db; then
               docker compose -f docker-compose.prod.yml exec -T db \
                 pg_dump -U savegeo -Fc savegeo \

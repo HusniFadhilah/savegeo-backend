@@ -46,8 +46,18 @@ def get_active_model_path(db: Session, model_type: str, model_name: str | None =
     else:
         m = db.query(UploadedModel).filter_by(model_type=model_type, is_default=True, is_active=True).first()
 
-    if m and Path(m.filepath).exists():
-        return str(Path(m.filepath).resolve())
+    if m:
+        registered_path = Path(m.filepath)
+        if registered_path.exists():
+            return str(registered_path.resolve())
+
+        # Database rows created on Windows or by the legacy app can contain
+        # an absolute path that does not exist inside the Linux production
+        # container. The filename is the portable identity of the artifact;
+        # resolve it from the mounted production model directory as a fallback.
+        portable_path = settings.model_path / m.filename
+        if portable_path.exists():
+            return str(portable_path.resolve())
 
     if model_name:
         for ext in ALLOWED_MODEL_EXTS:
