@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import requests
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 
@@ -22,7 +22,10 @@ from app.core.security import (
     create_admin_password_reset_token,
     decode_admin_password_reset_token,
     get_current_admin,
+    ADMIN_SESSION_COOKIE,
+    clear_session_cookie,
     hash_password,
+    set_session_cookie,
     verify_password,
 )
 from app.db.models.admin_user import AdminUser
@@ -61,13 +64,20 @@ RESET_REQUEST_MESSAGE = (
 
 # -- Auth --
 @router.post("/auth/login")
-def login(payload: LoginRequest, db: Session = Depends(get_db)):
+def login(payload: LoginRequest, response: Response, db: Session = Depends(get_db)):
     admin = db.query(AdminUser).filter_by(username=payload.username).first()
     if not admin or not admin.is_active or not verify_password(payload.password, admin.password_hash):
         raise HTTPException(status_code=401, detail="Invalid username or password")
     admin.last_login = datetime.now(UTC)
     db.commit()
-    return {"token": create_access_token(admin), "user": admin.to_dict()}
+    set_session_cookie(response, ADMIN_SESSION_COOKIE, create_access_token(admin))
+    return {"user": admin.to_dict()}
+
+
+@router.post("/auth/logout")
+def logout(response: Response):
+    clear_session_cookie(response, ADMIN_SESSION_COOKIE)
+    return {"message": "Logout berhasil"}
 
 
 @router.get("/auth/me")

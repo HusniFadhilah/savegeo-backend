@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 1440
     password_reset_token_expire_minutes: int = 30
+    # Browser sessions use HttpOnly cookies. Secure is forced for production
+    # below, while local HTTP development remains usable with Secure=false.
+    auth_cookie_secure: bool | None = None
+    auth_cookie_samesite: str = "lax"
 
     # --- Mail / SMTP ---
     mail_mailer: str = "smtp"
@@ -137,7 +141,16 @@ class Settings(BaseSettings):
     def require_production_secrets(self) -> Settings:
         if self.app_env.lower() in {"prod", "production"} and not self.jwt_secret_key:
             raise ValueError("JWT_SECRET_KEY must be set in production")
+        if self.auth_cookie_samesite.lower() not in {"lax", "strict", "none"}:
+            raise ValueError("AUTH_COOKIE_SAMESITE must be lax, strict, or none")
         return self
+
+    @property
+    def session_cookie_secure(self) -> bool:
+        """Use Secure cookies automatically outside local development."""
+        if self.auth_cookie_secure is not None:
+            return self.auth_cookie_secure
+        return self.app_env.lower() in {"prod", "production", "staging"}
 
     @property
     def allowed_origins_list(self) -> list[str]:

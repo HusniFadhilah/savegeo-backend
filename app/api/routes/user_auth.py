@@ -9,16 +9,19 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.security import (
     create_password_reset_token,
     create_user_access_token,
+    USER_SESSION_COOKIE,
+    clear_session_cookie,
     decode_password_reset_token,
     get_current_user,
     hash_password,
+    set_session_cookie,
     verify_password,
 )
 from app.db.models.user import User
@@ -34,7 +37,7 @@ RESET_REQUEST_MESSAGE = (
 
 
 @router.post("/register")
-def register(payload: UserRegisterRequest, db: Session = Depends(get_db)):
+def register(payload: UserRegisterRequest, response: Response, db: Session = Depends(get_db)):
     if len(payload.password) < 8:
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
     if db.query(User).filter_by(username=payload.username).first():
@@ -50,17 +53,25 @@ def register(payload: UserRegisterRequest, db: Session = Depends(get_db)):
     db.add(user)
     db.commit()
     db.refresh(user)
-    return {"token": create_user_access_token(user), "user": user.to_dict()}
+    set_session_cookie(response, USER_SESSION_COOKIE, create_user_access_token(user))
+    return {"user": user.to_dict()}
 
 
 @router.post("/login")
-def login(payload: UserLoginRequest, db: Session = Depends(get_db)):
+def login(payload: UserLoginRequest, response: Response, db: Session = Depends(get_db)):
     user = db.query(User).filter_by(username=payload.username).first()
     if not user or not user.is_active or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid username or password")
     user.last_login = datetime.now(UTC)
     db.commit()
-    return {"token": create_user_access_token(user), "user": user.to_dict()}
+    set_session_cookie(response, USER_SESSION_COOKIE, create_user_access_token(user))
+    return {"user": user.to_dict()}
+
+
+@router.post("/logout")
+def logout(response: Response):
+    clear_session_cookie(response, USER_SESSION_COOKIE)
+    return {"message": "Logout berhasil"}
 
 
 @router.get("/me")

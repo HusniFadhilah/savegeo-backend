@@ -32,9 +32,13 @@ def test_login_and_me(client, temp_admin):
     username, password = temp_admin
     resp = client.post("/api/admin/auth/login", json={"username": username, "password": password})
     assert resp.status_code == 200
-    token = resp.json()["token"]
+    assert "token" not in resp.json()
+    set_cookie = resp.headers.get("set-cookie", "")
+    assert "savegeo_admin_session=" in set_cookie
+    assert "HttpOnly" in set_cookie
+    assert "SameSite=lax" in set_cookie
 
-    me = client.get("/api/admin/auth/me", headers={"Authorization": f"Bearer {token}"})
+    me = client.get("/api/admin/auth/me")
     assert me.status_code == 200
     assert me.json()["username"] == username
 

@@ -12,7 +12,7 @@ import datetime as dt
 
 import bcrypt
 import jwt
-from fastapi import Depends, HTTPException, Query, status
+from fastapi import Depends, HTTPException, Query, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
@@ -22,6 +22,9 @@ from app.db.models.user import User
 from app.db.session import get_db
 
 _bearer_scheme = HTTPBearer(auto_error=False)
+
+ADMIN_SESSION_COOKIE = "savegeo_admin_session"
+USER_SESSION_COOKIE = "savegeo_user_session"
 
 # Hash directly with `bcrypt` rather than via passlib's CryptContext: passlib is
 # unmaintained and its bcrypt backend self-test crashes against bcrypt>=4.1
@@ -124,13 +127,46 @@ def decode_access_token(token: str) -> dict:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token") from exc
 
 
+def set_session_cookie(response: Response, name: str, token: str) -> None:
+    settings = get_settings()
+    response.set_cookie(
+        key=name,
+        value=token,
+        max_age=settings.access_token_expire_minutes * 60,
+        httponly=True,
+        secure=settings.session_cookie_secure,
+        samesite=settings.auth_cookie_samesite.lower(),
+        path="/",
+    )
+
+
+def clear_session_cookie(response: Response, name: str) -> None:
+    response.delete_cookie(key=name, path="/")
+
+
+def _credential_or_cookie(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None,
+    *cookie_names: str,
+) -> str | None:
+    if credentials is not None:
+        return credentials.credentials
+    for cookie_name in cookie_names:
+        value = request.cookies.get(cookie_name)
+        if value:
+            return value
+    return None
+
+
 def get_current_admin(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
     db: Session = Depends(get_db),
 ) -> AdminUser:
-    if credentials is None:
+    raw_token = _credential_or_cookie(request, credentials, ADMIN_SESSION_COOKIE)
+    if raw_token is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
-    payload = decode_access_token(credentials.credentials)
+    payload = decode_access_token(raw_token)
     # Tokens minted before the "typ" claim existed have no "typ" key - treated
     # as admin (legacy). A token explicitly minted as "user" is rejected here
     # so a User account can never reach an admin route with its own token.
@@ -143,6 +179,7 @@ def get_current_admin(
 
 
 def get_current_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
     db: Session = Depends(get_db),
 ) -> User:
@@ -150,9 +187,10 @@ def get_current_user(
     `get_current_admin` exactly but resolves against `users`, and only ever
     accepts a token explicitly minted with `typ: "user"` - an admin token
     (typ "admin" or legacy typ-less) is rejected, not silently upgraded."""
-    if credentials is None:
+    raw_token = _credential_or_cookie(request, credentials, USER_SESSION_COOKIE)
+    if raw_token is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
-    payload = decode_access_token(credentials.credentials)
+    payload = decode_access_token(raw_token)
     if payload.get("typ") != "user":
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token type")
     user = db.get(User, int(payload["sub"]))
@@ -162,6 +200,7 @@ def get_current_user(
 
 
 def get_current_disaster_viewer(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
     token: str | None = Query(default=None, description="JWT untuk permintaan tile Leaflet"),
     db: Session = Depends(get_db),
@@ -174,7 +213,7 @@ def get_current_disaster_viewer(
     user tokens valid for admin routes; it is scoped only to disaster viewer
     endpoints that explicitly depend on this function.
     """
-    raw_token = credentials.credentials if credentials is not None else token
+    raw_token = _credential_or_cookie(request, credentials, USER_SESSION_COOKIE, ADMIN_SESSION_COOKIE) or token
     if raw_token is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
     payload = decode_access_token(raw_token)
@@ -196,6 +235,7 @@ def get_current_disaster_viewer(
 
 
 def get_current_app_viewer(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
     token: str | None = Query(default=None, description="JWT untuk permintaan tile atau client geospasial"),
     db: Session = Depends(get_db),
@@ -207,7 +247,7 @@ def get_current_app_viewer(
     this as a named dependency makes the access policy explicit instead of
     relying only on the SPA route guard.
     """
-    return get_current_disaster_viewer(credentials=credentials, token=token, db=db)
+    return get_current_disaster_viewer(request=request, credentials=credentials, token=token, db=db)
 
 
 def require_permission(code: str):
