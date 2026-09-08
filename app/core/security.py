@@ -9,6 +9,7 @@ format understanding is unaffected — only the signing secret changes source
 from __future__ import annotations
 
 import datetime as dt
+from typing import Literal, cast
 
 import bcrypt
 import jwt
@@ -129,13 +130,17 @@ def decode_access_token(token: str) -> dict:
 
 def set_session_cookie(response: Response, name: str, token: str) -> None:
     settings = get_settings()
+    same_site = cast(
+        Literal["lax", "strict", "none"],
+        settings.auth_cookie_samesite.lower(),
+    )
     response.set_cookie(
         key=name,
         value=token,
         max_age=settings.access_token_expire_minutes * 60,
         httponly=True,
         secure=settings.session_cookie_secure,
-        samesite=settings.auth_cookie_samesite.lower(),
+        samesite=same_site,
         path="/",
     )
 
