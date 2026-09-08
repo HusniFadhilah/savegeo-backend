@@ -430,28 +430,44 @@ def _apply_transform(value: float | None, transform: str) -> float | None:
 
 
 def _geojson_to_bbox(geojson: dict) -> tuple[float, float, float, float]:
-    """Extract (west, south, east, north) bbox from a GeoJSON Polygon/FeatureCollection."""
-    geojson_type = geojson.get("type", "")
-    coords: list[list[float]] = []
+    """Extract ``(west, south, east, north)`` from any GeoJSON object.
 
-    if geojson_type == "Polygon":
-        for ring in geojson.get("coordinates", []):
-            coords.extend(ring)
-    elif geojson_type == "FeatureCollection":
-        for feat in geojson.get("features", []):
-            geom = feat.get("geometry", {})
-            for ring in geom.get("coordinates", [[]]):
-                coords.extend(ring)
-    elif geojson_type == "MultiPolygon":
-        for poly in geojson.get("coordinates", []):
-            for ring in poly:
-                coords.extend(ring)
-    else:
-        coords = geojson.get("coordinates", [[]])[0] if geojson.get("coordinates") else []
+    AOIs from the frontend are commonly wrapped in a ``Feature`` while
+    imported/uploaded AOIs may be a bare geometry or a ``FeatureCollection``.
+    Walk the GeoJSON structure instead of assuming coordinates live on the
+    top-level object; this also keeps multipart and geometry collections safe.
+    """
 
+    def iter_coordinates(obj: dict):
+        obj_type = obj.get("type", "")
+        if obj_type == "Feature":
+            geometry = obj.get("geometry")
+            if isinstance(geometry, dict):
+                yield from iter_coordinates(geometry)
+        elif obj_type == "FeatureCollection":
+            for feature in obj.get("features", []):
+                if isinstance(feature, dict):
+                    yield from iter_coordinates(feature)
+        elif obj_type == "GeometryCollection":
+            for geometry in obj.get("geometries", []):
+                if isinstance(geometry, dict):
+                    yield from iter_coordinates(geometry)
+        else:
+            def walk(value):
+                if isinstance(value, (list, tuple)):
+                    if len(value) >= 2 and all(isinstance(v, (int, float)) for v in value[:2]):
+                        yield value
+                    else:
+                        for child in value:
+                            yield from walk(child)
+
+            yield from walk(obj.get("coordinates", []))
+
+    geojson_type = geojson.get("type", "") if isinstance(geojson, dict) else ""
+    coords = list(iter_coordinates(geojson)) if isinstance(geojson, dict) else []
     if not coords:
         raise ValueError(f"Cannot extract bbox from GeoJSON type '{geojson_type}'")
 
-    lons = [c[0] for c in coords]
-    lats = [c[1] for c in coords]
+    lons = [float(c[0]) for c in coords]
+    lats = [float(c[1]) for c in coords]
     return min(lons), min(lats), max(lons), max(lats)
