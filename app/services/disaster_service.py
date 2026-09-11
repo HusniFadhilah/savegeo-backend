@@ -18,6 +18,8 @@ import ee
 import requests
 
 from app.core.config import get_settings
+from app.providers import stac_provider
+from app.services import imagery_service, samgeo_service
 from app.services.gee_common import (
     AnalysisError,
     _date_or_default,
@@ -123,6 +125,173 @@ def get_bmkg_alerts(limit: int = 30) -> dict:
         "alerts": alerts[:max(1, min(limit, 100))],
         "fetched_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
     }
+
+
+def _get_fire_hotspot_points(aoi, start_date: str, end_date: str) -> dict:
+    """Return a bounded GeoJSON point set from MODIS fire detections.
+
+    MOD14A1 is a 1 km daily fire-mask product. This is deliberately exposed
+    as a supporting signal, not as an incident inventory: one fire can create
+    several detections and every point still needs field verification.
+    """
+    settings = get_settings()
+    try:
+        collection = (
+            ee.ImageCollection("MODIS/061/MOD14A1")
+            .filterBounds(aoi)
+            .filterDate(start_date, end_date)
+        )
+        if collection.size().getInfo() == 0:
+            return {
+                "source": "MODIS/061/MOD14A1 FireMask",
+                "features": [],
+                "count": 0,
+                "note": "Tidak ada scene MODIS pada rentang tanggal tersebut.",
+            }
+
+        # FireMask 7/8/9 are the documented low/nominal/high-confidence
+        # fire classes. Values 4/5/6 mean cloud/non-fire/unknown.
+        fire_mask = collection.select("FireMask").max()
+        fire_confidence = fire_mask.updateMask(fire_mask.gte(7)).rename("fire_confidence")
+        points = (
+            fire_confidence.reduceToVectors(
+                geometry=aoi,
+                scale=1000,
+                geometryType="centroid",
+                eightConnected=False,
+                labelProperty="fire_confidence",
+                reducer=ee.Reducer.countEvery(),
+                maxPixels=int(settings.max_pixels),
+                bestEffort=True,
+            )
+            .limit(250)
+            .getInfo()
+        )
+        features = points.get("features", []) if isinstance(points, dict) else []
+        for index, feature in enumerate(features, start=1):
+            feature.setdefault("properties", {})
+            feature["properties"].update(
+                {
+                    "name": f"Hotspot MODIS #{index}",
+                    "source": "MODIS/061/MOD14A1 FireMask",
+                    "date_start": start_date,
+                    "date_end": end_date,
+                }
+            )
+        return {
+            "source": "MODIS/061/MOD14A1 FireMask",
+            "features": features,
+            "count": len(features),
+            "note": "Titik merupakan deteksi piksel 1 km; bukan batas kejadian kebakaran.",
+        }
+    except Exception as exc:  # noqa: BLE001 - hotspot is supporting data; dNBR may still succeed
+        logger.warning("MODIS hotspot extraction failed: %s", exc)
+        return {
+            "source": "MODIS/061/MOD14A1 FireMask",
+            "features": [],
+            "count": 0,
+            "note": "Titik hotspot tidak tersedia pada saat pemrosesan; analisis dNBR tetap valid.",
+        }
+
+
+def _samgeo_aoi_feature(aoi_payload: dict) -> dict:
+    """Normalize an analysis AOI into one Feature accepted by SamGeo."""
+    if {"west", "south", "east", "north"}.issubset(aoi_payload):
+        west, south = float(aoi_payload["west"]), float(aoi_payload["south"])
+        east, north = float(aoi_payload["east"]), float(aoi_payload["north"])
+        geometry = {
+            "type": "Polygon",
+            "coordinates": [[[west, south], [east, south], [east, north], [west, north], [west, south]]],
+        }
+        return {"type": "Feature", "properties": {}, "geometry": geometry}
+
+    geojson = aoi_payload.get("geojson", aoi_payload)
+    if geojson.get("type") == "Feature":
+        return geojson
+    if geojson.get("type") in {"Polygon", "MultiPolygon"}:
+        return {"type": "Feature", "properties": {}, "geometry": geojson}
+    if geojson.get("type") != "FeatureCollection":
+        raise AnalysisError("AOI tidak didukung untuk segmentasi SAM", 400)
+
+    polygons = []
+    for feature in geojson.get("features", []):
+        geometry = feature.get("geometry") or {}
+        if geometry.get("type") == "Polygon":
+            polygons.append(geometry.get("coordinates", []))
+        elif geometry.get("type") == "MultiPolygon":
+            polygons.extend(geometry.get("coordinates", []))
+    if not polygons:
+        raise AnalysisError("AOI tidak memiliki geometri polygon untuk segmentasi SAM", 400)
+    return {
+        "type": "Feature",
+        "properties": {},
+        "geometry": {"type": "MultiPolygon", "coordinates": polygons},
+    }
+
+
+def start_fire_sam_job(data: dict) -> dict:
+    """Start MODIS-seeded SAM segmentation on the best post-fire S2 scene.
+
+    SAM is not a thermal detector. MODIS FireMask supplies thermal candidate
+    points; automatic SAM polygons are retained only when they intersect a
+    small pixel neighbourhood around one of those candidates.
+    """
+    if not data.get("aoi"):
+        raise AnalysisError("aoi is required", 400)
+    start_date = str(data.get("start_date") or "").strip()
+    end_date = str(data.get("end_date") or "").strip()
+    if not start_date or not end_date:
+        raise AnalysisError("start_date dan end_date wajib diisi", 400)
+
+    max_cloud_cover = max(0, min(int(data.get("max_cloud_cover", 60)), 100))
+    bbox = imagery_service._aoi_payload_to_bbox(data["aoi"])
+    items = stac_provider.search_sentinel2_items(tuple(bbox), start_date, end_date, max_cloud_cover)
+    if not items:
+        raise AnalysisError("Scene Sentinel-2 STAC untuk segmentasi SAM tidak ditemukan", 404)
+
+    def item_rank(item):
+        cloud_value = item.properties.get("eo:cloud_cover")
+        cloud = float(cloud_value) if cloud_value is not None else 100
+        timestamp = item.datetime.timestamp() if item.datetime else 0
+        return cloud, -timestamp
+
+    scene = min(items, key=item_rank)
+    if "visual" not in scene.assets:
+        raise AnalysisError("Scene Sentinel-2 tidak memiliki asset visual RGB untuk SAM", 404)
+    item_url = scene.get_self_href() or (
+        f"{stac_provider.PC_STAC_URL}/collections/sentinel-2-l2a/items/{scene.id}"
+    )
+
+    aoi = create_geometry_from_payload(data["aoi"])
+    hotspots = _get_fire_hotspot_points(aoi, start_date, end_date)
+    seed_points = [
+        feature.get("geometry", {}).get("coordinates")
+        for feature in hotspots.get("features", [])
+        if feature.get("geometry", {}).get("type") == "Point"
+    ]
+    if not seed_points:
+        raise AnalysisError("Tidak ada hotspot MODIS sebagai seed segmentasi SAM pada periode ini", 404)
+
+    job = samgeo_service.start_job({
+        "item_url": item_url,
+        "asset_key": "visual",
+        "aoi": _samgeo_aoi_feature(data["aoi"]),
+        "seed_points": seed_points,
+        "seed_radius_px": max(1, min(int(data.get("seed_radius_px", 12)), 64)),
+    })
+    return {
+        **job,
+        "method": "modis_seeded_sam",
+        "scene_id": scene.id,
+        "scene_acquired_at": scene.datetime.isoformat() if scene.datetime else None,
+        "scene_cloud_cover_pct": scene.properties.get("eo:cloud_cover"),
+        "seed_source": hotspots["source"],
+        "seed_count": len(seed_points),
+    }
+
+
+def get_fire_sam_job(job_id: str) -> dict:
+    return samgeo_service.get_job(job_id)
 
 
 def get_disaster_dem_slope(data: dict) -> dict:
@@ -247,11 +416,57 @@ def get_disaster_event_map(data: dict) -> dict:
             before_nbr = before.normalizedDifference(["B8", "B12"])
             after_nbr = after.normalizedDifference(["B8", "B12"])
             dnbr = before_nbr.subtract(after_nbr)
-            event_mask = dnbr.gt(float(data.get("dnbr_threshold", 0.27))).selfMask().rename("area")
-            vis = {"palette": ["#d7301f"], "min": 1, "max": 1}
+            dnbr_threshold = float(data.get("dnbr_threshold", 0.27))
+            event_mask = dnbr.gt(dnbr_threshold).selfMask().rename("area")
+            severity = (
+                ee.Image(0)
+                .where(dnbr.gte(0.27).And(dnbr.lt(0.44)), 1)
+                .where(dnbr.gte(0.44).And(dnbr.lt(0.66)), 2)
+                .where(dnbr.gte(0.66).And(dnbr.lt(1.0)), 3)
+                .where(dnbr.gte(1.0), 4)
+                .updateMask(event_mask)
+                .rename("burn_severity")
+            )
+            vis = {
+                "min": 1,
+                "max": 4,
+                "palette": ["#facc15", "#f97316", "#dc2626", "#7f1d1d"],
+            }
             title = "Bekas kebakaran terdeteksi"
             source = "Sentinel-2 SR Harmonized dNBR (observasi sebelum/sesudah)"
-            legend = [{"label": "Area terbakar terdeteksi", "color": "#d7301f"}]
+            legend = [
+                {"label": "Rendah (dNBR 0,27–0,44)", "color": "#facc15"},
+                {"label": "Sedang (dNBR 0,44–0,66)", "color": "#f97316"},
+                {"label": "Tinggi (dNBR 0,66–1,00)", "color": "#dc2626"},
+                {"label": "Sangat tinggi (dNBR ≥1,00)", "color": "#7f1d1d"},
+            ]
+
+            severity_area = {
+                "low_ha": _event_area_ha(severity.eq(1), aoi, scale),
+                "moderate_ha": _event_area_ha(severity.eq(2), aoi, scale),
+                "high_ha": _event_area_ha(severity.eq(3), aoi, scale),
+                "very_high_ha": _event_area_ha(severity.eq(4), aoi, scale),
+            }
+            affected_stats = dnbr.updateMask(event_mask).reduceRegion(
+                reducer=ee.Reducer.mean().combine(ee.Reducer.max(), sharedInputs=True),
+                geometry=aoi,
+                scale=scale,
+                maxPixels=int(get_settings().max_pixels),
+                bestEffort=True,
+                tileScale=4,
+            ).getInfo()
+            hotspot_data = _get_fire_hotspot_points(aoi, after_start, after_end)
+            before_tile = get_tile_url(
+                before.select(["B4", "B3", "B2"]),
+                {"min": 0.02, "max": 0.35},
+                "Citra sebelum kebakaran",
+            )
+            after_tile = get_tile_url(
+                after.select(["B4", "B3", "B2"]),
+                {"min": 0.02, "max": 0.35},
+                "Citra sesudah kebakaran",
+            )
+            severity_tile = get_tile_url(severity, vis, title)
 
         else:
             scale = int(data.get("scale", 20))
@@ -293,8 +508,8 @@ def get_disaster_event_map(data: dict) -> dict:
             legend = [{"label": "Indikasi longsor/perubahan lahan terbuka", "color": "#8d6e63"}]
 
         area_ha = _event_area_ha(event_mask, aoi, scale)
-        tile = get_tile_url(event_mask, vis, title)
-        return {
+        tile = severity_tile if event_type == "fire" else get_tile_url(event_mask, vis, title)
+        response = {
             "success": True,
             "event_type": event_type,
             "title": title,
@@ -307,6 +522,21 @@ def get_disaster_event_map(data: dict) -> dict:
             "legend": legend,
             "method_note": "Pemetaan berbasis perubahan observasi citra sebelum/sesudah kejadian, bukan prediksi risiko. Hasil tetap perlu validasi lapangan dan/atau laporan resmi kejadian.",
         }
+        if event_type == "fire":
+            response.update(
+                {
+                    "dnbr_threshold": dnbr_threshold,
+                    "before_tile_url": before_tile["tile_url"] if before_tile else None,
+                    "after_tile_url": after_tile["tile_url"] if after_tile else None,
+                    "before_scene_count": before_col.size().getInfo(),
+                    "after_scene_count": after_col.size().getInfo(),
+                    "severity_area_ha": severity_area,
+                    "mean_dnbr_affected": affected_stats.get("nd_mean"),
+                    "max_dnbr_affected": affected_stats.get("nd_max"),
+                    "hotspots": hotspot_data,
+                }
+            )
+        return response
     except AnalysisError:
         raise
     except ValueError as e:

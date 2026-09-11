@@ -14,7 +14,8 @@ from uuid import UUID, uuid4
 import numpy as np
 import rasterio
 from rasterio.features import geometry_mask, shapes
-from rasterio.warp import transform_geom
+from rasterio.transform import rowcol
+from rasterio.warp import transform, transform_geom
 from rio_tiler.io import Reader
 
 from app.services.gee_common import AnalysisError
@@ -164,10 +165,41 @@ def segment(data: dict, folder: Path) -> dict:
     with rasterio.open(output_path) as dataset:
         labels = dataset.read(1).astype("int32")
     labels[~valid] = 0
+    automatic_labels = np.unique(labels[labels > 0])
+    selected_mask = labels > 0
+    seed_points = data.get("seed_points") or []
+    selected_labels = automatic_labels
+    if seed_points:
+        valid_points = [
+            point for point in seed_points
+            if isinstance(point, (list, tuple)) and len(point) >= 2
+        ]
+        selected_ids: set[int] = set()
+        if valid_points:
+            xs, ys = transform(
+                "EPSG:4326",
+                image.crs,
+                [float(point[0]) for point in valid_points],
+                [float(point[1]) for point in valid_points],
+            )
+            radius = max(1, min(int(data.get("seed_radius_px", 12)), 64))
+            for x, y in zip(xs, ys):
+                row, col = rowcol(image.transform, x, y)
+                row_min, row_max = max(0, row - radius), min(labels.shape[0], row + radius + 1)
+                col_min, col_max = max(0, col - radius), min(labels.shape[1], col + radius + 1)
+                selected_ids.update(int(value) for value in np.unique(labels[row_min:row_max, col_min:col_max]) if value > 0)
+        selected_labels = np.asarray(sorted(selected_ids), dtype="int32")
+        selected_mask = np.isin(labels, selected_labels) if selected_ids else np.zeros(labels.shape, dtype=bool)
+
     features = []
-    for geometry, label in shapes(labels, mask=labels > 0, transform=image.transform):
+    for geometry, label in shapes(labels, mask=selected_mask, transform=image.transform):
         features.append({"type": "Feature", "geometry": transform_geom(image.crs, "EPSG:4326", geometry),
-                         "properties": {"segment_id": int(label), "model": "SAM ViT-B"}})
+                         "properties": {"segment_id": int(label), "model": "SAM ViT-B",
+                                        "seeded_by": "MODIS FireMask" if seed_points else "automatic"}})
     return {"type": "FeatureCollection", "features": features,
             "metadata": {"scene": data["item_url"], "asset": data.get("asset_key"), "width": rgb.shape[2],
-                         "height": rgb.shape[1], "model": "SAM ViT-B", "object_count": int(np.unique(labels[labels > 0]).size)}}
+                         "height": rgb.shape[1], "model": "SAM ViT-B",
+                         "automatic_object_count": int(automatic_labels.size),
+                         "object_count": int(selected_labels.size),
+                         "seed_count": len(seed_points),
+                         "selection_method": "MODIS-seeded SAM" if seed_points else "automatic SAM"}}
