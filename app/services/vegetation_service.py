@@ -17,6 +17,8 @@ import logging
 
 import ee
 
+from app.services.imagery_resolution import native_median
+
 from app.core.config import get_settings
 from app.registries.satellite_provider_registry import resolve_satellite
 from app.registries.vegetation_index_registry import (
@@ -184,7 +186,7 @@ def _composite_for_period(
     size = collection.size().getInfo()
     if size == 0:
         return None, None, start_date, end_date, 0, None
-    composite = standardize_bands(collection.median(), provider["band_role_map"]).clip(aoi)
+    composite = standardize_bands(native_median(collection, provider["band_role_map"].values()), provider["band_role_map"]).clip(aoi)
 
     # Data-quality signal: % of AOI actually covered by a cloud-free pixel in
     # this composite (same technique as CarbonInferenceEngine._safe_s2_composite).
@@ -342,7 +344,7 @@ def analyze_vegetation(db, data: dict) -> dict:
         "indices": {},
     }
 
-    rgb_tile = get_tile_url(median_composite, {"bands": ["B4", "B3", "B2"], "min": 0, "max": 0.3}, "RGB")
+    rgb_tile = get_tile_url(median_composite.select(["B4", "B3", "B2"]), {"bands": ["B4", "B3", "B2"], "min": 0, "max": 0.3}, "RGB")
     if rgb_tile:
         results["rgb_tile_url"] = rgb_tile["tile_url"]
 
@@ -354,22 +356,28 @@ def analyze_vegetation(db, data: dict) -> dict:
             skipped_indices.append({"index": idx, "reason": f"Band yang dibutuhkan ({', '.join(required)}) tidak tersedia pada sumber citra ini"})
             continue
 
+        native_scale = float(results["satellite"]["resolution_m"])
+        if satellite == "sentinel2" and any(b in {"B5", "B6", "B7", "B8A", "B11", "B12"} for b in VEGETATION_INDICES[idx]["bands"]):
+            native_scale = 20
+        index_scale = max(veg_scale, native_scale)
         index_image = calculate_index(median_composite, idx)
-        stats = _index_stats(index_image, idx, aoi, veg_scale)
+        stats = _index_stats(index_image, idx, aoi, index_scale)
         vis_params = {"min": VEGETATION_INDICES[idx]["range"][0], "max": VEGETATION_INDICES[idx]["range"][1], "palette": VEGETATION_INDICES[idx]["palette"]}
         tile = get_tile_url(index_image, vis_params, idx)
 
         classification = None
         if want_classify:
-            classification = summarize_vegetation_classes(index_image, idx, aoi, veg_scale)
+            classification = summarize_vegetation_classes(index_image, idx, aoi, index_scale)
             if classification:
                 classification["tile_url"] = vegetation_classification_tile(index_image, idx, idx)
 
         histogram = None
         if want_histogram:
-            histogram = compute_index_histogram(index_image, aoi, veg_scale, VEGETATION_INDICES[idx]["range"][0], VEGETATION_INDICES[idx]["range"][1])
+            histogram = compute_index_histogram(index_image, aoi, index_scale, VEGETATION_INDICES[idx]["range"][0], VEGETATION_INDICES[idx]["range"][1])
 
         results["indices"][idx] = {
+            "native_scale_m": native_scale,
+            "analysis_scale_m": index_scale,
             "min": stats["min"], "mean": stats["mean"],
             "max": stats["max"], "std_dev": stats["std_dev"],
             "description": VEGETATION_INDICES[idx]["description"],

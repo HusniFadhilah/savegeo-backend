@@ -246,6 +246,10 @@ def _is_cog_like_asset(key: str, asset: dict[str, Any]) -> bool:
     media_type = str(asset.get("type") or "").lower()
     roles = {str(role).lower() for role in asset.get("roles") or []}
     key_l = key.lower()
+    if (roles.intersection({"thumbnail", "overview"})
+            or any(word in key_l for word in ("thumbnail", "preview", "overview"))
+            or urlparse(href).path.endswith((".jpg", ".jpeg", ".png", ".webp"))):
+        return False
     return (
         href.endswith((".tif", ".tiff"))
         or "geotiff" in media_type
@@ -277,7 +281,7 @@ def _default_stac_asset_key(assets: list[dict[str, Any]]) -> str | None:
     if not assets:
         return None
     by_key = {asset["key"]: asset for asset in assets}
-    for key in ("visual", "rendered_preview", "ortho", "analytic", "analytic_sr", "data"):
+    for key in ("visual", "ortho", "analytic", "analytic_sr", "data"):
         if key in by_key:
             return key
     return assets[0]["key"]
@@ -897,6 +901,7 @@ def list_scenes(data: dict, request=None) -> dict:
                 # Real acquisition timestamp incl. time-of-day (UTC) - this is
                 # the whole point of this endpoint vs. every composite-based one.
                 "acquired_at": acquired.isoformat().replace("+00:00", "Z"),
+                "resolution_m": meta.get("resolution_m"),
                 "cloud_cover_pct": round(float(cloud), 1) if cloud is not None else None,
             }
         )
@@ -953,19 +958,15 @@ def _apply_super_resolution(img: ee.Image, meta: dict, mode: str | None) -> tupl
         return img, None
 
     native_scale = float(meta.get("resolution_m") or 10)
-    target_scale = max(native_scale / factor, 0.25)
-    projection = img.select(0).projection()
-    enhanced = img.resample("bicubic").setDefaultProjection(
-        crs=projection.crs(),
-        scale=target_scale,
-    )
-    return enhanced, {
-        "mode": f"bicubic_{factor}x",
-        "factor": factor,
+    # Optional display interpolation only. Do not invent a finer native grid.
+    return img.resample("bicubic"), {
+        "mode": str(mode),
+        "factor": 1,
         "native_resolution_m": native_scale,
-        "render_scale_m": target_scale,
-        "method": "Earth Engine bicubic resampling",
+        "render_scale_m": native_scale,
+        "method": "Bicubic display interpolation; no added source detail",
     }
+
 
 
 def get_scene_tile(data: dict, request=None) -> dict:
@@ -1067,6 +1068,7 @@ def get_scene_tile(data: dict, request=None) -> dict:
     img = matches.first()
 
     visualization = meta["visualization"]
+    applied_cloud_mask = None
 
     if visualization == "rgb":
         # Optional per-pixel cloud mask (Sentinel-2 only, both L2A/L1C
@@ -1081,6 +1083,7 @@ def get_scene_tile(data: dict, request=None) -> dict:
             if technique not in available_techniques:
                 technique = available_techniques[0]
             img = _apply_s2_single_scene_mask(img, technique)
+            applied_cloud_mask = technique
 
         band_role_map = meta["band_role_map"]
         if "reflectance_scale" in meta:
@@ -1108,6 +1111,8 @@ def get_scene_tile(data: dict, request=None) -> dict:
     else:  # pragma: no cover - guarded by the registry itself, defensive only
         raise AnalysisError(f"Unknown visualization strategy '{visualization}' for {meta['name']}", 500)
 
+    if visualization == "rgb":
+        img = img.select(vis["bands"])
     img, super_resolution = _apply_super_resolution(img, meta, data.get("super_resolution"))
 
     if data.get("aoi"):
@@ -1123,6 +1128,12 @@ def get_scene_tile(data: dict, request=None) -> dict:
         "tile_url": tile["tile_url"],
         "satellite": meta,
         "super_resolution": super_resolution,
+        "resolution_m": meta.get("resolution_m"),
+        "native_scale_m": meta.get("resolution_m"),
+        "dataset": meta.get("gee_collection"),
+        "visualization_bands": vis.get("bands"),
+        "scene_count": 1,
+        "cloud_mask_technique": applied_cloud_mask,
     }
 
 
@@ -1132,11 +1143,8 @@ def _stac_asset_href(item_url: str, asset_key: str) -> str:
         item = _fetch_json(client, item_url)
     assets = item.get("assets") or {}
     asset = assets.get(asset_key)
-    if not asset or not asset.get("href"):
-        fallback_key = _default_stac_asset_key(_stac_asset_options(item_url, item))
-        asset = assets.get(fallback_key) if fallback_key else None
-    if not asset or not asset.get("href"):
-        raise AnalysisError("Asset COG/GeoTIFF tidak tersedia untuk scene STAC ini", 404)
+    if not asset or not asset.get("href") or not _is_cog_like_asset(asset_key, asset):
+        raise AnalysisError("Asset COG/GeoTIFF resolusi penuh yang dipilih tidak tersedia; pilih aset lain secara eksplisit", 404)
     return _abs_stac_href(item_url, asset["href"])
 
 

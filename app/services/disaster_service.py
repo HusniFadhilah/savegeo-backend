@@ -10,6 +10,8 @@ instead of the legacy Flask `cfg()` helper.
 """
 from __future__ import annotations
 
+from app.services.imagery_resolution import native_median
+
 import logging
 from datetime import UTC, datetime, timedelta
 from xml.etree import ElementTree as ET
@@ -242,8 +244,8 @@ def get_disaster_event_map(data: dict) -> dict:
             if before_col.size().getInfo() == 0 or after_col.size().getInfo() == 0:
                 raise AnalysisError("Data Sentinel-2 bebas awan sebelum/sesudah tidak cukup", 404)
 
-            before = before_col.median().clip(aoi)
-            after = after_col.median().clip(aoi)
+            before = native_median(before_col, ["B2", "B3", "B4", "B8", "B11", "B12"]).clip(aoi)
+            after = native_median(after_col, ["B2", "B3", "B4", "B8", "B11", "B12"]).clip(aoi)
             before_nbr = before.normalizedDifference(["B8", "B12"])
             after_nbr = after.normalizedDifference(["B8", "B12"])
             dnbr = before_nbr.subtract(after_nbr)
@@ -272,8 +274,8 @@ def get_disaster_event_map(data: dict) -> dict:
             if before_col.size().getInfo() == 0 or after_col.size().getInfo() == 0:
                 raise AnalysisError("Data Sentinel-2 bebas awan sebelum/sesudah tidak cukup", 404)
 
-            before = before_col.median().clip(aoi)
-            after = after_col.median().clip(aoi)
+            before = native_median(before_col, ["B2", "B3", "B4", "B8", "B11", "B12"]).clip(aoi)
+            after = native_median(after_col, ["B2", "B3", "B4", "B8", "B11", "B12"]).clip(aoi)
             before_ndvi = before.normalizedDifference(["B8", "B4"])
             after_ndvi = after.normalizedDifference(["B8", "B4"])
             bsi = after.expression(
