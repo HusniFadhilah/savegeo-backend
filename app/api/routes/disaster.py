@@ -8,19 +8,57 @@ disaster viewer (`get_current_disaster_viewer`) - public user or admin.
 flow used by the Kalimantan 2026 fire analysis panel. Persisted published
 event results continue to use `disaster_events.py`.
 """
+
 from __future__ import annotations
 
 import logging
-
+import requests
 from fastapi import APIRouter, Depends, HTTPException, Request
+from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import require_ee
 from app.core.security import get_current_disaster_viewer
-from app.services import disaster_service
+from app.services import disaster_service, fire_multi_source_service
 from app.services.gee_common import AnalysisError
 
 router = APIRouter(prefix="/disaster", tags=["disaster"])
 logger = logging.getLogger(__name__)
+
+
+@router.post("/fire-multi-source", dependencies=[Depends(get_current_disaster_viewer)])
+async def load_fire_multi_source(request: Request):
+    try:
+        return await run_in_threadpool(
+            fire_multi_source_service.load_sources,
+            await request.json(),
+            bool(getattr(request.app.state, "ee_initialized", False)),
+        )
+    except (AnalysisError, ValueError) as exc:
+        raise HTTPException(
+            status_code=exc.status_code if isinstance(exc, AnalysisError) else 400, detail=str(exc)
+        )
+
+
+@router.post("/fire-big-boundaries", dependencies=[Depends(get_current_disaster_viewer)])
+async def load_fire_big_boundaries(request: Request):
+    try:
+        return await run_in_threadpool(fire_multi_source_service.load_big_boundaries, await request.json())
+    except (AnalysisError, ValueError) as exc:
+        raise HTTPException(
+            status_code=exc.status_code if isinstance(exc, AnalysisError) else 400, detail=str(exc)
+        )
+    except requests.RequestException:
+        raise HTTPException(status_code=502, detail="Layanan batas BIG belum dapat diakses")
+
+
+@router.post("/fire-import", dependencies=[Depends(get_current_disaster_viewer)])
+async def import_fire_observations(request: Request):
+    try:
+        return fire_multi_source_service.import_observations(await request.json())
+    except (AnalysisError, ValueError) as exc:
+        raise HTTPException(
+            status_code=exc.status_code if isinstance(exc, AnalysisError) else 400, detail=str(exc)
+        )
 
 
 @router.get("/sources")
@@ -59,7 +97,11 @@ async def get_disaster_event_map(request: Request):
         raise HTTPException(status_code=e.status_code, detail=str(e))
 
 
-@router.post("/fire-sam/jobs", status_code=202, dependencies=[Depends(get_current_disaster_viewer), Depends(require_ee)])
+@router.post(
+    "/fire-sam/jobs",
+    status_code=202,
+    dependencies=[Depends(get_current_disaster_viewer), Depends(require_ee)],
+)
 async def start_fire_sam_job(request: Request):
     """Segment candidate burn objects using MODIS thermal seeds + SamGeo."""
     try:

@@ -11,7 +11,7 @@ instead of the legacy Flask `cfg()` helper.
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from xml.etree import ElementTree as ET
 
 import ee
@@ -127,6 +127,11 @@ def get_bmkg_alerts(limit: int = 30) -> dict:
     }
 
 
+def _inclusive_end(value: str) -> str:
+    """Convert an inclusive date picker end to an EE exclusive end."""
+    return (date.fromisoformat(value) + timedelta(days=1)).isoformat()
+
+
 def _get_fire_hotspot_points(aoi, start_date: str, end_date: str) -> dict:
     """Return a bounded GeoJSON point set from MODIS fire detections.
 
@@ -139,7 +144,7 @@ def _get_fire_hotspot_points(aoi, start_date: str, end_date: str) -> dict:
         collection = (
             ee.ImageCollection("MODIS/061/MOD14A1")
             .filterBounds(aoi)
-            .filterDate(start_date, end_date)
+            .filterDate(start_date, _inclusive_end(end_date))
         )
         if collection.size().getInfo() == 0:
             return {
@@ -394,17 +399,19 @@ def get_disaster_event_map(data: dict) -> dict:
 
         elif event_type == "fire":
             scale = int(data.get("scale", 20))
+            before_exclusive = _inclusive_end(before_end)
+            after_exclusive = _inclusive_end(after_end)
             before_col = (
                 ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
                 .filterBounds(aoi)
-                .filterDate(before_start, before_end)
+                .filterDate(before_start, before_exclusive)
                 .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 60))
                 .map(_mask_s2_sr_clouds)
             )
             after_col = (
                 ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
                 .filterBounds(aoi)
-                .filterDate(after_start, after_end)
+                .filterDate(after_start, after_exclusive)
                 .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 60))
                 .map(_mask_s2_sr_clouds)
             )
