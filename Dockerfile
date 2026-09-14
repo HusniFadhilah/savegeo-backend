@@ -30,7 +30,9 @@ RUN python -m pip install --no-cache-dir --upgrade \
     "wheel>=0.46.2" \
     && rm -rf \
     /tmp/* \
-    /root/.cache/pip
+    /root/.cache/pip \
+    /usr/local/lib/python3.11/site-packages \
+    /usr/local/lib/python3.11/dist-packages
 
 # Keep compilers and development headers out of the production image. Start
 # from a plain Debian runtime so its system Python metadata cannot reintroduce
