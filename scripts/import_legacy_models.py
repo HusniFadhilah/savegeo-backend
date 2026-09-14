@@ -21,7 +21,10 @@ def main() -> None:
     db = SessionLocal()
     try:
         result = import_legacy_models(db, sys.argv[1])
-        print(f"Imported: {result['imported']}, skipped: {result['skipped']}, errors: {len(result['errors'])}")
+        print(
+            f"Imported: {result['imported']}, updated: {result.get('updated', 0)}, "
+            f"skipped: {result['skipped']}, errors: {len(result['errors'])}"
+        )
         for err in result["errors"]:
             print(f"  ERROR {err['file']}: {err['error']}")
     finally:
