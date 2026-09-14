@@ -31,7 +31,8 @@ RUN python -m venv "${VIRTUAL_ENV}" \
     /tmp/* \
     /root/.cache/pip \
     /usr/local/lib/python3.11/site-packages \
-    /usr/local/lib/python3.11/dist-packages
+    /usr/local/lib/python3.11/dist-packages \
+    /usr/local/lib/python3.11/ensurepip
 
 # Keep compilers and development headers out of the production image. Start
 # from a plain Debian runtime so its system Python metadata cannot reintroduce
