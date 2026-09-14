@@ -961,10 +961,12 @@ def _apply_super_resolution(img: ee.Image, meta: dict, mode: str | None) -> tupl
     # Optional display interpolation only. Do not invent a finer native grid.
     return img.resample("bicubic"), {
         "mode": str(mode),
-        "factor": 1,
+        "factor": factor,
         "native_resolution_m": native_scale,
         "render_scale_m": native_scale,
         "method": "Bicubic display interpolation; no added source detail",
+        "enhancement_backend": "gee_bicubic",
+        "is_visual_only": True,
     }
 
 
