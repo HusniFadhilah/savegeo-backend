@@ -112,6 +112,8 @@ def compute_segmentation(aoi, pre_date, post_date):
         "classes": rows, "transitions": transitions, "pre": pre_meta, "post": post_meta,
         "resolution_m": 10, "crs": projection.crs().getInfo(), "aoi": aoi.getInfo(), "review_reasons": review_reasons,
         "method": model["description"], "model_id": model["model_id"], "model_version": model["version"],
+        "result_semantics": model.get("result_semantics"), "damage_model": bool(model.get("damage_model", False)),
+        "validation_status": model.get("validation_status"), "limitations": list(model.get("limitations", [])),
         "aoi_area_ha": aoi_area, "valid_area_ha": covered, "no_data_area_ha": max(0, aoi_area-covered),
         "changed_area_ha": sum(t["area_ha"] for t in transitions if t["pre_class_id"] != t["post_class_id"]),
         "unchanged_area_ha": sum(t["area_ha"] for t in transitions if t["pre_class_id"] == t["post_class_id"]),

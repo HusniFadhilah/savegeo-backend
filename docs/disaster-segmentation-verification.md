@@ -27,13 +27,15 @@ Admin review and the public dashboard share `SegmentationComparison`: Pre, Post,
 - Database read-only inventory found 16 flood and 18 earthquake events; no stored landslide, forest-fire or tsunami events. Type compatibility and invalid/missing inputs for these types are covered by automated tests, not claimed as live event validation.
 - Real persisted flood event **19**, AOI **18**, imagery **36** (2025-11-03) / **41** (2025-12-18) was executed as unpublished run **63**. GEE has no Dynamic World post prediction for that date/AOI. Run 63 correctly remains **failed**, with the explicit reason and no result/publication. Dates and source imagery were not substituted.
 
-The available model does not provide validated landslide/burned/damaged-building semantic classes or inference on BlackSky uploads. Protected production pages have not been tested through an authenticated deployed session. These are availability/validation limits, not successful damage-model results.
+The available model does not provide validated landslide/burned/damaged-building semantic classes or inference on BlackSky uploads. Run `python scripts/validate_real_disaster_events.py` against the target database before publishing a real landslide, forest-fire, or tsunami event. The command reports each published record, requires an official source URL, same-event AOI, Sentinel-2/GEE 10 m pre/post imagery and a published Dynamic World comparison, and exits non-zero with `--strict` when any requested type is missing. It never creates records or substitutes imagery. A report with `not_validated` is an explicit availability result, not a damage-model result.
+
+The protected production-page check is separate and must use an authenticated browser session; use the deployment smoke-test procedure in `frontend/OPERATIONS.md`. Do not treat a successful login as validation of disaster semantics: the dashboard must still show the land-cover-proxy notice and unavailable states when no published comparison exists.
 
 ## Reproduction
 
 From backend: `python scripts/verify_disaster_segmentation.py` (configured GEE credentials required). Optional `--pre`, `--post`, `--bbox`, `--output` parameters select explicit inputs. It writes ephemeral tile URLs under ignored frontend test results and does not create/publish event records.
 
-With frontend Vite running: `node tests/browser/segmentation-check.cjs`. Set `PLAYWRIGHT_MODULE` and `SWIPE_TEST_URL` if needed. `tests/test_disaster_segmentation.py` covers registry schemas, missing/foreign/mismatched imagery, invalid area/class output, persisted failure, concurrent-run rejection and reuse without a second inference.
+With frontend Vite running: `node tests/browser/segmentation-check.cjs`. Set `PLAYWRIGHT_MODULE` and `SWIPE_TEST_URL` if needed. `tests/test_disaster_segmentation.py` covers registry schemas, capability metadata, missing/foreign/mismatched imagery, invalid area/class output, persisted failure, concurrent-run rejection and reuse without a second inference. For real records run `python scripts/validate_real_disaster_events.py --strict`; it is intentionally a gate and cannot pass by fabricating an event or result.
 
 ## Files
 

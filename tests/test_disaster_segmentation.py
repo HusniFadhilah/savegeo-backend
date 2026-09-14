@@ -22,6 +22,9 @@ def test_supported_event_uses_real_multiclass_schema(kind):
     assert models[0]["model_id"] == "dynamic_world_v1"
     assert len(models[0]["classes"]) == 9
     assert models[0]["classes"][0]["label"] == "Water"
+    assert models[0]["result_semantics"] == "land_cover"
+    assert models[0]["damage_model"] is False
+    assert models[0]["validation_status"] == "land_cover_only"
     event, aoi, images = inputs(kind)
     with patch.object(service.disaster_repo, "get_event", return_value=event), patch.object(service.disaster_repo, "get_aoi", return_value=aoi), patch.object(service.disaster_repo, "get_imagery", side_effect=lambda db, key: images.get(key)):
         assert service.validate_inputs(None, 1, 1, 10, 11, "dynamic_world_v1")[0]["multiclass"]
