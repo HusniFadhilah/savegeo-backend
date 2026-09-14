@@ -27,6 +27,11 @@ RUN python -m venv "${VIRTUAL_ENV}" \
     "msgpack>=1.2.1" \
     "setuptools>=78.1.1" \
     "wheel>=0.46.2" \
+    && find "${VIRTUAL_ENV}/lib/python3.11/site-packages" -maxdepth 1 \
+    \( -name 'msgpack*' -o -name 'setuptools*' \) -exec rm -rf {} + \
+    && python -m pip install --no-cache-dir --force-reinstall \
+    "msgpack>=1.2.1" \
+    "setuptools>=78.1.1" \
     && rm -rf \
     /tmp/* \
     /root/.cache/pip \
