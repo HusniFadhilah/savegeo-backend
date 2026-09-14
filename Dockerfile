@@ -37,7 +37,14 @@ RUN python -m venv "${VIRTUAL_ENV}" \
     /root/.cache/pip \
     /usr/local/lib/python3.11/site-packages \
     /usr/local/lib/python3.11/dist-packages \
-    /usr/local/lib/python3.11/ensurepip
+    /usr/local/lib/python3.11/ensurepip \
+    && tar -C /usr/local \
+    --exclude='lib/python3.11/site-packages' \
+    --exclude='lib/python3.11/dist-packages' \
+    --exclude='lib/python3.11/ensurepip' \
+    --exclude='**/*msgpack*' \
+    --exclude='**/*setuptools*' \
+    -cf /tmp/python-runtime.tar .
 
 # Keep compilers and development headers out of the production image. Start
 # from a plain Debian runtime so its system Python metadata cannot reintroduce
@@ -55,7 +62,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get upgrade -y \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /usr/local /usr/local
+COPY --from=builder /tmp/python-runtime.tar /tmp/python-runtime.tar
+RUN tar -C /usr/local -xf /tmp/python-runtime.tar \
+    && rm -f /tmp/python-runtime.tar
 COPY --from=builder /opt/venv /opt/venv
 
 COPY pyproject.toml README.md ./
