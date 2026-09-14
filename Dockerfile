@@ -67,6 +67,9 @@ RUN tar -C /usr/local -xf /tmp/python-runtime.tar \
     && rm -f /tmp/python-runtime.tar
 COPY --from=builder /opt/venv /opt/venv
 
+RUN find /usr/local /opt/venv /usr/lib /usr/share -type f \
+    \( -iname '*msgpack*' -o -iname '*setuptools*' \) -print | sort
+
 COPY pyproject.toml README.md ./
 COPY app ./app
 COPY alembic ./alembic
