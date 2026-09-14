@@ -52,6 +52,15 @@ COPY --from=builder /opt/venv /opt/venv
 # place; otherwise the copy from the builder could restore older metadata.
 RUN /usr/local/bin/python -m pip install --no-cache-dir --upgrade \
     "jaraco.context>=6.1.0" \
+    "msgpack>=1.2.1" \
+    "setuptools>=78.1.1" \
+    "wheel>=0.46.2" \
+    && rm -rf /root/.cache/pip
+
+RUN /opt/venv/bin/python -m pip install --no-cache-dir --upgrade \
+    "jaraco.context>=6.1.0" \
+    "msgpack>=1.2.1" \
+    "setuptools>=78.1.1" \
     "wheel>=0.46.2" \
     && rm -rf /root/.cache/pip
 
