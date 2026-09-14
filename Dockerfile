@@ -71,6 +71,12 @@ RUN /opt/venv/bin/python -m pip uninstall -y msgpack setuptools || true \
     "wheel>=0.46.2" \
     && rm -rf /root/.cache/pip
 
+# The base image may contain untracked copies under Debian's system Python
+# paths. The application uses /opt/venv, so remove only those stale copies.
+RUN find /usr/lib/python3 /usr/lib/python3.11 /usr/local/lib/python3.11 \
+      -type d \( -iname 'msgpack*' -o -iname 'setuptools*' \) \
+      -exec rm -rf {} + 2>/dev/null || true
+
 COPY pyproject.toml README.md ./
 COPY app ./app
 COPY alembic ./alembic
