@@ -39,7 +39,7 @@ from app.db.models.audit_log import AuditLog
 from app.db.models.disaster_event import DISASTER_TYPES, EVENT_STATUSES, SEVERITIES
 from app.db.models.hotspot import IMPACT_LEVELS, Hotspot
 from app.db.session import get_db
-from app.registries.disaster_model_registry import get_model, list_models
+from app.registries.disaster_model_registry import list_models
 from app.repositories import disaster_repo
 from app.services import audit_service, disaster_analysis_service, local_imagery_tile_service
 from app.services.gee_common import AnalysisError

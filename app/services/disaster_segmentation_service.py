@@ -70,7 +70,12 @@ def compute_segmentation(aoi, pre_date, post_date):
     labels = [im.select("label").toInt() for im in (pre, post)]
     confidence = [im.select(PROBABILITY_BANDS).reduce(ee.Reducer.max()) for im in (pre, post)]
     aoi_area = aoi.area(1).divide(10000).getInfo()
-    rows = class_statistics(model["classes"], *[_groups(l, c, aoi, projection) for l, c in zip(labels, confidence)], aoi_area)
+    rows = class_statistics(
+        model["classes"],
+        *[_groups(label_image, confidence_image, aoi, projection)
+          for label_image, confidence_image in zip(labels, confidence)],
+        aoi_area,
+    )
     # Transition code uniquely identifies pre-class -> post-class, including unchanged.
     change = labels[0].multiply(9).add(labels[1]).rename("transition")
     groups = ee.Image.pixelArea().divide(10000).addBands(change).reduceRegion(
