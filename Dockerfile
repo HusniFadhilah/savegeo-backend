@@ -50,15 +50,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get upgrade -y \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /opt/venv /opt/venv
+# The Python slim base can carry older packaging metadata. Upgrade these
+# tools in the final layer so the image contains only fixed releases.
+RUN python -m pip install --no-cache-dir --upgrade \
+    "jaraco.context>=6.1.0" \
+    "wheel>=0.46.2" \
+    && rm -rf /root/.cache/pip
 
-# These packages are build tooling only. Remove any copy inherited from the
-# base image as well as the builder so Trivy scans only runtime dependencies.
-RUN rm -rf \
-    /usr/local/lib/python3.11/site-packages/jaraco* \
-    /usr/local/lib/python3.11/site-packages/wheel* \
-    /opt/venv/lib/python3.11/site-packages/jaraco* \
-    /opt/venv/lib/python3.11/site-packages/wheel*
+COPY --from=builder /opt/venv /opt/venv
 
 COPY pyproject.toml README.md ./
 COPY app ./app
