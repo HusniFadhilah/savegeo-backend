@@ -49,10 +49,11 @@ def _build_analyses(db: Session, event_id: int) -> list[dict]:
     `available: False` so User sees "Not Available" instead of the item
     vanishing (contract doc, section B)."""
     entries = []
-    for model in disaster_model_registry.list_models(enabled_only=True):
+    event = disaster_repo.get_event(db, event_id)
+    for model in disaster_model_registry.list_models(enabled_only=True, disaster_type=event.disaster_type if event else None):
         model_id = model["model_id"]
         published = disaster_repo.get_published_analysis(db, event_id, model_id)
-        if published is not None:
+        if published is not None and published[0].status in ("completed", "review_required", "published"):
             run, result = published
             entries.append({
                 "model_id": model_id,
@@ -148,7 +149,7 @@ def get_disaster_statistics(event_id: int, viewer=Depends(get_current_disaster_v
     _get_published_event(db, event_id)
     kpis = {}
     for run, result in disaster_repo.list_published_analyses(db, event_id):
-        kpis[run.model_id] = result.statistics
+        kpis[run.model_id] = result.to_dict()["statistics"]
     return {
         "kpis": kpis,
         "cross_layer": get_available_cross_layer_stats(db, event_id),

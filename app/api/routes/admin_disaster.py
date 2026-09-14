@@ -109,7 +109,7 @@ class ImageryCreateRequest(BaseModel):
 
 
 class AnalysisCreateRequest(BaseModel):
-    model_id: str
+    model_id: str | None = None
     aoi_id: int
     pre_imagery_id: int | None = None
     post_imagery_id: int | None = None
@@ -225,8 +225,41 @@ def admin_list_events(
 
 
 @router.get("/disasters/models")
-def admin_list_disaster_models(admin: AdminUser = Depends(get_current_admin)):
-    return {"models": list_models(enabled_only=False)}
+def admin_list_disaster_models(event_id: int | None = None, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+    event = _get_event_or_404(db, event_id) if event_id else None
+    models = list_models(enabled_only=False, disaster_type=event.disaster_type if event else None)
+    settings = get_settings()
+    configured = bool(settings.gee_service_account and settings.gee_key_file and Path(settings.gee_key_file).is_file())
+    models = [{**m, "configured": configured and m["enabled"],
+        "availability_reason": ("Citra pada tanggal/AOI akan diperiksa saat analisis" if configured and m["enabled"] else "Kredensial GEE atau implementasi model belum tersedia"),
+        "recommended": bool(m.get("multiclass") and configured and m["enabled"])} for m in models]
+    if event:
+        aoi = disaster_repo.get_active_aoi(db, event_id)
+        pre = disaster_repo.list_imagery(db, event_id, "pre")
+        post = disaster_repo.list_imagery(db, event_id, "post")
+        recommended = False
+        for model in models:
+            model["recommended"] = False
+            model["inputs_ready"] = False
+            reason = "AOI dan imagery pre/post yang kompatibel belum tersedia"
+            if aoi:
+                for before in pre:
+                    for after in post:
+                        try:
+                            disaster_analysis_service.validate_inputs(db, event_id, aoi.id, before.id, after.id, model["model_id"])
+                            model["inputs_ready"] = True
+                            model["default_pre_imagery_id"] = before.id
+                            model["default_post_imagery_id"] = after.id
+                            break
+                        except AnalysisError as exc:
+                            reason = str(exc)
+                    if model["inputs_ready"]:
+                        break
+            if not model["inputs_ready"]:
+                model["availability_reason"] = reason
+            elif model["configured"] and not recommended:
+                model["recommended"] = recommended = True
+    return {"models": models}
 
 
 @router.get("/disasters/{id}")
@@ -513,11 +546,27 @@ def admin_create_analysis(
     _perm: AdminUser = Depends(require_permission("disaster.analysis.configure")),
     db: Session = Depends(get_db),
 ):
-    _get_event_or_404(db, id)
-    if get_model(payload.model_id) is None:
-        raise HTTPException(status_code=404, detail=f"Model '{payload.model_id}' not found in registry")
-
-    run = disaster_repo.create_run(db, id, payload.model_dump(), admin.id)
+    event = _get_event_or_404(db, id)
+    model_id = payload.model_id
+    if not model_id:
+        candidates = list_models(enabled_only=True, disaster_type=event.disaster_type)
+        if not candidates:
+            raise HTTPException(status_code=400, detail="Tidak ada model aktif yang mendukung bencana ini")
+        for candidate in candidates:
+            try:
+                disaster_analysis_service.validate_inputs(db, id, payload.aoi_id, payload.pre_imagery_id, payload.post_imagery_id, candidate["model_id"])
+                model_id = candidate["model_id"]
+                break
+            except AnalysisError:
+                continue
+        if not model_id:
+            raise HTTPException(status_code=400, detail="Tidak ada model aktif yang kompatibel dengan input terpilih")
+    try:
+        model, _, _, _ = disaster_analysis_service.validate_inputs(db, id, payload.aoi_id,
+            payload.pre_imagery_id, payload.post_imagery_id, model_id)
+    except AnalysisError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc))
+    run = disaster_repo.create_run(db, id, {**payload.model_dump(), "model_id": model_id, "model_version": model["version"]}, admin.id)
     audit_service.log_audit(
         db, admin.id, "disaster_analysis.create", "disaster_event", str(id),
         detail={"run_id": run.id, "model_id": run.model_id, "aoi_id": run.aoi_id},
@@ -539,12 +588,13 @@ def admin_list_analyses(id: int, admin: AdminUser = Depends(get_current_admin), 
 @router.post("/analyses/{run_id}/run")
 def admin_run_analysis(
     run_id: int,
+    force: bool = False,
     admin: AdminUser = Depends(get_current_admin),
     _perm: AdminUser = Depends(require_permission("disaster.analysis.run")),
     db: Session = Depends(get_db),
 ):
     try:
-        outcome = disaster_analysis_service.run_analysis(db, run_id)
+        outcome = disaster_analysis_service.run_analysis(db, run_id, force=force)
     except AnalysisError as e:
         raise HTTPException(status_code=e.status_code, detail=str(e))
 
@@ -566,6 +616,8 @@ def admin_update_analysis_status(
     run = _get_run_or_404(db, run_id)
     if payload.status not in RUN_STATUSES:
         raise HTTPException(status_code=400, detail=f"status harus salah satu dari {RUN_STATUSES}")
+    if payload.status != "review_required" or run.status not in ("completed", "review_required"):
+        raise HTTPException(status_code=400, detail="Status eksekusi dikelola oleh analisis; gunakan aksi publikasi untuk menerbitkan hasil")
     run.status = payload.status
     db.commit()
     db.refresh(run)
@@ -587,6 +639,9 @@ def admin_publish_result(
     result = disaster_repo.get_result_for_run(db, run_id)
     if result is None:
         raise HTTPException(status_code=404, detail="No result exists yet for this run")
+    if run.status not in ("completed", "review_required", "published") or not result.tile_url:
+        raise HTTPException(status_code=400, detail="Hasil gagal/belum selesai tidak dapat dipublikasikan")
+    run.status = "published"
     result = disaster_repo.publish_result(db, result, admin.id)
     audit_service.log_audit(
         db, admin.id, "disaster_result.publish", "disaster_event", str(run.event_id),
