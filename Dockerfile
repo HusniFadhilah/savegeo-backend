@@ -30,11 +30,7 @@ RUN python -m pip install --no-cache-dir --upgrade \
     "wheel>=0.46.2" \
     && rm -rf \
     /tmp/* \
-    /root/.cache/pip \
-    /opt/venv/bin/pip* \
-    /opt/venv/lib/python3.11/site-packages/pip* \
-    /opt/venv/lib/python3.11/site-packages/setuptools* \
-    /opt/venv/lib/python3.11/site-packages/wheel*
+    /root/.cache/pip
 
 # Keep compilers and development headers out of the production image. The
 # scientific wheels still need these small runtime libraries at import time.
@@ -50,14 +46,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get upgrade -y \
     && rm -rf /var/lib/apt/lists/*
 
-# The Python slim base can carry older packaging metadata. Upgrade these
-# tools in the final layer so the image contains only fixed releases.
-RUN python -m pip install --no-cache-dir --upgrade \
+COPY --from=builder /opt/venv /opt/venv
+
+# Patch the base interpreter's packaging metadata after the virtualenv is in
+# place; otherwise the copy from the builder could restore older metadata.
+RUN /usr/local/bin/python -m pip install --no-cache-dir --upgrade \
     "jaraco.context>=6.1.0" \
     "wheel>=0.46.2" \
     && rm -rf /root/.cache/pip
-
-COPY --from=builder /opt/venv /opt/venv
 
 COPY pyproject.toml README.md ./
 COPY app ./app
