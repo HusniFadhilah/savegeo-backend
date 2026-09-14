@@ -16,22 +16,12 @@ COPY alembic ./alembic
 COPY alembic.ini ./
 COPY scripts ./scripts
 
-RUN python -m venv "${VIRTUAL_ENV}" \
-    && python -m pip install --no-cache-dir --upgrade \
-    pip \
-    "setuptools>=78.1.1" \
-    "wheel>=0.46.2" \
-    && python -m pip install --no-cache-dir . \
-    && python -m pip install --no-cache-dir --upgrade \
-    "jaraco.context>=6.1.0" \
+RUN python -m venv --without-pip "${VIRTUAL_ENV}" \
+    && /usr/local/bin/python -m pip install --no-cache-dir \
+    --target "${VIRTUAL_ENV}/lib/python3.11/site-packages" . \
+    && /usr/local/bin/python -m pip install --no-cache-dir --upgrade \
+    --target "${VIRTUAL_ENV}/lib/python3.11/site-packages" \
     "msgpack>=1.2.1" \
-    "setuptools>=78.1.1" \
-    "wheel>=0.46.2" \
-    && find "${VIRTUAL_ENV}/lib/python3.11/site-packages" -maxdepth 1 \
-    \( -name 'msgpack*' -o -name 'setuptools*' \) -exec rm -rf {} + \
-    && python -m pip install --no-cache-dir --force-reinstall \
-    "msgpack>=1.2.1" \
-    "setuptools>=78.1.1" \
     && rm -rf \
     /tmp/* \
     /root/.cache/pip \
@@ -79,4 +69,4 @@ COPY scripts ./scripts
 ENV PORT=8086
 EXPOSE 8086
 
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT}"]
+CMD ["sh", "-c", "python -m uvicorn app.main:app --host 0.0.0.0 --port ${PORT}"]
