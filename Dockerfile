@@ -50,14 +50,16 @@ COPY --from=builder /opt/venv /opt/venv
 
 # Patch the base interpreter's packaging metadata after the virtualenv is in
 # place; otherwise the copy from the builder could restore older metadata.
-RUN /usr/local/bin/python -m pip install --no-cache-dir --upgrade \
+RUN /usr/local/bin/python -m pip uninstall -y msgpack setuptools || true \
+    && /usr/local/bin/python -m pip install --no-cache-dir --ignore-installed \
     "jaraco.context>=6.1.0" \
     "msgpack>=1.2.1" \
     "setuptools>=78.1.1" \
     "wheel>=0.46.2" \
     && rm -rf /root/.cache/pip
 
-RUN /opt/venv/bin/python -m pip install --no-cache-dir --upgrade \
+RUN /opt/venv/bin/python -m pip uninstall -y msgpack setuptools || true \
+    && /opt/venv/bin/python -m pip install --no-cache-dir --ignore-installed \
     "jaraco.context>=6.1.0" \
     "msgpack>=1.2.1" \
     "setuptools>=78.1.1" \
