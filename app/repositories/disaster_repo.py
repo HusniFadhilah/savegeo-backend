@@ -273,6 +273,7 @@ def upsert_result(db: Session, run_id: int, data: dict) -> AnalysisResult:
     result.features = data.get("features")
     result.legend = data.get("legend")
     result.confidence_summary = data.get("confidence_summary")
+    result.is_published = False
     db.commit()
     db.refresh(result)
     return result
@@ -299,7 +300,9 @@ def list_published_analyses(db: Session, event_id: int) -> list[tuple[AnalysisRu
     stmt = (
         select(AnalysisRun, AnalysisResult)
         .join(AnalysisResult, AnalysisResult.run_id == AnalysisRun.id)
-        .where(AnalysisRun.event_id == event_id, AnalysisResult.is_published.is_(True))
+        .where(AnalysisRun.event_id == event_id, AnalysisResult.is_published.is_(True),
+               AnalysisRun.status.in_(["completed", "review_required", "published"]))
+        .order_by(AnalysisRun.completed_at.desc())
     )
     return [(row[0], row[1]) for row in db.execute(stmt).all()]
 

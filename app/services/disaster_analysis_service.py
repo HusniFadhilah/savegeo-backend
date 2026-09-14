@@ -1,19 +1,7 @@
-"""Analysis execution for the Disaster Intelligence Dashboard.
+"""Validate and execute configured disaster analyses; persist status and reusable results.
 
-`run_analysis(db, run_id)` is the single entry point every admin "Run
-Analysis" action calls. It loads the AnalysisRun + its AOI + pre/post
-imagery rows (all already persisted by the admin AOI/imagery configuration
-steps - nothing here draws its own AOI or queries arbitrary dates), dispatches
-to one of the 3 real compute functions by `model_id`, and writes the result
-via `disaster_repo.upsert_result`. Runs stay synchronous (blocking GEE calls,
-same pattern as every other analyze_* service in this codebase - no job queue
-exists here) - status only ever visibly transitions queued -> completed/failed
-within one request.
-
-Only 3 models are wired to real computation - see
-`app/registries/disaster_model_registry.py` for why the other 4 are
-`enabled: False`. Calling `run_analysis` for a disabled model_id raises
-`AnalysisError` before touching GEE.
+Hosted Dynamic World predictions are compared independently on one common grid.
+Existing SAR/index methods remain explicitly labelled alternatives.
 """
 from __future__ import annotations
 
@@ -274,59 +262,107 @@ def compute_flood_change(aoi, pre_date: dt.date, post_date: dt.date, scale: int 
 # --- dispatcher --------------------------------------------------------------
 
 
-def run_analysis(db: Session, run_id: int) -> dict:
+def validate_inputs(db, event_id, aoi_id, pre_id, post_id, model_id):
+    model = get_model(model_id)
+    if not model or not model["enabled"]:
+        raise AnalysisError("Model tidak aktif atau tidak memiliki implementasi", 400)
+    event = disaster_repo.get_event(db, event_id)
+    if not event or event.disaster_type not in model.get("disaster_types", []):
+        raise AnalysisError("Model tidak mendukung jenis bencana ini", 400)
+    aoi = disaster_repo.get_aoi(db, aoi_id)
+    if not aoi or aoi.event_id != event_id or not aoi.geojson:
+        raise AnalysisError("AOI tidak tersedia atau berasal dari event lain", 400)
+    images = []
+    for phase, image_id in (("pre", pre_id), ("post", post_id)):
+        image = disaster_repo.get_imagery(db, image_id) if image_id else None
+        if not image or image.event_id != event_id or image.phase != phase:
+            raise AnalysisError(f"Imagery {phase} wajib tersedia pada event dan fase yang benar", 400)
+        if image.source_kind != "gee":
+            raise AnalysisError("Model ini hanya mendukung sumber GEE; raster unggahan tidak boleh diganti dengan citra lain", 400)
+        sensor = image.satellite.lower().replace("-", "").replace(" ", "")
+        expected = "sentinel1" if model_id == "flood_change_v1" else "sentinel2"
+        if expected not in sensor:
+            raise AnalysisError(f"Input {phase} harus berasal dari {expected}", 400)
+        if not image.acquisition_date:
+            raise AnalysisError(f"Tanggal imagery {phase} tidak tersedia", 400)
+        if model_id == "dynamic_world_v1" and image.resolution_m != 10:
+            raise AnalysisError("Dynamic World memerlukan imagery Sentinel-2 dengan metadata resolusi 10 m", 400)
+        images.append(image)
+    if images[0].acquisition_date >= images[1].acquisition_date:
+        raise AnalysisError("Tanggal pre harus lebih awal dari post", 400)
+    return model, aoi, images[0], images[1]
+
+
+def run_analysis(db: Session, run_id: int, force: bool = False) -> dict:
+    import hashlib
+    import json
+    from app.services.disaster_segmentation_service import compute_segmentation
+
     run = disaster_repo.get_run(db, run_id)
     if run is None:
         raise AnalysisError("Analysis run not found", 404)
-
-    model = get_model(run.model_id)
-    if model is None or not model["enabled"]:
-        raise AnalysisError(f"Model '{run.model_id}' is not available to run", 400)
-
-    aoi_row = disaster_repo.get_aoi(db, run.aoi_id)
-    if aoi_row is None:
-        raise AnalysisError("AOI not found for this run", 404)
-    aoi = create_geometry_from_payload({"geojson": aoi_row.geojson})
-
-    pre_img = disaster_repo.get_imagery(db, run.pre_imagery_id) if run.pre_imagery_id else None
-    post_img = disaster_repo.get_imagery(db, run.post_imagery_id) if run.post_imagery_id else None
-    pre_date = pre_img.acquisition_date if pre_img else None
-    post_date = post_img.acquisition_date if post_img else None
-
-    run.status = "processing"
-    run.started_at = dt.datetime.now(dt.UTC)
-    db.commit()
-
+    db.refresh(run, with_for_update=True)
+    if run.status == "processing":
+        raise AnalysisError("Analisis ini masih diproses", 409)
     try:
-        if run.model_id == "flood_change_v1":
-            if pre_date is None or post_date is None:
-                raise AnalysisError("Flood Change membutuhkan imagery pre dan post", 400)
+        model, aoi_row, pre_img, post_img = validate_inputs(db, run.event_id, run.aoi_id,
+            run.pre_imagery_id, run.post_imagery_id, run.model_id)
+        key = hashlib.sha256(json.dumps([run.event_id, run.aoi_id, run.pre_imagery_id,
+            run.post_imagery_id, run.model_id, model["version"], aoi_row.geojson,
+            pre_img.acquisition_date.isoformat(), post_img.acquisition_date.isoformat()], sort_keys=True).encode()).hexdigest()
+        for candidate in ([] if force else disaster_repo.list_runs_for_event(db, run.event_id)):
+            if candidate.status not in ("completed", "review_required", "published"):
+                continue
+            cached = disaster_repo.get_result_for_run(db, candidate.id)
+            if not cached or (cached.statistics or {}).get("cache_key") != key:
+                continue
+            # GEE map URLs are ephemeral: bound reuse, never pretend an old tile is fresh.
+            if not candidate.completed_at or (dt.datetime.now(dt.UTC) - candidate.completed_at.replace(tzinfo=dt.UTC)).total_seconds() > 21600:
+                continue
+            if candidate.id != run.id:
+                cached = disaster_repo.upsert_result(db, run.id, {**cached.to_dict(include_features=True), "statistics": cached.statistics})
+                run.status = "review_required" if (cached.statistics or {}).get("comparison", {}).get("review_reasons") else "completed"
+                run.error_message = None
+                run.model_version = model["version"]
+                run.completed_at = candidate.completed_at
+                db.commit()
+            return {"run": run.to_dict(), "result": cached.to_dict(include_features=True), "cached": True}
+        run.status = "processing"
+        run.error_message = None
+        run.model_version = model["version"]
+        run.started_at = dt.datetime.now(dt.UTC)
+        db.commit()
+        aoi = create_geometry_from_payload({"geojson": aoi_row.geojson})
+        pre_date, post_date = pre_img.acquisition_date, post_img.acquisition_date
+        if run.model_id == "dynamic_world_v1":
+            output = compute_segmentation(aoi, pre_date, post_date)
+        elif run.model_id == "flood_change_v1":
             output = _compute_flood_change(aoi, pre_date, post_date)
         elif run.model_id == "water_segmentation_v1":
             output = _compute_water_segmentation(aoi, pre_date, post_date)
         elif run.model_id == "forest_change_v1":
-            if post_date is None:
-                raise AnalysisError("Forest Cover Change membutuhkan minimal imagery post", 400)
             output = _compute_forest_change(aoi, pre_date, post_date)
         else:
-            raise AnalysisError(f"Model '{run.model_id}' belum memiliki implementasi", 400)
-    except AnalysisError as exc:
-        run.status = "failed"
-        run.error_message = str(exc)
+            raise AnalysisError("Model belum memiliki implementasi", 400)
+        if not output.get("tile_url") or not output.get("statistics"):
+            raise AnalysisError("Model tidak menghasilkan tile dan statistik yang valid", 422)
+        output["statistics"]["cache_key"] = key
+        comparison = output["statistics"].get("comparison")
+        if comparison:
+            comparison.update(event_id=run.event_id, aoi_id=run.aoi_id,
+                pre_imagery_id=run.pre_imagery_id, post_imagery_id=run.post_imagery_id)
+        result = disaster_repo.upsert_result(db, run.id, output)
+        run.status = "review_required" if comparison and comparison.get("review_reasons") else "completed"
         run.completed_at = dt.datetime.now(dt.UTC)
         db.commit()
-        raise
+        return {"run": run.to_dict(), "result": result.to_dict(include_features=True)}
     except Exception as exc:
-        logger.exception("Disaster analysis run %s failed", run_id)
+        logger.exception("Disaster analysis run %s model %s failed", run_id, run.model_id)
+        db.rollback()
         run.status = "failed"
         run.error_message = str(exc)
         run.completed_at = dt.datetime.now(dt.UTC)
         db.commit()
-        raise AnalysisError(str(exc), 500) from exc
-
-    run.status = "completed"
-    run.completed_at = dt.datetime.now(dt.UTC)
-    db.commit()
-
-    result = disaster_repo.upsert_result(db, run.id, output)
-    return {"run": run.to_dict(), "result": result.to_dict(include_features=True)}
+        if isinstance(exc, AnalysisError):
+            raise
+        raise AnalysisError(f"Analisis gagal: {exc}", 500) from exc
