@@ -32,9 +32,10 @@ RUN python -m pip install --no-cache-dir --upgrade \
     /tmp/* \
     /root/.cache/pip
 
-# Keep compilers and development headers out of the production image. The
-# scientific wheels still need these small runtime libraries at import time.
-FROM python:3.11-slim-bookworm AS runtime
+# Keep compilers and development headers out of the production image. Start
+# from a plain Debian runtime so its system Python metadata cannot reintroduce
+# stale packaging versions; copy only the patched interpreter from the builder.
+FROM debian:bookworm-slim AS runtime
 
 WORKDIR /app
 
@@ -42,46 +43,13 @@ ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgomp1 libstdc++6 libpq5 \
-    && (apt-get purge -y --auto-remove python3-msgpack python3-setuptools || true) \
+    ca-certificates libbz2-1.0 libexpat1 libffi8 libgomp1 liblzma5 \
+    libpq5 libsqlite3-0 libssl3 libstdc++6 libuuid1 zlib1g \
     && apt-get upgrade -y \
     && rm -rf /var/lib/apt/lists/*
 
-RUN find /usr/lib/python3/dist-packages /usr/lib/python3.11/dist-packages \
-      -maxdepth 1 -type d \( -iname 'msgpack*' -o -iname 'setuptools*' \) \
-      -exec rm -rf {} + 2>/dev/null || true
-
+COPY --from=builder /usr/local /usr/local
 COPY --from=builder /opt/venv /opt/venv
-
-# Patch the base interpreter's packaging metadata after the virtualenv is in
-# place; otherwise the copy from the builder could restore older metadata.
-RUN /usr/local/bin/python -m pip uninstall -y msgpack setuptools || true \
-    && /usr/local/bin/python -m pip install --no-cache-dir --ignore-installed \
-    "jaraco.context>=6.1.0" \
-    "msgpack>=1.2.1" \
-    "setuptools>=78.1.1" \
-    "wheel>=0.46.2" \
-    && rm -rf /root/.cache/pip
-
-RUN /opt/venv/bin/python -m pip uninstall -y msgpack setuptools || true \
-    && /opt/venv/bin/python -m pip install --no-cache-dir --ignore-installed \
-    "jaraco.context>=6.1.0" \
-    "msgpack>=1.2.1" \
-    "setuptools>=78.1.1" \
-    "wheel>=0.46.2" \
-    && rm -rf /root/.cache/pip
-
-# The base image may contain untracked copies under Debian's system Python
-# paths. The application uses /opt/venv, so remove only those stale copies.
-RUN find /usr/lib/python3 /usr/lib/python3.11 /usr/local/lib/python3.11 \
-      -type d \( -iname 'msgpack*' -o -iname 'setuptools*' \) \
-      -exec rm -rf {} + 2>/dev/null || true
-
-RUN find /opt/venv/lib/python3.11/site-packages -maxdepth 1 -type d \
-      \( -iname 'msgpack*' -o -iname 'setuptools*' \) -exec rm -rf {} + \
-    && /opt/venv/bin/python -m pip install --no-cache-dir --ignore-installed \
-      "msgpack>=1.2.1" "setuptools>=78.1.1" \
-    && rm -rf /root/.cache/pip
 
 COPY pyproject.toml README.md ./
 COPY app ./app
