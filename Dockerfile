@@ -10,15 +10,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && (apt-get purge -y --auto-remove python3-msgpack python3-setuptools || true) \
     && rm -rf /var/lib/apt/lists/*
 
-RUN python -m venv "${VIRTUAL_ENV}"
-
 COPY pyproject.toml README.md ./
 COPY app ./app
 COPY alembic ./alembic
 COPY alembic.ini ./
 COPY scripts ./scripts
 
-RUN python -m pip install --no-cache-dir --upgrade \
+RUN python -m venv "${VIRTUAL_ENV}" \
+    && python -m pip install --no-cache-dir --upgrade \
     pip \
     "setuptools>=78.1.1" \
     "wheel>=0.46.2" \
