@@ -43,8 +43,13 @@ ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 libstdc++6 libpq5 \
+    && (apt-get purge -y --auto-remove python3-msgpack python3-setuptools || true) \
     && apt-get upgrade -y \
     && rm -rf /var/lib/apt/lists/*
+
+RUN find /usr/lib/python3/dist-packages /usr/lib/python3.11/dist-packages \
+      -maxdepth 1 -type d \( -iname 'msgpack*' -o -iname 'setuptools*' \) \
+      -exec rm -rf {} + 2>/dev/null || true
 
 COPY --from=builder /opt/venv /opt/venv
 
