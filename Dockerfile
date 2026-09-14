@@ -48,11 +48,18 @@ ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 libstdc++6 libpq5 \
     && apt-get upgrade -y \
-    && find /usr/local/lib/python3.11/site-packages -maxdepth 1 \
-      \( -iname 'jaraco*context*' -o -iname 'wheel*' \) -exec rm -rf {} + \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /opt/venv /opt/venv
+
+# These packages are build tooling only. Remove any copy inherited from the
+# base image as well as the builder so Trivy scans only runtime dependencies.
+RUN rm -rf \
+    /usr/local/lib/python3.11/site-packages/jaraco* \
+    /usr/local/lib/python3.11/site-packages/wheel* \
+    /opt/venv/lib/python3.11/site-packages/jaraco* \
+    /opt/venv/lib/python3.11/site-packages/wheel*
+
 COPY pyproject.toml README.md ./
 COPY app ./app
 COPY alembic ./alembic
