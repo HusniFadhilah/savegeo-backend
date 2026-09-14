@@ -77,6 +77,12 @@ RUN find /usr/lib/python3 /usr/lib/python3.11 /usr/local/lib/python3.11 \
       -type d \( -iname 'msgpack*' -o -iname 'setuptools*' \) \
       -exec rm -rf {} + 2>/dev/null || true
 
+RUN find /opt/venv/lib/python3.11/site-packages -maxdepth 1 -type d \
+      \( -iname 'msgpack*' -o -iname 'setuptools*' \) -exec rm -rf {} + \
+    && /opt/venv/bin/python -m pip install --no-cache-dir --ignore-installed \
+      "msgpack>=1.2.1" "setuptools>=78.1.1" \
+    && rm -rf /root/.cache/pip
+
 COPY pyproject.toml README.md ./
 COPY app ./app
 COPY alembic ./alembic
