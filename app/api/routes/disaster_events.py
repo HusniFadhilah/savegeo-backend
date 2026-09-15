@@ -177,6 +177,10 @@ def get_disaster_statistics(event_id: int, viewer=Depends(get_current_disaster_v
         if run.model_id not in allowed or not result.statistics:
             continue
         kpis[run.model_id] = result.to_dict()["statistics"]
+    cross_layer = [
+        stat for stat in get_available_cross_layer_stats(db, event_id)
+        if all(layer in allowed for layer in stat.get("layers", []))
+    ]
     return {
         "event": {
             "id": event.id,
@@ -187,7 +191,7 @@ def get_disaster_statistics(event_id: int, viewer=Depends(get_current_disaster_v
             "end_date": event.end_date.isoformat() if event.end_date else None,
         },
         "kpis": kpis,
-        "cross_layer": get_available_cross_layer_stats(db, event_id),
+        "cross_layer": cross_layer,
     }
 
 
