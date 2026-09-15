@@ -91,6 +91,7 @@ class Settings(BaseSettings):
 
     # --- Disaster adapters ---
     bmkg_cap_url: str = "https://www.bmkg.go.id/alerts/nowcast/id"
+    nasa_firms_map_key: str = ""
     inarisk_wms_url: str = ""
     inarisk_wms_layers: str = ""
     inarisk_tile_url: str = ""

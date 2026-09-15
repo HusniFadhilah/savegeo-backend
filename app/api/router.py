@@ -22,6 +22,7 @@ from app.api.routes import (
     health,
     imagery,
     imagery_tiles,
+    geospatial,
     landcover,
     maps,
     models,
@@ -31,6 +32,7 @@ from app.api.routes import (
     user_auth,
     utils,
     vegetation,
+    workflows,
 )
 
 api_router = APIRouter()
@@ -62,3 +64,5 @@ api_router.include_router(fields.router)
 api_router.include_router(crop_monitoring.router)
 api_router.include_router(imagery.router)
 api_router.include_router(imagery_tiles.router)
+api_router.include_router(geospatial.router)
+api_router.include_router(workflows.router)

@@ -35,7 +35,8 @@ class AnalysisResult(Base):
             "id": self.id,
             "run_id": self.run_id,
             "tile_url": self.tile_url,
-            "statistics": self.statistics,
+            "statistics": {k: v for k, v in (self.statistics or {}).items() if k not in ("comparison", "cache_key")},
+            "comparison": (self.statistics or {}).get("comparison"),
             "legend": self.legend or [],
             "confidence_summary": self.confidence_summary,
             "is_published": self.is_published,
@@ -45,4 +46,9 @@ class AnalysisResult(Base):
         }
         if include_features:
             data["features"] = self.features
+        comparison = (self.statistics or {}).get("comparison")
+        if comparison:
+            for key in ("model_id", "model_version", "event_id", "aoi_id", "pre_imagery_id", "post_imagery_id",
+                        "pre_tile_url", "post_tile_url", "change_tile_url", "confidence_tile_url", "classes"):
+                data[key] = comparison.get(key)
         return data

@@ -22,6 +22,7 @@ from app.core.security import (
     create_admin_password_reset_token,
     decode_admin_password_reset_token,
     get_current_admin,
+    get_current_admin_panel,
     ADMIN_SESSION_COOKIE,
     clear_session_cookie,
     hash_password,
@@ -88,7 +89,7 @@ def me(admin: AdminUser = Depends(get_current_admin)):
 @router.put("/auth/change-password")
 def change_password(
     payload: ChangePasswordRequest,
-    admin: AdminUser = Depends(get_current_admin),
+    admin: AdminUser = Depends(get_current_admin_panel),
     db: Session = Depends(get_db),
 ):
     if not verify_password(payload.old_password, admin.password_hash):
@@ -141,7 +142,7 @@ def reset_password(payload: PasswordResetRequest, db: Session = Depends(get_db))
 
 # -- GEE credentials --
 @router.get("/gee/credentials")
-def list_gee_credentials(request: Request, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+def list_gee_credentials(request: Request, admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
     query = db.query(GEECredential).order_by(GEECredential.uploaded_at.desc())
 
     if is_datatables_request(request):
@@ -162,7 +163,7 @@ async def upload_gee_credential(
     label: str = Form(...),
     notes: str | None = Form(None),
     activate: bool = Form(False),
-    admin: AdminUser = Depends(get_current_admin),
+    admin: AdminUser = Depends(get_current_admin_panel),
     db: Session = Depends(get_db),
 ):
     raw = await file.read()
@@ -215,7 +216,7 @@ async def upload_gee_credential(
 
 
 @router.delete("/gee/credentials/{cred_id}")
-def delete_gee_credential(cred_id: int, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+def delete_gee_credential(cred_id: int, admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
     cred = db.get(GEECredential, cred_id)
     if not cred:
         raise HTTPException(status_code=404, detail="Credential not found")
@@ -233,7 +234,7 @@ def delete_gee_credential(cred_id: int, admin: AdminUser = Depends(get_current_a
 
 
 @router.post("/gee/credentials/{cred_id}/activate")
-def activate_gee_credential(cred_id: int, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+def activate_gee_credential(cred_id: int, admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
     cred = db.get(GEECredential, cred_id)
     if not cred:
         raise HTTPException(status_code=404, detail="Credential not found")
@@ -246,7 +247,7 @@ def activate_gee_credential(cred_id: int, admin: AdminUser = Depends(get_current
 
 
 @router.get("/gee/status")
-def gee_status(request: Request, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+def gee_status(request: Request, admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
     cred = gee_service.get_active_credential(db)
     return {
         "ee_initialized": getattr(request.app.state, "ee_initialized", False),
@@ -255,7 +256,7 @@ def gee_status(request: Request, admin: AdminUser = Depends(get_current_admin), 
 
 
 @router.post("/gee/reinitialize")
-def gee_reinitialize(request: Request, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+def gee_reinitialize(request: Request, admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
     success = gee_service.initialize_ee(db)
     request.app.state.ee_initialized = success
     return {"success": success, "message": "Earth Engine reinitialized" if success else "Earth Engine initialization failed"}
@@ -263,7 +264,7 @@ def gee_reinitialize(request: Request, admin: AdminUser = Depends(get_current_ad
 
 # -- ArcGIS --
 @router.get("/arcgis/status")
-def arcgis_status(admin: AdminUser = Depends(get_current_admin)):
+def arcgis_status(admin: AdminUser = Depends(get_current_admin_panel)):
     return get_arcgis_client().get_status()
 
 
@@ -283,7 +284,7 @@ def config_public(db: Session = Depends(get_db)):
 @router.get("/config")
 def config_all(
     category: str | None = None,
-    admin: AdminUser = Depends(get_current_admin),
+    admin: AdminUser = Depends(get_current_admin_panel),
     db: Session = Depends(get_db),
 ):
     rows = config_service.get_all_settings(db, category=category)
@@ -294,13 +295,13 @@ def config_all(
 
 
 @router.get("/config/{category}")
-def config_by_category(category: str, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+def config_by_category(category: str, admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
     rows = config_service.get_all_settings(db, category=category)
     return {"category": category, "config": [config_service.mask_config_dict(r) for r in rows]}
 
 
 @router.put("/config")
-async def config_update(request: Request, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+async def config_update(request: Request, admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
     body = await request.json()
     if isinstance(body, dict) and "updates" in body and isinstance(body["updates"], list):
         items = [(u["key"], u.get("value")) for u in body["updates"]]
@@ -324,7 +325,7 @@ async def config_update(request: Request, admin: AdminUser = Depends(get_current
 @router.post("/config/reset")
 def config_reset(
     payload: dict | None = None,
-    admin: AdminUser = Depends(get_current_admin),
+    admin: AdminUser = Depends(get_current_admin_panel),
     db: Session = Depends(get_db),
 ):
     key = (payload or {}).get("key")
@@ -337,7 +338,7 @@ def config_reset(
 def admin_models_list(
     request: Request,
     model_type: str | None = None,
-    admin: AdminUser = Depends(get_current_admin),
+    admin: AdminUser = Depends(get_current_admin_panel),
     db: Session = Depends(get_db),
 ):
     query = db.query(UploadedModel)
@@ -369,7 +370,7 @@ async def upload_model(
     feature_names: str | None = Form(None),
     metadata_json: str | None = Form(None),
     set_default: bool = Form(False),
-    admin: AdminUser = Depends(get_current_admin),
+    admin: AdminUser = Depends(get_current_admin_panel),
     db: Session = Depends(get_db),
 ):
     if model_type not in ("carbon", "vegetation", "landcover"):
@@ -428,7 +429,7 @@ async def upload_model(
 
 
 @router.get("/models/{model_id}")
-def admin_model_detail(model_id: int, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+def admin_model_detail(model_id: int, admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
     model = db.get(UploadedModel, model_id)
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
@@ -439,7 +440,7 @@ def admin_model_detail(model_id: int, admin: AdminUser = Depends(get_current_adm
 def admin_model_update(
     model_id: int,
     payload: ModelUpdateRequest,
-    admin: AdminUser = Depends(get_current_admin),
+    admin: AdminUser = Depends(get_current_admin_panel),
     db: Session = Depends(get_db),
 ):
     model = db.get(UploadedModel, model_id)
@@ -453,7 +454,7 @@ def admin_model_update(
 
 
 @router.delete("/models/{model_id}")
-def admin_model_delete(model_id: int, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+def admin_model_delete(model_id: int, admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
     model = db.get(UploadedModel, model_id)
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
@@ -470,7 +471,7 @@ def admin_model_delete(model_id: int, admin: AdminUser = Depends(get_current_adm
 
 
 @router.post("/models/{model_id}/set-default")
-def admin_model_set_default(model_id: int, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+def admin_model_set_default(model_id: int, admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
     model = db.get(UploadedModel, model_id)
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
@@ -481,7 +482,7 @@ def admin_model_set_default(model_id: int, admin: AdminUser = Depends(get_curren
 
 
 @router.post("/models/import-legacy")
-def admin_import_legacy_models(admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+def admin_import_legacy_models(admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
     settings = get_settings()
     result = import_legacy_models(db, str(settings.model_path))
     return {"message": "Legacy import complete", **result}
@@ -489,13 +490,13 @@ def admin_import_legacy_models(admin: AdminUser = Depends(get_current_admin), db
 
 # -- Admin users (RBAC) --
 @router.get("/roles")
-def list_roles(admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+def list_roles(admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
     roles = db.query(Role).order_by(Role.name).all()
     return {"roles": [r.to_dict() for r in roles]}
 
 
 @router.get("/users")
-def admin_users_list(request: Request, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+def admin_users_list(request: Request, admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
     query = db.query(AdminUser).order_by(AdminUser.created_at.desc())
 
     if is_datatables_request(request):
@@ -513,7 +514,7 @@ def admin_users_list(request: Request, admin: AdminUser = Depends(get_current_ad
 @router.post("/users", status_code=201)
 def admin_user_create(
     payload: AdminUserCreateRequest,
-    admin: AdminUser = Depends(get_current_admin),
+    admin: AdminUser = Depends(get_current_admin_panel),
     db: Session = Depends(get_db),
 ):
     if len(payload.password) < 8:
@@ -541,7 +542,7 @@ def admin_user_create(
 def admin_user_update(
     user_id: int,
     payload: AdminUserUpdateRequest,
-    admin: AdminUser = Depends(get_current_admin),
+    admin: AdminUser = Depends(get_current_admin_panel),
     db: Session = Depends(get_db),
 ):
     target = db.get(AdminUser, user_id)
@@ -575,7 +576,7 @@ def admin_user_update(
 
 
 @router.delete("/users/{user_id}")
-def admin_user_delete(user_id: int, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+def admin_user_delete(user_id: int, admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
     target = db.get(AdminUser, user_id)
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
@@ -797,7 +798,7 @@ def admin_companies_list(
     industry_type: str | None = None,
     province: str | None = None,
     search: str | None = None,
-    admin: AdminUser = Depends(get_current_admin),
+    admin: AdminUser = Depends(get_current_admin_panel),
     db: Session = Depends(get_db),
 ):
     query = db.query(CompanyBoundary)
@@ -822,7 +823,7 @@ def admin_companies_list(
 
 
 @router.get("/companies/provinces")
-def admin_companies_provinces(admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+def admin_companies_provinces(admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
     rows = (
         db.query(CompanyBoundary.province)
         .filter(CompanyBoundary.province.isnot(None))
@@ -836,7 +837,7 @@ def admin_companies_provinces(admin: AdminUser = Depends(get_current_admin), db:
 @router.post("/companies", status_code=201)
 async def admin_company_create(
     request: Request,
-    admin: AdminUser = Depends(get_current_admin),
+    admin: AdminUser = Depends(get_current_admin_panel),
     db: Session = Depends(get_db),
 ):
     content_type = request.headers.get("content-type", "")
@@ -902,7 +903,7 @@ async def admin_company_create(
 
 
 @router.get("/companies/{cid}")
-def admin_company_detail(cid: int, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+def admin_company_detail(cid: int, admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
     company = db.get(CompanyBoundary, cid)
     if not company:
         raise HTTPException(status_code=404, detail="Company not found")
@@ -913,7 +914,7 @@ def admin_company_detail(cid: int, admin: AdminUser = Depends(get_current_admin)
 async def admin_company_update(
     cid: int,
     request: Request,
-    admin: AdminUser = Depends(get_current_admin),
+    admin: AdminUser = Depends(get_current_admin_panel),
     db: Session = Depends(get_db),
 ):
     company = db.get(CompanyBoundary, cid)
@@ -937,7 +938,7 @@ async def admin_company_update(
 
 
 @router.delete("/companies/{cid}")
-def admin_company_delete(cid: int, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+def admin_company_delete(cid: int, admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
     company = db.get(CompanyBoundary, cid)
     if not company:
         raise HTTPException(status_code=404, detail="Company not found")
@@ -968,7 +969,7 @@ def _fetch_osm_overpass(overpass_query: str) -> tuple[dict | None, str]:
 @router.post("/companies/import/osm")
 async def admin_companies_import_osm(
     request: Request,
-    admin: AdminUser = Depends(get_current_admin),
+    admin: AdminUser = Depends(get_current_admin_panel),
     db: Session = Depends(get_db),
 ):
     """Import company boundaries from OpenStreetMap Overpass API."""
@@ -1051,7 +1052,7 @@ def _fetch_gfw_carto(ds: dict) -> dict:
 @router.post("/companies/import/gfw")
 async def admin_companies_import_gfw(
     request: Request,
-    admin: AdminUser = Depends(get_current_admin),
+    admin: AdminUser = Depends(get_current_admin_panel),
     db: Session = Depends(get_db),
 ):
     """Import Indonesia concession boundaries from Global Forest Watch via
@@ -1111,7 +1112,7 @@ async def admin_companies_import_gfw(
 
 # -- Satellite provider overlay (admin CRUD on top of the static registry) --
 @router.get("/satellite-providers")
-def admin_satellite_providers_list(admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+def admin_satellite_providers_list(admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
     """Merged registry+override view for the admin editor - unlike the public
     GET /vegetation/satellites picker, this includes admin-deactivated
     providers too (so there's something to toggle back on)."""
@@ -1130,7 +1131,7 @@ def admin_satellite_providers_list(admin: AdminUser = Depends(get_current_admin)
 def admin_satellite_provider_upsert(
     key: str,
     payload: SatelliteProviderUpdateRequest,
-    admin: AdminUser = Depends(get_current_admin),
+    admin: AdminUser = Depends(get_current_admin_panel),
     db: Session = Depends(get_db),
 ):
     if key not in SATELLITE_PROVIDERS:
@@ -1148,7 +1149,7 @@ def admin_satellite_provider_upsert(
 
 
 @router.delete("/satellite-providers/{key}")
-def admin_satellite_provider_reset(key: str, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+def admin_satellite_provider_reset(key: str, admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
     """Remove the override row - reverts this provider back to its static registry default."""
     row = db.query(SatelliteProviderEntry).filter_by(key=key).first()
     if not row:
@@ -1172,7 +1173,7 @@ def _mask_key_prefix(k: str) -> str:
 
 
 @router.get("/key-pool/status")
-def key_pool_status(admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+def key_pool_status(admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
     result: dict[str, list[dict]] = {}
     for provider in _KEY_POOL_PROVIDERS:
         primary = config_service.get_setting(db, f"ai.{provider}_api_key", "") or ""

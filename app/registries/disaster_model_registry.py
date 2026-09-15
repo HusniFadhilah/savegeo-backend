@@ -1,23 +1,11 @@
-"""Static analysis-model catalog for the Disaster Intelligence Dashboard
-(spec sections 6-7, 54, 57). Same "static registry, admin can enable/disable
-via curated dict" convention as `carbon_dataset_registry.py` /
-`landcover_dataset_registry.py` - adding a model later means adding one entry
-here plus (if it's a real, runnable model) a compute function in
-`app/services/disaster_analysis_service.py`. No DB row needed to add a model.
+"""Available disaster methods and existing hosted Dynamic World predictions.
 
-Only 3 entries are `enabled: True` today - the rest require an object-detection
-/ change-detection model that has not been trained anywhere in this codebase
-(verified: zero hits for road-damage/building-change/building-segmentation
-across both `backend/` legacy and `savegeo/backend/`). Registering them
-disabled keeps the architecture future-proof (spec section 57: add a model
-without redesign) without ever faking a result (spec section 55-56).
-
-`user_label` is what User-facing UI must render (spec section 54 - "Run Flood
-Detection" internally is surfaced to User as "Flood Change", never the raw
-model_id). `backend_label` is the internal/versioned name, shown only in Admin
-UI and Analysis Information metadata (spec section 34).
+Dynamic World supplies semantic land-cover classes, not disaster damage labels.
+Disabled object models have no runnable implementation.
 """
 from __future__ import annotations
+
+from app.registries.landcover_dataset_registry import LAND_COVER_LEGENDS
 
 DISASTER_MODEL_REGISTRY: dict[str, dict] = {
     "flood_change_v1": {
@@ -31,6 +19,10 @@ DISASTER_MODEL_REGISTRY: dict[str, dict] = {
         "satellite": "Sentinel-1 SAR GRD",
         "description": "Perbandingan citra SAR sebelum/sesudah untuk mendeteksi area tergenang baru.",
         "enabled": True,
+        "result_semantics": "change_indicator",
+        "damage_model": False,
+        "validation_status": "method_validation_only",
+        "limitations": ["Tidak menghasilkan kelas kerusakan bencana terlatih."],
     },
     "water_segmentation_v1": {
         "model_id": "water_segmentation_v1",
@@ -43,6 +35,10 @@ DISASTER_MODEL_REGISTRY: dict[str, dict] = {
         "satellite": "Sentinel-2 Optical (NDWI)",
         "description": "Segmentasi tutupan air permukaan berbasis indeks NDWI pada satu tanggal citra.",
         "enabled": True,
+        "result_semantics": "water_extent",
+        "damage_model": False,
+        "validation_status": "method_validation_only",
+        "limitations": ["Hasil adalah luas air berbasis NDWI, bukan kelas kerusakan bencana."],
     },
     "forest_change_v1": {
         "model_id": "forest_change_v1",
@@ -55,6 +51,10 @@ DISASTER_MODEL_REGISTRY: dict[str, dict] = {
         "satellite": "Sentinel-2 Optical (NDVI)",
         "description": "Perbandingan indeks NDVI sebelum/sesudah untuk mengindikasikan perubahan tutupan hutan.",
         "enabled": True,
+        "result_semantics": "change_indicator",
+        "damage_model": False,
+        "validation_status": "method_validation_only",
+        "limitations": ["Perubahan NDVI adalah indikator perubahan vegetasi, bukan kelas area terbakar/longsor."],
     },
     "building_change_v1": {
         "model_id": "building_change_v1",
@@ -95,11 +95,41 @@ DISASTER_MODEL_REGISTRY: dict[str, dict] = {
 }
 
 
-def list_models(enabled_only: bool = False) -> list[dict]:
+DISASTER_MODEL_REGISTRY["dynamic_world_v1"] = {
+    "model_id": "dynamic_world_v1", "backend_label": "Dynamic World V1",
+    "user_label": "Segmentasi tutupan lahan pre/post", "category": "segmentation",
+    "version": "1.0", "enabled": True, "input_type": ["pre_imagery", "post_imagery"],
+    "output_type": "raster+statistics+confidence", "satellite": "Sentinel-2",
+    "resolution_m": 10, "temporal_mode": "independent_published_inference",
+    "dataset": "GOOGLE/DYNAMICWORLD/V1", "multiclass": True,
+    "result_semantics": "land_cover",
+    "damage_model": False,
+    "validation_status": "land_cover_only",
+    "limitations": [
+        "Kelas berasal dari legenda Dynamic World dan tidak merepresentasikan kerusakan bencana.",
+        "Perubahan pre/post tidak boleh ditafsirkan sebagai area terbakar, longsor, tsunami, atau kerusakan bangunan tanpa validasi lapangan.",
+    ],
+    "description": "Prediksi model Dynamic World yang sudah tersedia, dipilih terpisah pada tanggal pre/post. Sembilan kelas tutupan lahan; bukan diagnosis kerusakan atau model change-detection langsung.",
+    "reliability": "Probabilitas kelas tersedia; akurasi dampak bencana belum divalidasi.",
+    "disaster_types": ["flood", "landslide", "forest_fire", "tsunami", "earthquake", "volcanic_eruption", "storm", "drought", "other"],
+    "classes": [{"class_id": int(key), **value} for key, value in LAND_COVER_LEGENDS["Dynamic_World"].items()],
+}
+for _key, _types in {
+    "flood_change_v1": ["flood", "tsunami"],
+    "water_segmentation_v1": ["flood", "tsunami"],
+    "forest_change_v1": ["forest_fire", "landslide", "drought", "storm", "other"],
+}.items():
+    DISASTER_MODEL_REGISTRY[_key].update(disaster_types=_types, multiclass=False,
+        reliability="Metode indeks/ambang; bukan model kerusakan terlatih.")
+
+
+def list_models(enabled_only: bool = False, disaster_type: str | None = None) -> list[dict]:
     values = list(DISASTER_MODEL_REGISTRY.values())
     if enabled_only:
         values = [m for m in values if m["enabled"]]
-    return values
+    if disaster_type:
+        values = [m for m in values if disaster_type in m.get("disaster_types", [])]
+    return sorted(values, key=lambda m: (bool(m.get("multiclass")), tuple(int(n) for n in m["version"].split("."))), reverse=True)
 
 
 def get_model(model_id: str) -> dict | None:

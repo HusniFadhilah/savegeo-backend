@@ -49,15 +49,20 @@ def _build_analyses(db: Session, event_id: int) -> list[dict]:
     `available: False` so User sees "Not Available" instead of the item
     vanishing (contract doc, section B)."""
     entries = []
-    for model in disaster_model_registry.list_models(enabled_only=True):
+    event = disaster_repo.get_event(db, event_id)
+    for model in disaster_model_registry.list_models(enabled_only=True, disaster_type=event.disaster_type if event else None):
         model_id = model["model_id"]
         published = disaster_repo.get_published_analysis(db, event_id, model_id)
-        if published is not None:
+        if published is not None and published[0].status in ("completed", "review_required", "published"):
             run, result = published
             entries.append({
                 "model_id": model_id,
                 "user_label": model["user_label"],
                 "category": model["category"],
+                "result_semantics": model.get("result_semantics"),
+                "damage_model": bool(model.get("damage_model", False)),
+                "validation_status": model.get("validation_status"),
+                "limitations": list(model.get("limitations", [])),
                 "available": True,
                 "run": run.to_dict(),
                 "result": result.to_dict(),
@@ -67,11 +72,27 @@ def _build_analyses(db: Session, event_id: int) -> list[dict]:
                 "model_id": model_id,
                 "user_label": model["user_label"],
                 "category": model["category"],
+                "result_semantics": model.get("result_semantics"),
+                "damage_model": bool(model.get("damage_model", False)),
+                "validation_status": model.get("validation_status"),
+                "limitations": list(model.get("limitations", [])),
                 "available": False,
                 "run": None,
                 "result": None,
             })
     return entries
+
+
+def _compatible_model_ids(event: DisasterEvent) -> set[str]:
+    """Return only models explicitly registered for this event type.
+
+    Persisted runs can outlive a registry change. Filtering at the published
+    API boundary prevents a flood page from displaying stale forest/generic
+    KPIs that happen to share the same event row.
+    """
+    return {model["model_id"] for model in disaster_model_registry.list_models(
+        enabled_only=True, disaster_type=event.disaster_type,
+    )}
 
 
 @router.get("")
@@ -96,7 +117,11 @@ def list_disasters(
     result = []
     for event in events:
         data = event.to_dict()
-        data["available_analysis_count"] = len(disaster_repo.list_published_analyses(db, event.id))
+        allowed = _compatible_model_ids(event)
+        data["available_analysis_count"] = sum(
+            1 for run, _ in disaster_repo.list_published_analyses(db, event.id)
+            if run.model_id in allowed
+        )
         result.append(data)
     return {"events": result}
 
@@ -145,13 +170,28 @@ def get_disaster_layers(event_id: int, viewer=Depends(get_current_disaster_viewe
 
 @router.get("/{event_id}/statistics")
 def get_disaster_statistics(event_id: int, viewer=Depends(get_current_disaster_viewer), db: Session = Depends(get_db)):
-    _get_published_event(db, event_id)
+    event = _get_published_event(db, event_id)
+    allowed = _compatible_model_ids(event)
     kpis = {}
     for run, result in disaster_repo.list_published_analyses(db, event_id):
-        kpis[run.model_id] = result.statistics
+        if run.model_id not in allowed or not result.statistics:
+            continue
+        kpis[run.model_id] = result.to_dict()["statistics"]
+    cross_layer = [
+        stat for stat in get_available_cross_layer_stats(db, event_id)
+        if all(layer in allowed for layer in stat.get("layers", []))
+    ]
     return {
+        "event": {
+            "id": event.id,
+            "name": event.name,
+            "disaster_type": event.disaster_type,
+            "event_date": event.event_date.isoformat() if event.event_date else None,
+            "start_date": event.start_date.isoformat() if event.start_date else None,
+            "end_date": event.end_date.isoformat() if event.end_date else None,
+        },
         "kpis": kpis,
-        "cross_layer": get_available_cross_layer_stats(db, event_id),
+        "cross_layer": cross_layer,
     }
 
 

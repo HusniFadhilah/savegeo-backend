@@ -157,12 +157,25 @@ jobs:
                 > "var/exports/predeploy_$(date +%Y%m%d_%H%M%S).dump"
             fi
             docker compose -f docker-compose.prod.yml up -d --build
+            healthy=0
             for i in $(seq 1 30); do
-              curl --fail --silent "$BACKEND_HEALTH_URL" >/dev/null && exit 0
+              if curl --fail --silent "$BACKEND_HEALTH_URL" >/dev/null; then
+                healthy=1
+                break
+              fi
               sleep 3
             done
-            docker compose -f docker-compose.prod.yml logs --tail=150 api
-            exit 1
+            if [ "$healthy" -ne 1 ]; then
+              docker compose -f docker-compose.prod.yml logs --tail=150 api
+              exit 1
+            fi
+            # Runtime model files are deliberately excluded from rsync. Refresh
+            # the database registry from their sidecar metadata after every
+            # deploy so GEDI L4A/L4D and ESA CCI model choices match the files
+            # actually mounted on this server.
+            docker compose -f docker-compose.prod.yml exec -T api \
+              python -m scripts.import_legacy_models /app/var/saved_models
+            curl --fail --silent "$BACKEND_HEALTH_URL" >/dev/null
           REMOTE_DEPLOY
 
   gitleaks:
@@ -212,6 +225,7 @@ jobs:
           severity: HIGH,CRITICAL
           exit-code: "1"
           ignore-unfixed: true
+          trivyignores: .trivyignore
 
       - name: Report Trivy findings
         if: failure()

@@ -75,9 +75,10 @@ def import_legacy_models(db: Session, saved_models_dir: str) -> dict:
     """
     saved_dir = Path(saved_models_dir)
     if not saved_dir.exists():
-        return {"imported": 0, "skipped": 0, "errors": []}
+        return {"imported": 0, "updated": 0, "skipped": 0, "errors": []}
 
     imported = 0
+    updated = 0
     skipped = 0
     errors: list[dict] = []
 
@@ -86,10 +87,6 @@ def import_legacy_models(db: Session, saved_models_dir: str) -> dict:
             continue
         try:
             model_name = model_file.stem
-            if db.query(UploadedModel).filter_by(name=model_name).first():
-                skipped += 1
-                continue
-
             metadata = _safe_json_load_file(model_file.with_suffix(".json"))
             if metadata.get("training_source") == "arcgis_living_atlas":
                 skipped += 1
@@ -105,6 +102,24 @@ def import_legacy_models(db: Session, saved_models_dir: str) -> dict:
                 "scaled_features": metadata.get("scaled_features"),
             }
             file_size_kb = round(model_file.stat().st_size / 1024, 2)
+
+            existing = db.query(UploadedModel).filter_by(name=model_name).first()
+            if existing is not None:
+                # Runtime model files live outside Git and can be replaced by a
+                # retraining/export job without changing the model name. Keep
+                # the DB registry in lock-step with the sidecar metadata while
+                # preserving administrator-controlled active/default flags.
+                existing.display_name = existing.display_name or model_name
+                existing.algorithm = metadata.get("algorithm") or existing.algorithm
+                existing.filename = model_file.name
+                existing.filepath = str(model_file.resolve())
+                existing.file_size_kb = file_size_kb
+                existing.version = metadata.get("version") or existing.version
+                existing.metrics = metrics
+                existing.feature_names = metadata.get("feature_names", existing.feature_names or [])
+                existing.metadata_json = metadata or existing.metadata_json
+                updated += 1
+                continue
 
             db.add(
                 UploadedModel(
@@ -131,4 +146,4 @@ def import_legacy_models(db: Session, saved_models_dir: str) -> dict:
             errors.append({"file": str(model_file), "error": str(e)})
 
     db.commit()
-    return {"imported": imported, "skipped": skipped, "errors": errors}
+    return {"imported": imported, "updated": updated, "skipped": skipped, "errors": errors}

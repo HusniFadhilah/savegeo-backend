@@ -28,6 +28,8 @@ def compute_flood_forest_overlay(db: Session, event_id: int) -> dict | None:
         return None
     flood_run, _ = flood
     forest_run, _ = forest
+    if flood_run.aoi_id != forest_run.aoi_id:
+        return None
 
     flood_aoi_row = disaster_repo.get_aoi(db, flood_run.aoi_id)
     if flood_aoi_row is None:
@@ -38,6 +40,8 @@ def compute_flood_forest_overlay(db: Session, event_id: int) -> dict | None:
     flood_post_img = disaster_repo.get_imagery(db, flood_run.post_imagery_id) if flood_run.post_imagery_id else None
     forest_post_img = disaster_repo.get_imagery(db, forest_run.post_imagery_id) if forest_run.post_imagery_id else None
     if not (flood_pre_img and flood_post_img and forest_post_img):
+        return None
+    if flood_post_img.acquisition_date != forest_post_img.acquisition_date:
         return None
 
     try:
