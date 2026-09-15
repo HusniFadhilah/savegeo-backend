@@ -89,4 +89,4 @@ jobs:
       - name: Report Trivy findings
         if: failure()
         run: |
-          jq '[.Results[]? | {Target, Vulnerabilities: [.Vulnerabilities[]? | {VulnerabilityID, PkgName, InstalledVersion, FixedVersion, Severity}] } | select(.Vulnerabilities | length > 0)]' trivy-results.json
+          jq '[.Results[]? | {Target, Vulnerabilities: [.Vulnerabilities[]? | {VulnerabilityID, PkgName, PkgPath, InstalledVersion, FixedVersion, Severity}] } | select(.Vulnerabilities | length > 0)]' trivy-results.json

@@ -10,27 +10,31 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && (apt-get purge -y --auto-remove python3-msgpack python3-setuptools || true) \
     && rm -rf /var/lib/apt/lists/*
 
-RUN python -m venv "${VIRTUAL_ENV}"
-
 COPY pyproject.toml README.md ./
 COPY app ./app
 COPY alembic ./alembic
 COPY alembic.ini ./
 COPY scripts ./scripts
 
-RUN python -m pip install --no-cache-dir --upgrade \
-    pip \
-    "setuptools>=78.1.1" \
-    "wheel>=0.46.2" \
-    && python -m pip install --no-cache-dir . \
-    && python -m pip install --no-cache-dir --upgrade \
-    "jaraco.context>=6.1.0" \
+RUN python -m venv --without-pip "${VIRTUAL_ENV}" \
+    && /usr/local/bin/python -m pip install --no-cache-dir \
+    --target "${VIRTUAL_ENV}/lib/python3.11/site-packages" . \
+    && /usr/local/bin/python -m pip install --no-cache-dir --upgrade \
+    --target "${VIRTUAL_ENV}/lib/python3.11/site-packages" \
     "msgpack>=1.2.1" \
-    "setuptools>=78.1.1" \
-    "wheel>=0.46.2" \
     && rm -rf \
     /tmp/* \
-    /root/.cache/pip
+    /root/.cache/pip \
+    /usr/local/lib/python3.11/site-packages \
+    /usr/local/lib/python3.11/dist-packages \
+    /usr/local/lib/python3.11/ensurepip \
+    && tar -C /usr/local \
+    --exclude='lib/python3.11/site-packages' \
+    --exclude='lib/python3.11/dist-packages' \
+    --exclude='lib/python3.11/ensurepip' \
+    --exclude='**/*msgpack*' \
+    --exclude='**/*setuptools*' \
+    -cf /tmp/python-runtime.tar .
 
 # Keep compilers and development headers out of the production image. Start
 # from a plain Debian runtime so its system Python metadata cannot reintroduce
@@ -48,15 +52,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get upgrade -y \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /usr/local /usr/local
+COPY --from=builder /tmp/python-runtime.tar /tmp/python-runtime.tar
+RUN tar -C /usr/local -xf /tmp/python-runtime.tar \
+    && rm -f /tmp/python-runtime.tar
 COPY --from=builder /opt/venv /opt/venv
-
-# The builder's global site-packages contain packaging tools from the base
-# image. They are not used by the application venv and can leave stale
-# vulnerable metadata visible to image scanners, so retain only the Python
-# runtime and the patched venv.
-RUN rm -rf /usr/local/lib/python3.11/site-packages \
-    /usr/local/lib/python3.11/dist-packages
 
 COPY pyproject.toml README.md ./
 COPY app ./app
@@ -67,4 +66,4 @@ COPY scripts ./scripts
 ENV PORT=8086
 EXPOSE 8086
 
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT}"]
+CMD ["sh", "-c", "python -m uvicorn app.main:app --host 0.0.0.0 --port ${PORT}"]
