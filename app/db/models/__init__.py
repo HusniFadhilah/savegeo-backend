@@ -20,6 +20,7 @@ from app.db.models.satellite_provider_entry import SatelliteProviderEntry
 from app.db.models.system_config import SystemConfig
 from app.db.models.uploaded_model import UploadedModel
 from app.db.models.user import User
+from app.db.models.workflow import Workflow, WorkflowRun
 
 __all__ = [
     "AdminUser",
@@ -42,5 +43,7 @@ __all__ = [
     "SystemConfig",
     "UploadedModel",
     "User",
+    "Workflow",
+    "WorkflowRun",
     "role_permissions",
 ]

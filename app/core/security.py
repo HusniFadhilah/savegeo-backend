@@ -26,6 +26,7 @@ _bearer_scheme = HTTPBearer(auto_error=False)
 
 ADMIN_SESSION_COOKIE = "savegeo_admin_session"
 USER_SESSION_COOKIE = "savegeo_user_session"
+ADMIN_VIEWER_DENIED_DETAIL = "Role viewer tidak memiliki akses ke dashboard admin"
 
 # Hash directly with `bcrypt` rather than via passlib's CryptContext: passlib is
 # unmaintained and its bcrypt backend self-test crashes against bcrypt>=4.1
@@ -163,6 +164,18 @@ def _credential_or_cookie(
     return None
 
 
+def is_admin_panel_viewer(admin: AdminUser) -> bool:
+    """Return whether an admin account is explicitly assigned the viewer role."""
+    return bool(admin.role and admin.role.name and admin.role.name.strip().casefold() == "viewer")
+
+
+def ensure_admin_panel_access(admin: AdminUser) -> AdminUser:
+    """Block viewer accounts from every admin-panel endpoint."""
+    if is_admin_panel_viewer(admin):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=ADMIN_VIEWER_DENIED_DETAIL)
+    return admin
+
+
 def get_current_admin(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
@@ -181,6 +194,19 @@ def get_current_admin(
     if admin is None or not admin.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin account not found or inactive")
     return admin
+
+
+def get_current_admin_panel(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+    db: Session = Depends(get_db),
+) -> AdminUser:
+    """Authentication dependency for admin-panel resources.
+
+    Viewer admins keep their authenticated session so they can use the main
+    application, but cannot call any endpoint that explicitly uses this gate.
+    """
+    return ensure_admin_panel_access(get_current_admin(request=request, credentials=credentials, db=db))
 
 
 def get_current_user(
@@ -266,7 +292,7 @@ def require_permission(code: str):
     role are checked against that role's permission list.
     """
 
-    def _dependency(admin: AdminUser = Depends(get_current_admin)) -> AdminUser:
+    def _dependency(admin: AdminUser = Depends(get_current_admin_panel)) -> AdminUser:
         if admin.role_id is None:
             return admin
         codes = {p.code for p in (admin.role.permissions if admin.role else [])}

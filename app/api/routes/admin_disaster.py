@@ -32,7 +32,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.core.security import get_current_admin, require_permission
+from app.core.security import get_current_admin_panel, require_permission
 from app.db.models.admin_user import AdminUser
 from app.db.models.analysis_run import RUN_STATUSES
 from app.db.models.audit_log import AuditLog
@@ -188,7 +188,7 @@ def _get_run_or_404(db: Session, run_id: int):
 @router.post("/disasters", status_code=201)
 def admin_create_event(
     payload: EventCreateRequest,
-    admin: AdminUser = Depends(get_current_admin),
+    admin: AdminUser = Depends(get_current_admin_panel),
     _perm: AdminUser = Depends(require_permission("disaster.create")),
     db: Session = Depends(get_db),
 ):
@@ -209,7 +209,7 @@ def admin_list_events(
     severity: str | None = None,
     year: int | None = None,
     search: str | None = None,
-    admin: AdminUser = Depends(get_current_admin),
+    admin: AdminUser = Depends(get_current_admin_panel),
     db: Session = Depends(get_db),
 ):
     events = disaster_repo.list_events(
@@ -225,7 +225,7 @@ def admin_list_events(
 
 
 @router.get("/disasters/models")
-def admin_list_disaster_models(event_id: int | None = None, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+def admin_list_disaster_models(event_id: int | None = None, admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
     event = _get_event_or_404(db, event_id) if event_id else None
     models = list_models(enabled_only=False, disaster_type=event.disaster_type if event else None)
     settings = get_settings()
@@ -263,7 +263,7 @@ def admin_list_disaster_models(event_id: int | None = None, admin: AdminUser = D
 
 
 @router.get("/disasters/{id}")
-def admin_get_event(id: int, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+def admin_get_event(id: int, admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
     event = _get_event_or_404(db, id)
     aoi = disaster_repo.get_active_aoi(db, id)
     pre_imagery = disaster_repo.list_imagery(db, id, "pre")
@@ -289,7 +289,7 @@ def admin_get_event(id: int, admin: AdminUser = Depends(get_current_admin), db: 
 def admin_update_event(
     id: int,
     payload: EventUpdateRequest,
-    admin: AdminUser = Depends(get_current_admin),
+    admin: AdminUser = Depends(get_current_admin_panel),
     _perm: AdminUser = Depends(require_permission("disaster.update")),
     db: Session = Depends(get_db),
 ):
@@ -310,7 +310,7 @@ def admin_update_event(
 @router.delete("/disasters/{id}")
 def admin_delete_event(
     id: int,
-    admin: AdminUser = Depends(get_current_admin),
+    admin: AdminUser = Depends(get_current_admin_panel),
     _perm: AdminUser = Depends(require_permission("disaster.delete")),
     db: Session = Depends(get_db),
 ):
@@ -328,7 +328,7 @@ def admin_delete_event(
 def admin_create_aoi(
     id: int,
     payload: AoiCreateRequest,
-    admin: AdminUser = Depends(get_current_admin),
+    admin: AdminUser = Depends(get_current_admin_panel),
     _perm: AdminUser = Depends(require_permission("disaster.aoi.write")),
     db: Session = Depends(get_db),
 ):
@@ -354,7 +354,7 @@ def admin_create_aoi(
 def admin_list_imagery(
     id: int,
     phase: str | None = None,
-    admin: AdminUser = Depends(get_current_admin),
+    admin: AdminUser = Depends(get_current_admin_panel),
     db: Session = Depends(get_db),
 ):
     _get_event_or_404(db, id)
@@ -366,7 +366,7 @@ def admin_list_imagery(
 def admin_add_imagery(
     id: int,
     payload: ImageryCreateRequest,
-    admin: AdminUser = Depends(get_current_admin),
+    admin: AdminUser = Depends(get_current_admin_panel),
     _perm: AdminUser = Depends(require_permission("disaster.imagery.write")),
     db: Session = Depends(get_db),
 ):
@@ -393,7 +393,7 @@ async def admin_upload_imagery(
     data_source: str | None = Form(None),
     is_primary: bool = Form(False),
     file: UploadFile = File(...),
-    admin: AdminUser = Depends(get_current_admin),
+    admin: AdminUser = Depends(get_current_admin_panel),
     _perm: AdminUser = Depends(require_permission("disaster.imagery.write")),
     db: Session = Depends(get_db),
 ):
@@ -491,7 +491,7 @@ async def admin_upload_imagery(
 def admin_set_primary_imagery(
     id: int,
     imagery_id: int,
-    admin: AdminUser = Depends(get_current_admin),
+    admin: AdminUser = Depends(get_current_admin_panel),
     _perm: AdminUser = Depends(require_permission("disaster.imagery.write")),
     db: Session = Depends(get_db),
 ):
@@ -516,7 +516,7 @@ def admin_local_imagery_tile(
     z: int,
     x: int,
     y: int,
-    admin: AdminUser = Depends(get_current_admin),
+    admin: AdminUser = Depends(get_current_admin_panel),
     db: Session = Depends(get_db),
 ):
     """Admin preview of a `source_kind="local_upload"` raster's tiles before
@@ -542,7 +542,7 @@ def admin_local_imagery_tile(
 def admin_create_analysis(
     id: int,
     payload: AnalysisCreateRequest,
-    admin: AdminUser = Depends(get_current_admin),
+    admin: AdminUser = Depends(get_current_admin_panel),
     _perm: AdminUser = Depends(require_permission("disaster.analysis.configure")),
     db: Session = Depends(get_db),
 ):
@@ -575,7 +575,7 @@ def admin_create_analysis(
 
 
 @router.get("/disasters/{id}/analyses")
-def admin_list_analyses(id: int, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+def admin_list_analyses(id: int, admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
     _get_event_or_404(db, id)
     runs = disaster_repo.list_runs_for_event(db, id)
     entries = []
@@ -589,7 +589,7 @@ def admin_list_analyses(id: int, admin: AdminUser = Depends(get_current_admin), 
 def admin_run_analysis(
     run_id: int,
     force: bool = False,
-    admin: AdminUser = Depends(get_current_admin),
+    admin: AdminUser = Depends(get_current_admin_panel),
     _perm: AdminUser = Depends(require_permission("disaster.analysis.run")),
     db: Session = Depends(get_db),
 ):
@@ -609,7 +609,7 @@ def admin_run_analysis(
 def admin_update_analysis_status(
     run_id: int,
     payload: RunStatusUpdateRequest,
-    admin: AdminUser = Depends(get_current_admin),
+    admin: AdminUser = Depends(get_current_admin_panel),
     _perm: AdminUser = Depends(require_permission("disaster.analysis.run")),
     db: Session = Depends(get_db),
 ):
@@ -631,7 +631,7 @@ def admin_update_analysis_status(
 @router.post("/analyses/{run_id}/publish")
 def admin_publish_result(
     run_id: int,
-    admin: AdminUser = Depends(get_current_admin),
+    admin: AdminUser = Depends(get_current_admin_panel),
     _perm: AdminUser = Depends(require_permission("disaster.analysis.publish")),
     db: Session = Depends(get_db),
 ):
@@ -653,7 +653,7 @@ def admin_publish_result(
 @router.post("/analyses/{run_id}/unpublish")
 def admin_unpublish_result(
     run_id: int,
-    admin: AdminUser = Depends(get_current_admin),
+    admin: AdminUser = Depends(get_current_admin_panel),
     _perm: AdminUser = Depends(require_permission("disaster.analysis.unpublish")),
     db: Session = Depends(get_db),
 ):
@@ -673,7 +673,7 @@ def admin_unpublish_result(
 def admin_update_result(
     run_id: int,
     payload: ResultUpdateRequest,
-    admin: AdminUser = Depends(get_current_admin),
+    admin: AdminUser = Depends(get_current_admin_panel),
     _perm: AdminUser = Depends(require_permission("disaster.result.write")),
     db: Session = Depends(get_db),
 ):
@@ -696,7 +696,7 @@ def admin_update_result(
 @router.delete("/analyses/{run_id}/result")
 def admin_delete_result(
     run_id: int,
-    admin: AdminUser = Depends(get_current_admin),
+    admin: AdminUser = Depends(get_current_admin_panel),
     _perm: AdminUser = Depends(require_permission("disaster.result.delete")),
     db: Session = Depends(get_db),
 ):
@@ -717,7 +717,7 @@ def admin_delete_result(
 
 
 @router.get("/disasters/{id}/qc")
-def admin_qc_summary(id: int, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+def admin_qc_summary(id: int, admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
     _get_event_or_404(db, id)
     aoi = disaster_repo.get_active_aoi(db, id)
     pre_imagery = disaster_repo.get_primary_imagery(db, id, "pre")
@@ -750,7 +750,7 @@ def admin_qc_summary(id: int, admin: AdminUser = Depends(get_current_admin), db:
 
 
 @router.get("/disasters/{id}/hotspots")
-def admin_list_hotspots(id: int, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+def admin_list_hotspots(id: int, admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
     _get_event_or_404(db, id)
     hotspots = disaster_repo.list_hotspots(db, id, published_only=False)
     return {"hotspots": [h.to_dict() for h in hotspots]}
@@ -760,7 +760,7 @@ def admin_list_hotspots(id: int, admin: AdminUser = Depends(get_current_admin), 
 def admin_create_hotspot(
     id: int,
     payload: HotspotCreateRequest,
-    admin: AdminUser = Depends(get_current_admin),
+    admin: AdminUser = Depends(get_current_admin_panel),
     _perm: AdminUser = Depends(require_permission("disaster.result.write")),
     db: Session = Depends(get_db),
 ):
@@ -786,7 +786,7 @@ def _get_hotspot_or_404(db: Session, hotspot_id: int) -> Hotspot:
 def admin_update_hotspot(
     hotspot_id: int,
     payload: HotspotUpdateRequest,
-    admin: AdminUser = Depends(get_current_admin),
+    admin: AdminUser = Depends(get_current_admin_panel),
     _perm: AdminUser = Depends(require_permission("disaster.result.write")),
     db: Session = Depends(get_db),
 ):
@@ -808,7 +808,7 @@ def admin_update_hotspot(
 @router.delete("/hotspots/{hotspot_id}")
 def admin_delete_hotspot(
     hotspot_id: int,
-    admin: AdminUser = Depends(get_current_admin),
+    admin: AdminUser = Depends(get_current_admin_panel),
     _perm: AdminUser = Depends(require_permission("disaster.result.delete")),
     db: Session = Depends(get_db),
 ):
@@ -827,7 +827,7 @@ def admin_delete_hotspot(
 
 
 @router.get("/disasters/{id}/audit")
-def admin_event_audit(id: int, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+def admin_event_audit(id: int, admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
     _get_event_or_404(db, id)
     logs = (
         db.query(AuditLog)

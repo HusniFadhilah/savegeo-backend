@@ -22,7 +22,9 @@ from rio_tiler.models import ImageData
 
 logger = logging.getLogger(__name__)
 
-_MAX_SCENES = 100
+# Match the imagery browser's generous pageable response ceiling. The client
+# paginates results instead of imposing the old 100-scene UI limit.
+_MAX_SCENES = 2000
 _CDSE_TIMEOUT_SECONDS = 20
 _S2_L2A_COLLECTION = "sentinel-2-l2a"
 _S2_L1C_COLLECTION = "sentinel-2-l1c"

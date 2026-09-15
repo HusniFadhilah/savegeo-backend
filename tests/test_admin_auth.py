@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-import pytest
+from types import SimpleNamespace
 
-from app.core.security import hash_password
+import pytest
+from fastapi import HTTPException
+
+from app.core.security import ensure_admin_panel_access, hash_password
 from app.db.models.admin_user import AdminUser
 from app.db.session import SessionLocal
 
@@ -47,3 +50,12 @@ def test_login_wrong_password(client, temp_admin):
     username, _ = temp_admin
     resp = client.post("/api/admin/auth/login", json={"username": username, "password": "wrong"})
     assert resp.status_code == 401
+
+
+def test_viewer_is_denied_admin_panel_access():
+    viewer = SimpleNamespace(role=SimpleNamespace(name=" viewer "))
+
+    with pytest.raises(HTTPException) as exc_info:
+        ensure_admin_panel_access(viewer)
+
+    assert exc_info.value.status_code == 403

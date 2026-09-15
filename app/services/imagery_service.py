@@ -62,10 +62,9 @@ from app.services.geo_utils import bbox_and_centroid
 
 logger = logging.getLogger(__name__)
 
-# Caps how many scenes a single /imagery/scenes call can return - a wide date
-# range over a big AOI could otherwise match hundreds of tiles' worth of
-# scenes; this is a browsing tool, not a bulk export, so keep it cheap.
-_MAX_SCENES = 200
+# Keep a generous safety ceiling for one browsing response. The UI paginates
+# this collection, so users are no longer forced to stop at 200 scenes.
+_MAX_SCENES = 2000
 _COPERNICUS_PROVIDER_KEYS = {"copernicus_s2_l2a", "copernicus_s2_l1c"}
 _OPENAERIALMAP_PROVIDER_KEY = "openaerialmap"
 _MAXAR_OPEN_DATA_PROVIDER_KEY = "vantor_open_data"
@@ -961,7 +960,11 @@ def _apply_super_resolution(img: ee.Image, meta: dict, mode: str | None) -> tupl
     # Optional display interpolation only. Do not invent a finer native grid.
     return img.resample("bicubic"), {
         "mode": str(mode),
-        "factor": factor,
+        # The native grid is unchanged; keep the reported factor at one so
+        # downstream consumers never interpret display interpolation as new
+        # source resolution. Preserve the requested preset separately.
+        "factor": 1,
+        "requested_factor": factor,
         "native_resolution_m": native_scale,
         "render_scale_m": native_scale,
         "method": "Bicubic display interpolation; no added source detail",
