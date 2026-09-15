@@ -81,7 +81,7 @@ class WorkflowDefinition(BaseModel):
                 raise ValueError("WORKFLOW_INVALID: self-referencing edges are not allowed")
 
         incoming = {node_id: 0 for node_id in node_ids}
-        adjacency = {node_id: [] for node_id in node_ids}
+        adjacency: dict[str, list[str]] = {node_id: [] for node_id in node_ids}
         for edge in self.edges:
             incoming[edge.target] += 1
             adjacency[edge.source].append(edge.target)
@@ -109,4 +109,3 @@ class WorkflowUpdateRequest(BaseModel):
 
 class WorkflowRunRequest(BaseModel):
     executionLocation: Literal["browser", "backend", "auto"] = "auto"
-

@@ -51,6 +51,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /usr/local /usr/local
 COPY --from=builder /opt/venv /opt/venv
 
+# The builder's global site-packages contain packaging tools from the base
+# image. They are not used by the application venv and can leave stale
+# vulnerable metadata visible to image scanners, so retain only the Python
+# runtime and the patched venv.
+RUN rm -rf /usr/local/lib/python3.11/site-packages \
+    /usr/local/lib/python3.11/dist-packages
+
 COPY pyproject.toml README.md ./
 COPY app ./app
 COPY alembic ./alembic

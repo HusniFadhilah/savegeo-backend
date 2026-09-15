@@ -8,6 +8,7 @@ regexes = [
   '''postgresql\+psycopg://postgres:postgres@localhost:5432/postgres''',
   '''postgresql\+psycopg://savegeo:\$\{POSTGRES_PASSWORD\}@db:5432/savegeo''',
   '''JWT_SECRET_KEY=change_''',
+  '''NASA_FIRMS_MAP_KEY=$''',
   '''sentinel5p_ch4''',
   '''copernicus_s2_l2a''',
   '''copernicus_s2_l1c''',
