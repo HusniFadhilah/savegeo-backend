@@ -1,6 +1,6 @@
-"""Seed default roles + permissions (idempotent). Does NOT touch existing
-admin_users.role_id (stays NULL = legacy full-access), so running this is
-a zero-risk additive step - no existing admin loses or gains access.
+"""Seed default roles + permissions (idempotent). Existing admins with
+``role_id IS NULL`` remain Full Access; explicitly assigned built-in roles are
+reconciled to their declared permission sets.
 
 Usage: python -m scripts.seed_rbac
 """
@@ -16,9 +16,20 @@ PERMISSIONS = [
     ("model.write", "Upload/update/delete models"),
     ("credential.read", "View GEE credential metadata"),
     ("credential.write", "Upload/activate/delete GEE credentials"),
+    ("secret.read", "View secret and API-key metadata"),
+    ("secret.write", "Update secret and API-key configuration"),
     ("dataset.read", "View dataset catalog overrides"),
     ("dataset.write", "Toggle/edit dataset catalog overrides"),
     ("audit.read", "View audit log"),
+    ("users.read", "View administrator accounts and roles"),
+    ("users.write", "Create/update/delete administrator accounts"),
+    ("company.read", "View company boundaries"),
+    ("company.write", "Create/update/delete/import company boundaries"),
+    ("geospatial.read", "View cloud geospatial datasets and jobs"),
+    ("geospatial.write", "Register/delete/export/query geospatial datasets"),
+    ("satellite.read", "View satellite provider configuration"),
+    ("satellite.write", "Update satellite provider configuration"),
+    ("disaster.read", "View disaster management records"),
     ("disaster.create", "Create disaster events"),
     ("disaster.update", "Edit disaster event metadata"),
     ("disaster.delete", "Delete disaster events"),
@@ -32,9 +43,42 @@ PERMISSIONS = [
     ("disaster.result.delete", "Delete an analysis result"),
 ]
 
+SENSITIVE_PERMISSIONS = {"credential.read", "credential.write", "secret.read", "secret.write"}
+ADMIN_PERMISSIONS = [code for code, _ in PERMISSIONS if code not in SENSITIVE_PERMISSIONS]
+VIEWER_PERMISSIONS = [
+    code for code, _ in PERMISSIONS
+    if code.endswith(".read") and code not in {"credential.read", "secret.read"}
+]
+
 ROLES = [
-    ("admin", "Full access (all permissions)", True, [code for code, _ in PERMISSIONS]),
-    ("viewer", "Read-only access", False, [c for c, _ in PERMISSIONS if c.endswith(".read")]),
+    ("admin", "All non-secret permissions", True, ADMIN_PERMISSIONS),
+    ("viewer", "Read-only access", False, VIEWER_PERMISSIONS),
+    (
+        "geospatial_expert",
+        "Ahli geospasial: batas perusahaan, pemetaan bencana, model ML, dan data geospasial",
+        False,
+        [
+            "company.read",
+            "company.write",
+            "geospatial.read",
+            "geospatial.write",
+            "model.read",
+            "model.write",
+            "disaster.read",
+            "disaster.create",
+            "disaster.update",
+            "disaster.delete",
+            "disaster.aoi.write",
+            "disaster.imagery.write",
+            "disaster.analysis.configure",
+            "disaster.analysis.run",
+            "disaster.analysis.publish",
+            "disaster.analysis.unpublish",
+            "disaster.result.write",
+            "disaster.result.delete",
+            "audit.read",
+        ],
+    ),
 ]
 
 

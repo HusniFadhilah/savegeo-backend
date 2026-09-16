@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -17,12 +18,15 @@ from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
+from app.core.default_configs import is_sensitive_config_key
 from app.core.security import (
+    admin_has_permission,
     create_access_token,
     create_admin_password_reset_token,
     decode_admin_password_reset_token,
     get_current_admin,
     get_current_admin_panel,
+    require_permission,
     ADMIN_SESSION_COOKIE,
     clear_session_cookie,
     hash_password,
@@ -61,6 +65,33 @@ logger = logging.getLogger(__name__)
 RESET_REQUEST_MESSAGE = (
     "Jika akun ditemukan, link reset password sudah dikirim ke email terdaftar."
 )
+_MODEL_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+_SENSITIVE_ROLE_PERMISSIONS = {"credential.read", "credential.write", "secret.read", "secret.write"}
+
+
+def _is_sensitive_config_key(key: str) -> bool:
+    return is_sensitive_config_key(key)
+
+
+def _visible_config_rows(rows: list[SystemConfig], admin: AdminUser) -> list[SystemConfig]:
+    if admin_has_permission(admin, "secret.read"):
+        return rows
+    return [row for row in rows if not _is_sensitive_config_key(row.key)]
+
+
+def _ensure_user_role_scope(admin: AdminUser, role: Role | None) -> None:
+    """Prevent explicit admins from delegating or inheriting sensitive access."""
+    if admin.role_id is None:
+        return
+    if role is None:
+        raise HTTPException(status_code=403, detail="Explicit Admin tidak dapat memberikan atau mengubah akun Full Access")
+    if any(permission.code in _SENSITIVE_ROLE_PERMISSIONS for permission in role.permissions):
+        raise HTTPException(status_code=403, detail="Explicit Admin tidak dapat memberikan role yang mengakses credential atau secret")
+
+
+def _safe_model_stem(value: str) -> str:
+    """Return a filesystem-safe model stem without changing the DB display name."""
+    return _MODEL_NAME_RE.sub("_", value).strip("._-") or "model"
 
 
 # -- Auth --
@@ -142,7 +173,7 @@ def reset_password(payload: PasswordResetRequest, db: Session = Depends(get_db))
 
 # -- GEE credentials --
 @router.get("/gee/credentials")
-def list_gee_credentials(request: Request, admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
+def list_gee_credentials(request: Request, admin: AdminUser = Depends(require_permission("credential.read")), db: Session = Depends(get_db)):
     query = db.query(GEECredential).order_by(GEECredential.uploaded_at.desc())
 
     if is_datatables_request(request):
@@ -163,7 +194,7 @@ async def upload_gee_credential(
     label: str = Form(...),
     notes: str | None = Form(None),
     activate: bool = Form(False),
-    admin: AdminUser = Depends(get_current_admin_panel),
+    admin: AdminUser = Depends(require_permission("credential.write")),
     db: Session = Depends(get_db),
 ):
     raw = await file.read()
@@ -216,7 +247,7 @@ async def upload_gee_credential(
 
 
 @router.delete("/gee/credentials/{cred_id}")
-def delete_gee_credential(cred_id: int, admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
+def delete_gee_credential(cred_id: int, admin: AdminUser = Depends(require_permission("credential.write")), db: Session = Depends(get_db)):
     cred = db.get(GEECredential, cred_id)
     if not cred:
         raise HTTPException(status_code=404, detail="Credential not found")
@@ -234,7 +265,7 @@ def delete_gee_credential(cred_id: int, admin: AdminUser = Depends(get_current_a
 
 
 @router.post("/gee/credentials/{cred_id}/activate")
-def activate_gee_credential(cred_id: int, admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
+def activate_gee_credential(cred_id: int, admin: AdminUser = Depends(require_permission("credential.write")), db: Session = Depends(get_db)):
     cred = db.get(GEECredential, cred_id)
     if not cred:
         raise HTTPException(status_code=404, detail="Credential not found")
@@ -247,7 +278,7 @@ def activate_gee_credential(cred_id: int, admin: AdminUser = Depends(get_current
 
 
 @router.get("/gee/status")
-def gee_status(request: Request, admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
+def gee_status(request: Request, admin: AdminUser = Depends(require_permission("credential.read")), db: Session = Depends(get_db)):
     cred = gee_service.get_active_credential(db)
     return {
         "ee_initialized": getattr(request.app.state, "ee_initialized", False),
@@ -256,7 +287,7 @@ def gee_status(request: Request, admin: AdminUser = Depends(get_current_admin_pa
 
 
 @router.post("/gee/reinitialize")
-def gee_reinitialize(request: Request, admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
+def gee_reinitialize(request: Request, admin: AdminUser = Depends(require_permission("credential.write")), db: Session = Depends(get_db)):
     success = gee_service.initialize_ee(db)
     request.app.state.ee_initialized = success
     return {"success": success, "message": "Earth Engine reinitialized" if success else "Earth Engine initialization failed"}
@@ -264,7 +295,7 @@ def gee_reinitialize(request: Request, admin: AdminUser = Depends(get_current_ad
 
 # -- ArcGIS --
 @router.get("/arcgis/status")
-def arcgis_status(admin: AdminUser = Depends(get_current_admin_panel)):
+def arcgis_status(admin: AdminUser = Depends(require_permission("credential.read"))):
     return get_arcgis_client().get_status()
 
 
@@ -284,24 +315,24 @@ def config_public(db: Session = Depends(get_db)):
 @router.get("/config")
 def config_all(
     category: str | None = None,
-    admin: AdminUser = Depends(get_current_admin_panel),
+    admin: AdminUser = Depends(require_permission("config.read")),
     db: Session = Depends(get_db),
 ):
     rows = config_service.get_all_settings(db, category=category)
     grouped: dict[str, list] = {}
-    for row in rows:
+    for row in _visible_config_rows(rows, admin):
         grouped.setdefault(row.category, []).append(config_service.mask_config_dict(row))
     return {"config": grouped}
 
 
 @router.get("/config/{category}")
-def config_by_category(category: str, admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
+def config_by_category(category: str, admin: AdminUser = Depends(require_permission("config.read")), db: Session = Depends(get_db)):
     rows = config_service.get_all_settings(db, category=category)
-    return {"category": category, "config": [config_service.mask_config_dict(r) for r in rows]}
+    return {"category": category, "config": [config_service.mask_config_dict(r) for r in _visible_config_rows(rows, admin)]}
 
 
 @router.put("/config")
-async def config_update(request: Request, admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
+async def config_update(request: Request, admin: AdminUser = Depends(require_permission("config.write")), db: Session = Depends(get_db)):
     body = await request.json()
     if isinstance(body, dict) and "updates" in body and isinstance(body["updates"], list):
         items = [(u["key"], u.get("value")) for u in body["updates"]]
@@ -311,6 +342,9 @@ async def config_update(request: Request, admin: AdminUser = Depends(get_current
     updated = []
     errors = []
     for key, value in items:
+        if _is_sensitive_config_key(key) and not admin_has_permission(admin, "secret.write"):
+            errors.append({"key": key, "error": "Secret configuration is restricted to full-access administrators"})
+            continue
         try:
             config_service.upsert_setting(db, key, value, updated_by=admin.id)
             updated.append(key)
@@ -325,11 +359,14 @@ async def config_update(request: Request, admin: AdminUser = Depends(get_current
 @router.post("/config/reset")
 def config_reset(
     payload: dict | None = None,
-    admin: AdminUser = Depends(get_current_admin_panel),
+    admin: AdminUser = Depends(require_permission("config.write")),
     db: Session = Depends(get_db),
 ):
     key = (payload or {}).get("key")
-    count = config_service.reset_setting(db, key)
+    can_write_secrets = admin_has_permission(admin, "secret.write")
+    if key is not None and _is_sensitive_config_key(key) and not can_write_secrets:
+        raise HTTPException(status_code=403, detail="Secret configuration is restricted to full-access administrators")
+    count = config_service.reset_setting(db, key, include_secrets=can_write_secrets)
     return {"message": f"Reset {count} config value(s) to defaults"}
 
 
@@ -338,7 +375,7 @@ def config_reset(
 def admin_models_list(
     request: Request,
     model_type: str | None = None,
-    admin: AdminUser = Depends(get_current_admin_panel),
+    admin: AdminUser = Depends(require_permission("model.read")),
     db: Session = Depends(get_db),
 ):
     query = db.query(UploadedModel)
@@ -370,7 +407,7 @@ async def upload_model(
     feature_names: str | None = Form(None),
     metadata_json: str | None = Form(None),
     set_default: bool = Form(False),
-    admin: AdminUser = Depends(get_current_admin_panel),
+    admin: AdminUser = Depends(require_permission("model.write")),
     db: Session = Depends(get_db),
 ):
     if model_type not in ("carbon", "vegetation", "landcover"):
@@ -389,7 +426,7 @@ async def upload_model(
 
     settings = get_settings()
     ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
-    dest = settings.model_path / f"{name}_{ts}{ext}"
+    dest = settings.model_path / f"{_safe_model_stem(name)}_{ts}{ext}"
     dest.write_bytes(raw)
 
     def _parse_json(s: str | None, default):
@@ -429,7 +466,7 @@ async def upload_model(
 
 
 @router.get("/models/{model_id}")
-def admin_model_detail(model_id: int, admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
+def admin_model_detail(model_id: int, admin: AdminUser = Depends(require_permission("model.read")), db: Session = Depends(get_db)):
     model = db.get(UploadedModel, model_id)
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
@@ -440,7 +477,7 @@ def admin_model_detail(model_id: int, admin: AdminUser = Depends(get_current_adm
 def admin_model_update(
     model_id: int,
     payload: ModelUpdateRequest,
-    admin: AdminUser = Depends(get_current_admin_panel),
+    admin: AdminUser = Depends(require_permission("model.write")),
     db: Session = Depends(get_db),
 ):
     model = db.get(UploadedModel, model_id)
@@ -454,7 +491,7 @@ def admin_model_update(
 
 
 @router.delete("/models/{model_id}")
-def admin_model_delete(model_id: int, admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
+def admin_model_delete(model_id: int, admin: AdminUser = Depends(require_permission("model.write")), db: Session = Depends(get_db)):
     model = db.get(UploadedModel, model_id)
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
@@ -471,7 +508,7 @@ def admin_model_delete(model_id: int, admin: AdminUser = Depends(get_current_adm
 
 
 @router.post("/models/{model_id}/set-default")
-def admin_model_set_default(model_id: int, admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
+def admin_model_set_default(model_id: int, admin: AdminUser = Depends(require_permission("model.write")), db: Session = Depends(get_db)):
     model = db.get(UploadedModel, model_id)
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
@@ -482,7 +519,7 @@ def admin_model_set_default(model_id: int, admin: AdminUser = Depends(get_curren
 
 
 @router.post("/models/import-legacy")
-def admin_import_legacy_models(admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
+def admin_import_legacy_models(admin: AdminUser = Depends(require_permission("model.write")), db: Session = Depends(get_db)):
     settings = get_settings()
     result = import_legacy_models(db, str(settings.model_path))
     return {"message": "Legacy import complete", **result}
@@ -490,13 +527,13 @@ def admin_import_legacy_models(admin: AdminUser = Depends(get_current_admin_pane
 
 # -- Admin users (RBAC) --
 @router.get("/roles")
-def list_roles(admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
+def list_roles(admin: AdminUser = Depends(require_permission("users.read")), db: Session = Depends(get_db)):
     roles = db.query(Role).order_by(Role.name).all()
     return {"roles": [r.to_dict() for r in roles]}
 
 
 @router.get("/users")
-def admin_users_list(request: Request, admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
+def admin_users_list(request: Request, admin: AdminUser = Depends(require_permission("users.read")), db: Session = Depends(get_db)):
     query = db.query(AdminUser).order_by(AdminUser.created_at.desc())
 
     if is_datatables_request(request):
@@ -514,15 +551,17 @@ def admin_users_list(request: Request, admin: AdminUser = Depends(get_current_ad
 @router.post("/users", status_code=201)
 def admin_user_create(
     payload: AdminUserCreateRequest,
-    admin: AdminUser = Depends(get_current_admin_panel),
+    admin: AdminUser = Depends(require_permission("users.write")),
     db: Session = Depends(get_db),
 ):
     if len(payload.password) < 8:
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
     if db.query(AdminUser).filter_by(username=payload.username).first():
         raise HTTPException(status_code=400, detail=f"Username {payload.username!r} already exists")
-    if payload.role_id is not None and not db.get(Role, payload.role_id):
+    assigned_role = db.get(Role, payload.role_id) if payload.role_id is not None else None
+    if payload.role_id is not None and assigned_role is None:
         raise HTTPException(status_code=400, detail="role_id does not exist")
+    _ensure_user_role_scope(admin, assigned_role)
 
     new_user = AdminUser(
         username=payload.username,
@@ -542,14 +581,19 @@ def admin_user_create(
 def admin_user_update(
     user_id: int,
     payload: AdminUserUpdateRequest,
-    admin: AdminUser = Depends(get_current_admin_panel),
+    admin: AdminUser = Depends(require_permission("users.write")),
     db: Session = Depends(get_db),
 ):
     target = db.get(AdminUser, user_id)
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
-    if payload.role_id is not None and not db.get(Role, payload.role_id):
+    if admin.role_id is not None and target.role_id is None:
+        raise HTTPException(status_code=403, detail="Explicit Admin tidak dapat mengubah akun Full Access")
+    assigned_role = db.get(Role, payload.role_id) if payload.role_id is not None else None
+    if payload.role_id is not None and assigned_role is None:
         raise HTTPException(status_code=400, detail="role_id does not exist")
+    if payload.role_id is not None:
+        _ensure_user_role_scope(admin, assigned_role)
     if payload.is_active is False and target.id == admin.id:
         raise HTTPException(status_code=400, detail="Cannot deactivate your own account")
 
@@ -576,12 +620,14 @@ def admin_user_update(
 
 
 @router.delete("/users/{user_id}")
-def admin_user_delete(user_id: int, admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
+def admin_user_delete(user_id: int, admin: AdminUser = Depends(require_permission("users.write")), db: Session = Depends(get_db)):
     target = db.get(AdminUser, user_id)
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
     if target.id == admin.id:
         raise HTTPException(status_code=400, detail="Cannot delete your own account")
+    if admin.role_id is not None and target.role_id is None:
+        raise HTTPException(status_code=403, detail="Explicit Admin tidak dapat menghapus akun Full Access")
     if db.query(AdminUser).filter_by(is_active=True).count() <= 1:
         raise HTTPException(status_code=400, detail="Cannot delete the last active admin account")
 
@@ -798,7 +844,7 @@ def admin_companies_list(
     industry_type: str | None = None,
     province: str | None = None,
     search: str | None = None,
-    admin: AdminUser = Depends(get_current_admin_panel),
+    admin: AdminUser = Depends(require_permission("company.read")),
     db: Session = Depends(get_db),
 ):
     query = db.query(CompanyBoundary)
@@ -823,7 +869,7 @@ def admin_companies_list(
 
 
 @router.get("/companies/provinces")
-def admin_companies_provinces(admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
+def admin_companies_provinces(admin: AdminUser = Depends(require_permission("company.read")), db: Session = Depends(get_db)):
     rows = (
         db.query(CompanyBoundary.province)
         .filter(CompanyBoundary.province.isnot(None))
@@ -837,7 +883,7 @@ def admin_companies_provinces(admin: AdminUser = Depends(get_current_admin_panel
 @router.post("/companies", status_code=201)
 async def admin_company_create(
     request: Request,
-    admin: AdminUser = Depends(get_current_admin_panel),
+    admin: AdminUser = Depends(require_permission("company.write")),
     db: Session = Depends(get_db),
 ):
     content_type = request.headers.get("content-type", "")
@@ -903,7 +949,7 @@ async def admin_company_create(
 
 
 @router.get("/companies/{cid}")
-def admin_company_detail(cid: int, admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
+def admin_company_detail(cid: int, admin: AdminUser = Depends(require_permission("company.read")), db: Session = Depends(get_db)):
     company = db.get(CompanyBoundary, cid)
     if not company:
         raise HTTPException(status_code=404, detail="Company not found")
@@ -914,7 +960,7 @@ def admin_company_detail(cid: int, admin: AdminUser = Depends(get_current_admin_
 async def admin_company_update(
     cid: int,
     request: Request,
-    admin: AdminUser = Depends(get_current_admin_panel),
+    admin: AdminUser = Depends(require_permission("company.write")),
     db: Session = Depends(get_db),
 ):
     company = db.get(CompanyBoundary, cid)
@@ -938,7 +984,7 @@ async def admin_company_update(
 
 
 @router.delete("/companies/{cid}")
-def admin_company_delete(cid: int, admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
+def admin_company_delete(cid: int, admin: AdminUser = Depends(require_permission("company.write")), db: Session = Depends(get_db)):
     company = db.get(CompanyBoundary, cid)
     if not company:
         raise HTTPException(status_code=404, detail="Company not found")
@@ -969,7 +1015,7 @@ def _fetch_osm_overpass(overpass_query: str) -> tuple[dict | None, str]:
 @router.post("/companies/import/osm")
 async def admin_companies_import_osm(
     request: Request,
-    admin: AdminUser = Depends(get_current_admin_panel),
+    admin: AdminUser = Depends(require_permission("company.write")),
     db: Session = Depends(get_db),
 ):
     """Import company boundaries from OpenStreetMap Overpass API."""
@@ -1052,7 +1098,7 @@ def _fetch_gfw_carto(ds: dict) -> dict:
 @router.post("/companies/import/gfw")
 async def admin_companies_import_gfw(
     request: Request,
-    admin: AdminUser = Depends(get_current_admin_panel),
+    admin: AdminUser = Depends(require_permission("company.write")),
     db: Session = Depends(get_db),
 ):
     """Import Indonesia concession boundaries from Global Forest Watch via
@@ -1112,7 +1158,7 @@ async def admin_companies_import_gfw(
 
 # -- Satellite provider overlay (admin CRUD on top of the static registry) --
 @router.get("/satellite-providers")
-def admin_satellite_providers_list(admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
+def admin_satellite_providers_list(admin: AdminUser = Depends(require_permission("satellite.read")), db: Session = Depends(get_db)):
     """Merged registry+override view for the admin editor - unlike the public
     GET /vegetation/satellites picker, this includes admin-deactivated
     providers too (so there's something to toggle back on)."""
@@ -1131,7 +1177,7 @@ def admin_satellite_providers_list(admin: AdminUser = Depends(get_current_admin_
 def admin_satellite_provider_upsert(
     key: str,
     payload: SatelliteProviderUpdateRequest,
-    admin: AdminUser = Depends(get_current_admin_panel),
+    admin: AdminUser = Depends(require_permission("satellite.write")),
     db: Session = Depends(get_db),
 ):
     if key not in SATELLITE_PROVIDERS:
@@ -1149,7 +1195,7 @@ def admin_satellite_provider_upsert(
 
 
 @router.delete("/satellite-providers/{key}")
-def admin_satellite_provider_reset(key: str, admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
+def admin_satellite_provider_reset(key: str, admin: AdminUser = Depends(require_permission("satellite.write")), db: Session = Depends(get_db)):
     """Remove the override row - reverts this provider back to its static registry default."""
     row = db.query(SatelliteProviderEntry).filter_by(key=key).first()
     if not row:
@@ -1173,7 +1219,7 @@ def _mask_key_prefix(k: str) -> str:
 
 
 @router.get("/key-pool/status")
-def key_pool_status(admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
+def key_pool_status(admin: AdminUser = Depends(require_permission("secret.read")), db: Session = Depends(get_db)):
     result: dict[str, list[dict]] = {}
     for provider in _KEY_POOL_PROVIDERS:
         primary = config_service.get_setting(db, f"ai.{provider}_api_key", "") or ""

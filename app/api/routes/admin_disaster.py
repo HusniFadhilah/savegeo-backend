@@ -209,7 +209,7 @@ def admin_list_events(
     severity: str | None = None,
     year: int | None = None,
     search: str | None = None,
-    admin: AdminUser = Depends(get_current_admin_panel),
+    admin: AdminUser = Depends(require_permission("disaster.read")),
     db: Session = Depends(get_db),
 ):
     events = disaster_repo.list_events(
@@ -225,7 +225,7 @@ def admin_list_events(
 
 
 @router.get("/disasters/models")
-def admin_list_disaster_models(event_id: int | None = None, admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
+def admin_list_disaster_models(event_id: int | None = None, admin: AdminUser = Depends(require_permission("disaster.read")), db: Session = Depends(get_db)):
     event = _get_event_or_404(db, event_id) if event_id else None
     models = list_models(enabled_only=False, disaster_type=event.disaster_type if event else None)
     settings = get_settings()
@@ -263,7 +263,7 @@ def admin_list_disaster_models(event_id: int | None = None, admin: AdminUser = D
 
 
 @router.get("/disasters/{id}")
-def admin_get_event(id: int, admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
+def admin_get_event(id: int, admin: AdminUser = Depends(require_permission("disaster.read")), db: Session = Depends(get_db)):
     event = _get_event_or_404(db, id)
     aoi = disaster_repo.get_active_aoi(db, id)
     pre_imagery = disaster_repo.list_imagery(db, id, "pre")
@@ -354,7 +354,7 @@ def admin_create_aoi(
 def admin_list_imagery(
     id: int,
     phase: str | None = None,
-    admin: AdminUser = Depends(get_current_admin_panel),
+    admin: AdminUser = Depends(require_permission("disaster.read")),
     db: Session = Depends(get_db),
 ):
     _get_event_or_404(db, id)
@@ -516,7 +516,7 @@ def admin_local_imagery_tile(
     z: int,
     x: int,
     y: int,
-    admin: AdminUser = Depends(get_current_admin_panel),
+    admin: AdminUser = Depends(require_permission("disaster.read")),
     db: Session = Depends(get_db),
 ):
     """Admin preview of a `source_kind="local_upload"` raster's tiles before
@@ -575,7 +575,7 @@ def admin_create_analysis(
 
 
 @router.get("/disasters/{id}/analyses")
-def admin_list_analyses(id: int, admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
+def admin_list_analyses(id: int, admin: AdminUser = Depends(require_permission("disaster.read")), db: Session = Depends(get_db)):
     _get_event_or_404(db, id)
     runs = disaster_repo.list_runs_for_event(db, id)
     entries = []
@@ -717,7 +717,7 @@ def admin_delete_result(
 
 
 @router.get("/disasters/{id}/qc")
-def admin_qc_summary(id: int, admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
+def admin_qc_summary(id: int, admin: AdminUser = Depends(require_permission("disaster.read")), db: Session = Depends(get_db)):
     _get_event_or_404(db, id)
     aoi = disaster_repo.get_active_aoi(db, id)
     pre_imagery = disaster_repo.get_primary_imagery(db, id, "pre")
@@ -750,7 +750,7 @@ def admin_qc_summary(id: int, admin: AdminUser = Depends(get_current_admin_panel
 
 
 @router.get("/disasters/{id}/hotspots")
-def admin_list_hotspots(id: int, admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
+def admin_list_hotspots(id: int, admin: AdminUser = Depends(require_permission("disaster.read")), db: Session = Depends(get_db)):
     _get_event_or_404(db, id)
     hotspots = disaster_repo.list_hotspots(db, id, published_only=False)
     return {"hotspots": [h.to_dict() for h in hotspots]}
@@ -827,7 +827,7 @@ def admin_delete_hotspot(
 
 
 @router.get("/disasters/{id}/audit")
-def admin_event_audit(id: int, admin: AdminUser = Depends(get_current_admin_panel), db: Session = Depends(get_db)):
+def admin_event_audit(id: int, admin: AdminUser = Depends(require_permission("audit.read")), db: Session = Depends(get_db)):
     _get_event_or_404(db, id)
     logs = (
         db.query(AuditLog)

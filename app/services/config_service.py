@@ -13,7 +13,7 @@ import time
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.core.default_configs import DEFAULT_CONFIGS, is_secret_key
+from app.core.default_configs import DEFAULT_CONFIGS, is_sensitive_config_key, is_secret_key
 from app.db.models.system_config import SystemConfig
 
 _cache: dict[str, SystemConfig] = {}
@@ -54,7 +54,7 @@ def get_all_settings(db: Session, category: str | None = None) -> list[SystemCon
 
 def mask_config_dict(cfg: SystemConfig) -> dict:
     data = cfg.to_dict()
-    if is_secret_key(cfg.key):
+    if is_sensitive_config_key(cfg.key):
         is_configured = bool(cfg.value)
         data.pop("value", None)
         data.pop("raw_value", None)
@@ -120,9 +120,12 @@ def get_analysis_defaults(db: Session) -> dict:
     }
 
 
-def reset_setting(db: Session, key: str | None = None) -> int:
+def reset_setting(db: Session, key: str | None = None, *, include_secrets: bool = True) -> int:
     """Reset one key (or all keys if `key` is None) back to DEFAULT_CONFIGS baseline."""
-    targets = [c for c in DEFAULT_CONFIGS if key is None or c[0] == key]
+    targets = [
+        c for c in DEFAULT_CONFIGS
+        if (key is None or c[0] == key) and (include_secrets or not is_sensitive_config_key(c[0]))
+    ]
     count = 0
     for k, value, value_type, category, label, description, is_public in targets:
         row = db.query(SystemConfig).filter_by(key=k).first()

@@ -46,6 +46,8 @@ class Settings(BaseSettings):
     # below, while local HTTP development remains usable with Secure=false.
     auth_cookie_secure: bool | None = None
     auth_cookie_samesite: str = "lax"
+    csrf_protection_enabled: bool = True
+    rate_limit_requests_per_minute: int = 120
 
     # --- Mail / SMTP ---
     mail_mailer: str = "smtp"

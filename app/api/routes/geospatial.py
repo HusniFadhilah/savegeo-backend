@@ -9,14 +9,16 @@ queue without changing the frontend contract.
 from __future__ import annotations
 
 import datetime as dt
+import ipaddress
 import re
 import uuid
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator
 
-from app.core.security import get_current_app_viewer
+from app.core.security import get_current_app_viewer, require_permission
 from app.schemas.metadata import DatasetMetadata
 
 router = APIRouter(prefix="/geospatial", tags=["geospatial"])
@@ -29,6 +31,28 @@ _FORBIDDEN_SQL = re.compile(
 )
 _catalog: dict[str, dict[str, Any]] = {}
 _jobs: dict[str, dict[str, Any]] = {}
+
+
+def _safe_remote_url(value: str) -> str:
+    parsed = urlparse(value)
+    host = parsed.hostname
+    if parsed.username or parsed.password or not host:
+        raise ValueError("dataset URLs must not contain credentials")
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        address = None
+    if address is not None and (
+        address.is_private or address.is_loopback or address.is_link_local or address.is_reserved
+    ):
+        raise ValueError("dataset URL host must not be a private or local address")
+    if host.casefold() in {"localhost", "localhost.localdomain"} or host.casefold().endswith(".local"):
+        raise ValueError("dataset URL host must not be local")
+    try:
+        _ = parsed.port
+    except ValueError as exc:
+        raise ValueError("dataset URL contains an invalid port") from exc
+    return value
 
 
 class DatasetReference(BaseModel):
@@ -63,7 +87,7 @@ class DatasetReference(BaseModel):
     def valid_url(cls, value: str | None) -> str | None:
         if value is not None and not _URL.match(value):
             raise ValueError("only http(s) dataset URLs are allowed")
-        return value
+        return _safe_remote_url(value) if value is not None else None
 
     @field_validator("bbox")
     @classmethod
@@ -141,7 +165,7 @@ def get_cloud_dataset(dataset_id: str, _viewer: object = Depends(get_current_app
 
 
 @router.post("/datasets/register", status_code=status.HTTP_201_CREATED)
-def register_cloud_dataset(reference: DatasetReference, _viewer: object = Depends(get_current_app_viewer)):
+def register_cloud_dataset(reference: DatasetReference, _admin: object = Depends(require_permission("geospatial.write"))):
     data = reference.model_dump(exclude_none=True)
     if reference.access in {"private", "signed"} and (reference.url or reference.assetUrl):
         raise HTTPException(
@@ -152,7 +176,7 @@ def register_cloud_dataset(reference: DatasetReference, _viewer: object = Depend
 
 
 @router.delete("/datasets/{dataset_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_cloud_dataset(dataset_id: str, _viewer: object = Depends(get_current_app_viewer)):
+def delete_cloud_dataset(dataset_id: str, _admin: object = Depends(require_permission("geospatial.write"))):
     if _catalog.pop(dataset_id, None) is None:
         raise HTTPException(status_code=404, detail="Dataset not found")
 

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
-from app.core.security import ensure_admin_panel_access, hash_password
+from app.core.security import admin_has_permission, ensure_admin_panel_access, hash_password
 from app.db.models.admin_user import AdminUser
 from app.db.session import SessionLocal
 
@@ -59,3 +59,15 @@ def test_viewer_is_denied_admin_panel_access():
         ensure_admin_panel_access(viewer)
 
     assert exc_info.value.status_code == 403
+
+
+def test_full_access_and_explicit_roles_are_distinguished():
+    explicit_admin = SimpleNamespace(
+        role_id=1,
+        role=SimpleNamespace(permissions=[SimpleNamespace(code="config.read")]),
+    )
+    full_access = SimpleNamespace(role_id=None, role=None)
+
+    assert admin_has_permission(full_access, "secret.read") is True
+    assert admin_has_permission(explicit_admin, "config.read") is True
+    assert admin_has_permission(explicit_admin, "secret.read") is False

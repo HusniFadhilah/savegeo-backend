@@ -4,6 +4,7 @@ Public reverse proxies commonly cap a single HTTP request around 60 seconds.
 Carbon, multi-index vegetation, and LULC analyses can legitimately take longer,
 so the frontend starts a short job request and polls this route for completion.
 """
+
 from __future__ import annotations
 
 import json
@@ -19,12 +20,22 @@ from typing import Any
 import ee
 import requests
 from fastapi import APIRouter, Body, Depends, HTTPException
+from sqlalchemy.orm import Session
 
 from app.api.deps import require_ee
 from app.core.config import get_settings
 from app.core.security import get_current_app_viewer
+from app.db.models.user import User
+from app.db.session import get_db
 from app.db.session import SessionLocal
-from app.services import carbon_service, crop_monitoring_service, download_service, landcover_service, vegetation_service
+from app.services import (
+    carbon_service,
+    crop_monitoring_service,
+    download_service,
+    landcover_service,
+    provenance_service,
+    vegetation_service,
+)
 from app.services.gee_common import AnalysisError
 
 router = APIRouter(tags=["analysis-jobs"])
@@ -90,6 +101,12 @@ def _read_job(job_id: str) -> dict[str, Any]:
 def _run_job(job_id: str, job_type: str, payload: dict[str, Any]) -> None:
     _write_job(job_id, {"job_id": job_id, "type": job_type, "status": "running", "started_at": _now()})
     db = SessionLocal()
+    provenance_service.update_analysis_provenance(
+        db,
+        job_id,
+        status="running",
+        started_at=datetime.now(UTC),
+    )
     try:
         if job_type == "carbon":
             result = carbon_service.analyze_carbon(db, payload)
@@ -124,6 +141,12 @@ def _run_job(job_id: str, job_type: str, payload: dict[str, Any]) -> None:
                 "result": result,
             },
         )
+        provenance_service.update_analysis_provenance(
+            db,
+            job_id,
+            status="succeeded",
+            completed_at=datetime.now(UTC),
+        )
     except AnalysisError as exc:
         _write_job(
             job_id,
@@ -136,10 +159,27 @@ def _run_job(job_id: str, job_type: str, payload: dict[str, Any]) -> None:
                 "status_code": exc.status_code,
             },
         )
+        provenance_service.update_analysis_provenance(
+            db,
+            job_id,
+            status="failed",
+            error_code=f"analysis_{exc.status_code}",
+            completed_at=datetime.now(UTC),
+        )
     except ee.EEException as exc:
         _write_job(
             job_id,
-            {"job_id": job_id, "type": job_type, "status": "failed", "finished_at": _now(), "error": str(exc), "status_code": 400},
+            {
+                "job_id": job_id,
+                "type": job_type,
+                "status": "failed",
+                "finished_at": _now(),
+                "error": str(exc),
+                "status_code": 400,
+            },
+        )
+        provenance_service.update_analysis_provenance(
+            db, job_id, status="failed", error_code="earth_engine_error", completed_at=datetime.now(UTC)
         )
     except requests.RequestException as exc:
         logger.warning("Analysis job %s upstream connection failed: %s", job_id, exc)
@@ -154,18 +194,35 @@ def _run_job(job_id: str, job_type: str, payload: dict[str, Any]) -> None:
                 "status_code": 503,
             },
         )
+        provenance_service.update_analysis_provenance(
+            db, job_id, status="failed", error_code="upstream_unavailable", completed_at=datetime.now(UTC)
+        )
     except Exception as exc:
         logger.exception("Analysis job %s failed", job_id)
         _write_job(
             job_id,
-            {"job_id": job_id, "type": job_type, "status": "failed", "finished_at": _now(), "error": str(exc), "status_code": 500},
+            {
+                "job_id": job_id,
+                "type": job_type,
+                "status": "failed",
+                "finished_at": _now(),
+                "error": str(exc),
+                "status_code": 500,
+            },
+        )
+        provenance_service.update_analysis_provenance(
+            db, job_id, status="failed", error_code="internal_error", completed_at=datetime.now(UTC)
         )
     finally:
         db.close()
 
 
 @router.post("/analysis-jobs", dependencies=[Depends(get_current_app_viewer), Depends(require_ee)])
-def create_analysis_job(data: dict[str, Any] = Body(...)):
+def create_analysis_job(
+    data: dict[str, Any] = Body(...),
+    viewer: object = Depends(get_current_app_viewer),
+    db: Session = Depends(get_db),
+):
     job_type = str(data.get("type") or "")
     payload = data.get("payload")
     if job_type not in _ALLOWED_JOB_TYPES:
@@ -174,6 +231,13 @@ def create_analysis_job(data: dict[str, Any] = Body(...)):
         raise HTTPException(status_code=400, detail="Missing required field: payload")
 
     job_id = str(uuid.uuid4())
+    provenance_service.create_analysis_provenance(
+        db,
+        analysis_id=job_id,
+        analysis_type=job_type,
+        payload=payload,
+        user_id=viewer.id if isinstance(viewer, User) else None,
+    )
     _write_job(job_id, {"job_id": job_id, "type": job_type, "status": "queued", "created_at": _now()})
     _executor.submit(_run_job, job_id, job_type, payload)
     return {"job_id": job_id, "status": "queued", "status_url": f"/analysis-jobs/{job_id}"}

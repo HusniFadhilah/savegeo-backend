@@ -133,3 +133,8 @@ SECRET_KEY_SUFFIXES = ("_api_key", "_secret", "_password", "_token", "_private_k
 
 def is_secret_key(key: str) -> bool:
     return any(key.endswith(suffix) for suffix in SECRET_KEY_SUFFIXES)
+
+
+def is_sensitive_config_key(key: str) -> bool:
+    """Treat API key-pool entries as secrets even though their names are generic."""
+    return is_secret_key(key) or key.startswith("ai.backup_keys.")

@@ -42,6 +42,10 @@ class AdminUser(Base):
             "email": self.email,
             "is_active": self.is_active,
             "role": self.role.name if self.role else None,
+            # Expose only permission codes to the SPA. Credential values and
+            # other sensitive fields remain server-side; this is used solely
+            # for role-aware navigation and client-side UX.
+            "permissions": [p.code for p in self.role.permissions] if self.role else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "last_login": self.last_login.isoformat() if self.last_login else None,
         }

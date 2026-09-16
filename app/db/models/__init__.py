@@ -1,9 +1,11 @@
 """Import every model so `Base.metadata` is complete for Alembic autogenerate,
 `Base.metadata.create_all()` in tests, and relationship string-name resolution.
 """
+
 from app.db.models.admin_user import AdminUser
 from app.db.models.analysis_result import AnalysisResult
 from app.db.models.analysis_run import AnalysisRun
+from app.db.models.analysis_provenance import AnalysisProvenance
 from app.db.models.audit_log import AuditLog
 from app.db.models.chat_message import ChatMessage
 from app.db.models.chat_session import ChatSession
@@ -26,6 +28,7 @@ __all__ = [
     "AdminUser",
     "AnalysisResult",
     "AnalysisRun",
+    "AnalysisProvenance",
     "AuditLog",
     "ChatMessage",
     "ChatSession",

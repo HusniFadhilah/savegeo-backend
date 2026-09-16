@@ -6,9 +6,14 @@ Ports `admin_routes.py`'s `require_admin` decorator / `_generate_token` helper
 format understanding is unaffected — only the signing secret changes source
 (env var instead of Flask app.config, same semantics).
 """
+
 from __future__ import annotations
 
 import datetime as dt
+import base64
+import hashlib
+import hmac
+import os
 from typing import Literal, cast
 
 import bcrypt
@@ -28,22 +33,50 @@ ADMIN_SESSION_COOKIE = "savegeo_admin_session"
 USER_SESSION_COOKIE = "savegeo_user_session"
 ADMIN_VIEWER_DENIED_DETAIL = "Role viewer tidak memiliki akses ke dashboard admin"
 
-# Hash directly with `bcrypt` rather than via passlib's CryptContext: passlib is
-# unmaintained and its bcrypt backend self-test crashes against bcrypt>=4.1
-# (`ValueError: password cannot be longer than 72 bytes` on its own internal
-# wrap-bug probe, plus `module 'bcrypt' has no attribute '__about__'` on the
-# version-sniffing path) - a real incompatibility discovered when smoke-testing
-# this backend, not a hypothetical. bcrypt's own API has no such issue.
+# New passwords use stdlib scrypt, a memory-hard KDF that avoids bcrypt's
+# silent 72-byte truncation. Existing bcrypt hashes remain verifiable so this
+# migration does not invalidate deployed accounts; successful callers can be
+# rehashed by the normal password-change/reset paths.
 _BCRYPT_MAX_BYTES = 72
+_SCRYPT_PREFIX = "scrypt$v1$"
+_SCRYPT_N = 2**14
+_SCRYPT_R = 8
+_SCRYPT_P = 1
+_SCRYPT_DKLEN = 32
+
+
+def _password_bytes(plain: str) -> bytes:
+    return plain.encode("utf-8")
 
 
 def hash_password(plain: str) -> str:
-    raw = plain.encode("utf-8")[:_BCRYPT_MAX_BYTES]
-    return bcrypt.hashpw(raw, bcrypt.gensalt()).decode("utf-8")
+    salt = os.urandom(16)
+    digest = hashlib.scrypt(
+        _password_bytes(plain), salt=salt, n=_SCRYPT_N, r=_SCRYPT_R, p=_SCRYPT_P, dklen=_SCRYPT_DKLEN
+    )
+    encoded_salt = base64.urlsafe_b64encode(salt).decode("ascii").rstrip("=")
+    encoded_digest = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+    return f"{_SCRYPT_PREFIX}{encoded_salt}${encoded_digest}"
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    raw = plain.encode("utf-8")[:_BCRYPT_MAX_BYTES]
+    if hashed.startswith(_SCRYPT_PREFIX):
+        try:
+            _, version, encoded_salt, encoded_digest = hashed.split("$", 3)
+            if version != "v1":
+                return False
+            salt = base64.urlsafe_b64decode(encoded_salt + "=" * (-len(encoded_salt) % 4))
+            expected = base64.urlsafe_b64decode(encoded_digest + "=" * (-len(encoded_digest) % 4))
+            actual = hashlib.scrypt(
+                _password_bytes(plain), salt=salt, n=_SCRYPT_N, r=_SCRYPT_R, p=_SCRYPT_P, dklen=len(expected)
+            )
+            return hmac.compare_digest(actual, expected)
+        except (ValueError, TypeError):
+            return False
+
+    # Backward-compatible verification for bcrypt hashes created before the
+    # KDF migration. Keep the legacy truncation only on this compatibility path.
+    raw = _password_bytes(plain)[:_BCRYPT_MAX_BYTES]
     try:
         return bcrypt.checkpw(raw, hashed.encode("utf-8"))
     except ValueError:
@@ -126,7 +159,9 @@ def decode_access_token(token: str) -> dict:
     try:
         return jwt.decode(token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
     except jwt.PyJWTError as exc:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token") from exc
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token"
+        ) from exc
 
 
 def set_session_cookie(response: Response, name: str, token: str) -> None:
@@ -192,7 +227,9 @@ def get_current_admin(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token type")
     admin = db.get(AdminUser, int(payload["sub"]))
     if admin is None or not admin.is_active:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin account not found or inactive")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin account not found or inactive"
+        )
     return admin
 
 
@@ -226,7 +263,9 @@ def get_current_user(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token type")
     user = db.get(User, int(payload["sub"]))
     if user is None or not user.is_active:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User account not found or inactive")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="User account not found or inactive"
+        )
     return user
 
 
@@ -244,7 +283,9 @@ def get_current_disaster_viewer(
     user tokens valid for admin routes; it is scoped only to disaster viewer
     endpoints that explicitly depend on this function.
     """
-    raw_token = _credential_or_cookie(request, credentials, USER_SESSION_COOKIE, ADMIN_SESSION_COOKIE) or token
+    raw_token = (
+        _credential_or_cookie(request, credentials, USER_SESSION_COOKIE, ADMIN_SESSION_COOKIE) or token
+    )
     if raw_token is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
     payload = decode_access_token(raw_token)
@@ -253,13 +294,17 @@ def get_current_disaster_viewer(
     if token_type == "user":
         user = db.get(User, int(payload["sub"]))
         if user is None or not user.is_active:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User account not found or inactive")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="User account not found or inactive"
+            )
         return user
 
     if token_type in (None, "admin"):
         admin = db.get(AdminUser, int(payload["sub"]))
         if admin is None or not admin.is_active:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin account not found or inactive")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin account not found or inactive"
+            )
         return admin
 
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token type")
@@ -293,11 +338,21 @@ def require_permission(code: str):
     """
 
     def _dependency(admin: AdminUser = Depends(get_current_admin_panel)) -> AdminUser:
-        if admin.role_id is None:
-            return admin
-        codes = {p.code for p in (admin.role.permissions if admin.role else [])}
-        if code not in codes:
+        if not admin_has_permission(admin, code):
             raise HTTPException(status_code=403, detail=f"Missing permission: {code}")
         return admin
 
     return _dependency
+
+
+def admin_has_permission(admin: AdminUser, code: str) -> bool:
+    """Return whether an admin may perform an explicitly gated operation.
+
+    ``role_id IS NULL`` is the legacy Full Access state. It intentionally
+    bypasses every permission gate so existing owners keep unrestricted access.
+    Explicit roles, including the built-in ``admin`` role, are evaluated only
+    from their assigned permission rows.
+    """
+    if admin.role_id is None:
+        return True
+    return code in {p.code for p in (admin.role.permissions if admin.role else [])}
