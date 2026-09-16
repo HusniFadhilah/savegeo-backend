@@ -24,14 +24,14 @@ from app.api.deps import require_ee
 from app.core.config import get_settings
 from app.core.security import get_current_app_viewer
 from app.db.session import SessionLocal
-from app.services import carbon_service, crop_monitoring_service, landcover_service, vegetation_service
+from app.services import carbon_service, crop_monitoring_service, download_service, landcover_service, vegetation_service
 from app.services.gee_common import AnalysisError
 
 router = APIRouter(tags=["analysis-jobs"])
 logger = logging.getLogger(__name__)
 
 _executor = ThreadPoolExecutor(max_workers=int(os.getenv("ANALYSIS_JOB_WORKERS", "2")))
-_ALLOWED_JOB_TYPES = {"carbon", "carbon_local", "vegetation", "landcover", "crop_monitoring"}
+_ALLOWED_JOB_TYPES = {"carbon", "carbon_local", "carbon_delta", "geotiff", "vegetation", "landcover", "crop_monitoring"}
 _UPSTREAM_CONNECTION_ERROR = (
     "Koneksi ke layanan data eksternal terputus sebelum respons diterima. "
     "Coba jalankan ulang analisis; jika berulang, kecilkan AOI/rentang waktu "
@@ -84,6 +84,10 @@ def _run_job(job_id: str, job_type: str, payload: dict[str, Any]) -> None:
             result = carbon_service.analyze_carbon(db, payload)
         elif job_type == "carbon_local":
             result = carbon_service.analyze_carbon_local(db, payload)
+        elif job_type == "carbon_delta":
+            result = carbon_service.analyze_carbon_delta(db, payload)
+        elif job_type == "geotiff":
+            result = download_service.download_geotiff(db, payload)
         elif job_type == "vegetation":
             result = vegetation_service.analyze_vegetation(db, payload)
         elif job_type == "landcover":
