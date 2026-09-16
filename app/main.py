@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from collections.abc import Mapping
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -89,7 +90,7 @@ def _problem_response(
     detail: object,
     *,
     errors: object = None,
-    headers: dict[str, str] | None = None,
+    headers: Mapping[str, str] | None = None,
 ):
     """Return RFC 9457-compatible JSON while retaining the legacy ``error`` key."""
     detail_text = detail if isinstance(detail, str) else "Request failed"
