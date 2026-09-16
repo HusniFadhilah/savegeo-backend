@@ -31,7 +31,18 @@ router = APIRouter(tags=["analysis-jobs"])
 logger = logging.getLogger(__name__)
 
 _executor = ThreadPoolExecutor(max_workers=int(os.getenv("ANALYSIS_JOB_WORKERS", "2")))
-_ALLOWED_JOB_TYPES = {"carbon", "carbon_local", "carbon_delta", "geotiff", "vegetation", "landcover", "crop_monitoring"}
+_ALLOWED_JOB_TYPES = {
+    "carbon",
+    "carbon_local",
+    "carbon_delta",
+    "geotiff",
+    "vegetation",
+    "landcover",
+    "landcover_transition",
+    "landcover_change_map",
+    "landcover_hotspots",
+    "crop_monitoring",
+}
 _UPSTREAM_CONNECTION_ERROR = (
     "Koneksi ke layanan data eksternal terputus sebelum respons diterima. "
     "Coba jalankan ulang analisis; jika berulang, kecilkan AOI/rentang waktu "
@@ -92,6 +103,12 @@ def _run_job(job_id: str, job_type: str, payload: dict[str, Any]) -> None:
             result = vegetation_service.analyze_vegetation(db, payload)
         elif job_type == "landcover":
             result = landcover_service.analyze_landcover(payload)
+        elif job_type == "landcover_transition":
+            result = landcover_service.analyze_landcover_transition(payload)
+        elif job_type == "landcover_change_map":
+            result = landcover_service.analyze_landcover_change_map(payload)
+        elif job_type == "landcover_hotspots":
+            result = landcover_service.analyze_landcover_hotspots(payload)
         elif job_type == "crop_monitoring":
             result = crop_monitoring_service.run_crop_monitoring(db, payload)
         else:  # defensive; validated before submit
