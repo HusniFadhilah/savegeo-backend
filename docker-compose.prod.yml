@@ -38,7 +38,7 @@ services:
       - >-
         python -m alembic upgrade head &&
         python -m scripts.seed_rbac &&
-        uvicorn app.main:app --host 0.0.0.0 --port 8086
+        python -m uvicorn app.main:app --host 0.0.0.0 --port 8086
         --workers $${WEB_CONCURRENCY:-2}
     ports:
       # The LEN public reverse proxy reaches the backend on the server LAN IP.
