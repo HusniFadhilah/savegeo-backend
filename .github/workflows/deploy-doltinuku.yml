@@ -132,7 +132,7 @@ jobs:
       - name: Install deployment tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y lftp sshpass netcat-openbsd
+          sudo apt-get install -y sshpass netcat-openbsd
 
       - name: Verify Doltinuku SSH is reachable
         run: |
@@ -141,34 +141,30 @@ jobs:
 
       - name: Upload backend source
         working-directory: backend
+        env:
+          SSHPASS: ${{ secrets.SFTP_DOLTINUKU_PASSWORD }}
         run: |
           set -euo pipefail
-          lftp -u "$DOLTINUKU_USERNAME,$DOLTINUKU_PASSWORD" \
-            "sftp://$DOLTINUKU_SERVER:${DOLTINUKU_SSH_PORT:-22}" <<EOF
-          set sftp:auto-confirm yes
-          set net:max-retries 3
-          set net:timeout 30
-
-          mirror --reverse \
-            --verbose \
-            --overwrite \
-            --no-perms \
-            --exclude-glob '.git/**' \
-            --exclude-glob '.github/**' \
-            --exclude-glob '.claude/**' \
-            --exclude-glob '.mypy_cache/**' \
-            --exclude-glob '.pytest_cache/**' \
-            --exclude-glob '.ruff_cache/**' \
-            --exclude-glob '.venv/**' \
-            --exclude-glob '.venv-py312-test/**' \
-            --exclude-glob '__pycache__/**' \
-            --exclude-glob 'savegeo_backend.egg-info/**' \
-            --exclude-glob 'var/**' \
-            --exclude-glob '.env' \
-            ./ "$BACKEND_REMOTE_DIR"
-
-          bye
-          EOF
+          archive="$RUNNER_TEMP/savegeo-backend-source.tar.gz"
+          tar -czf "$archive" \
+            --exclude='./.git' \
+            --exclude='./.github' \
+            --exclude='./.claude' \
+            --exclude='./.mypy_cache' \
+            --exclude='./.pytest_cache' \
+            --exclude='./.ruff_cache' \
+            --exclude='./.venv' \
+            --exclude='./.venv-py312-test' \
+            --exclude='./__pycache__' \
+            --exclude='./savegeo_backend.egg-info' \
+            --exclude='./var' \
+            --exclude='./.env' \
+            .
+          sshpass -e scp \
+            -P "${DOLTINUKU_SSH_PORT:-22}" \
+            -o StrictHostKeyChecking=accept-new \
+            "$archive" \
+            "$DOLTINUKU_USERNAME@$DOLTINUKU_SERVER:/tmp/savegeo-backend-source.tar.gz"
 
       - name: Configure Doltinuku web server and deploy backend
         env:
@@ -183,6 +179,21 @@ jobs:
           test -d "$BACKEND_REMOTE_DIR"
           test -d "$FRONTEND_REMOTE_DIR/dist"
           test -s "$BACKEND_REMOTE_DIR/.env"
+
+          upload_archive=/tmp/savegeo-backend-source.tar.gz
+          test -s "$upload_archive"
+          upload_stage=$(mktemp -d /tmp/savegeo-backend-upload.XXXXXX)
+          cleanup_upload() {
+            rm -rf "$upload_stage" "$upload_archive"
+          }
+          trap cleanup_upload EXIT
+          tar -xzf "$upload_archive" -C "$upload_stage" --no-same-owner
+          rsync -a --delete \
+            --exclude='.env' \
+            --exclude='.venv/' \
+            --exclude='.venv-py312-test/' \
+            --exclude='var/' \
+            "$upload_stage/" "$BACKEND_REMOTE_DIR/"
 
           rm -rf "$BACKEND_REMOTE_DIR/savegeo_backend.egg-info" "$BACKEND_REMOTE_DIR/.claude"
 
