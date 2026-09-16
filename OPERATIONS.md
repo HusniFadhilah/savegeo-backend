@@ -5,7 +5,7 @@
 1. Create `.venv` with Python 3.11.
 2. Install `pip install -e ".[dev]"`.
 3. Copy `.env.example` to `.env` and set `DATABASE_URL`, JWT, GEE, and storage settings.
-4. Run `alembic upgrade head` and `python -m scripts.seed_config`.
+4. Run `alembic upgrade head`, `python -m scripts.seed_config`, and `python -m scripts.seed_rbac`.
 5. Start `uvicorn app.main:app --reload --port 8086`.
 6. Verify `/api/health` and `/docs`.
 

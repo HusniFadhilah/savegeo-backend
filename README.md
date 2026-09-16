@@ -53,6 +53,7 @@ Gunakan `.env.example` sebagai daftar lengkap variabel yang didukung.
 ```powershell
 alembic upgrade head
 python -m scripts.seed_config
+python -m scripts.seed_rbac
 ```
 
 Buat akun admin menggunakan environment sementara:
