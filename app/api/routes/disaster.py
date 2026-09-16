@@ -13,16 +13,77 @@ from __future__ import annotations
 
 import logging
 import requests
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import Response
 from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import require_ee
 from app.core.security import get_current_disaster_viewer
-from app.services import disaster_service, fire_multi_source_service
+from app.services import disaster_service, fire_multi_source_service, firms_service
 from app.services.gee_common import AnalysisError
 
 router = APIRouter(prefix="/disaster", tags=["disaster"])
 logger = logging.getLogger(__name__)
+
+
+@router.get("/firms/sources")
+def get_firms_sources(viewer=Depends(get_current_disaster_viewer)):
+    return firms_service.source_metadata()
+
+
+@router.get("/firms/fires")
+def get_firms_fires(
+    source: str = Query(default="all"),
+    day_range: int = Query(default=1),
+    date: str | None = Query(default=None),
+    west: float = Query(...),
+    south: float = Query(...),
+    east: float = Query(...),
+    north: float = Query(...),
+    min_confidence: str | None = Query(default=None),
+    min_frp: float | None = Query(default=None),
+    limit: int = Query(default=2000),
+    viewer=Depends(get_current_disaster_viewer),
+):
+    try:
+        return firms_service.get_fires(
+            source=source,
+            day_range=day_range,
+            requested_date=date,
+            bbox=(west, south, east, north),
+            min_confidence=min_confidence,
+            min_frp=min_frp,
+            limit=limit,
+        )
+    except firms_service.FirmsRequestError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@router.get("/firms/wms")
+def get_firms_wms(
+    layer: str = Query(...),
+    west: float = Query(...),
+    south: float = Query(...),
+    east: float = Query(...),
+    north: float = Query(...),
+    crs: str = Query(default="EPSG:4326"),
+    width: int = Query(default=1024),
+    height: int = Query(default=512),
+    format: str = Query(default="image/png"),
+    viewer=Depends(get_current_disaster_viewer),
+):
+    try:
+        payload = firms_service.fetch_wms(
+            layer=layer,
+            bbox=(west, south, east, north),
+            crs=crs,
+            width=width,
+            height=height,
+            image_format=format,
+        )
+        return Response(content=payload["content"], media_type=payload["content_type"], headers={"X-Attribution": payload["attribution"]})
+    except firms_service.FirmsRequestError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
 @router.post("/fire-multi-source", dependencies=[Depends(get_current_disaster_viewer)])

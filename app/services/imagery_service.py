@@ -50,6 +50,7 @@ from app.core.config import get_settings
 from app.registries.imagery_provider_registry import (
     IMAGERY_PROVIDERS,
     get_imagery_provider_meta,
+    provider_capabilities,
     resolve_imagery_provider,
 )
 from app.services.gee_common import (
@@ -57,6 +58,12 @@ from app.services.gee_common import (
     create_geometry_from_payload,
     get_tile_url,
     resolve_cloud_mask_technique,
+)
+from app.services.commercial_imagery_service import (
+    COMMERCIAL_PROVIDER_KEYS,
+    configuration as commercial_configuration,
+    provider_meta as commercial_provider_meta,
+    request_headers as commercial_request_headers,
 )
 from app.services.geo_utils import bbox_and_centroid
 
@@ -107,7 +114,16 @@ def list_providers() -> dict:
     copernicus_service = _copernicus_geosave_service()
     if find_spec("geosave_engine") is not None and copernicus_service is not None:
         providers.update(copernicus_service.COPERNICUS_PROVIDERS)
-    return {"providers": providers, "default": "sentinel2"}
+    catalog = {}
+    for key, meta in providers.items():
+        enriched = {**meta, "capabilities": provider_capabilities(meta)}
+        if key in COMMERCIAL_PROVIDER_KEYS:
+            enriched.update(commercial_provider_meta(key))
+        catalog[key] = enriched
+    return {
+        "providers": catalog,
+        "default": "sentinel2",
+    }
 
 
 def _aoi_payload_to_bbox(aoi_payload: dict) -> list[float]:
@@ -310,11 +326,17 @@ def _scene_from_stac_item(
     cloud = props.get(meta.get("cloud_property") or "eo:cloud_cover")
     default_asset = next((asset for asset in assets if asset["key"] == default_asset_key), assets[0])
     base = str(request.base_url).rstrip("/") if request is not None else ""
-    download_url = (
-        f"{base}/api/imagery/stac-source?item_url={quote(scene_url, safe='')}&asset_key={quote(default_asset_key, safe='')}"
-        if base
-        else default_asset["href"]
-    )
+    if base and meta.get("key") in COMMERCIAL_PROVIDER_KEYS:
+        download_url = (
+            f"{base}/api/imagery/commercial-source?provider_key={quote(str(meta['key']), safe='')}"
+            f"&item_url={quote(scene_url, safe='')}&asset_key={quote(default_asset_key, safe='')}"
+        )
+    else:
+        download_url = (
+            f"{base}/api/imagery/stac-source?item_url={quote(scene_url, safe='')}&asset_key={quote(default_asset_key, safe='')}"
+            if base
+            else default_asset["href"]
+        )
     return {
         "id": scene_url,
         "acquired_at": (item_dt.isoformat().replace("+00:00", "Z") if item_dt else ""),
@@ -483,6 +505,7 @@ def _list_cog_stac_scenes(
     catalog_url: str,
     producer: str | None = None,
     request=None,
+    headers: dict[str, str] | None = None,
 ) -> dict:
     if not data.get("aoi"):
         raise AnalysisError("aoi is required", 400)
@@ -494,7 +517,8 @@ def _list_cog_stac_scenes(
     start_dt, end_dt, interval = _stac_datetime_range(data, meta["name"])
 
     try:
-        with httpx.Client(timeout=30, follow_redirects=True) as client:
+        timeout = max(5, get_settings().commercial_imagery_timeout_seconds) if provider_key in COMMERCIAL_PROVIDER_KEYS else 30
+        with httpx.Client(timeout=timeout, follow_redirects=True, headers=headers or {}) as client:
             root = _fetch_json(client, catalog_url)
             search_url = data.get("stac_search_url") or _find_stac_search_url(catalog_url, root)
             if search_url:
@@ -843,6 +867,23 @@ def list_scenes(data: dict, request=None) -> dict:
             raise AnalysisError("Masukkan URL STAC Catalog/API untuk Generic STAC Catalog Browser", 400)
         return _list_cog_stac_scenes(data, _GENERIC_STAC_PROVIDER_KEY, catalog_url, "Custom STAC", request)
 
+    if data.get("satellite") in COMMERCIAL_PROVIDER_KEYS:
+        provider_key = str(data["satellite"])
+        config = commercial_configuration(provider_key)
+        if not config["configured"]:
+            raise AnalysisError(
+                f"{config['label']} belum dikonfigurasi. Isi URL STAC dan credential di backend/.env.",
+                503,
+            )
+        return _list_cog_stac_scenes(
+            data,
+            provider_key,
+            config["catalog_url"],
+            config["label"],
+            request,
+            headers=commercial_request_headers(provider_key),
+        )
+
     if data.get("satellite") in _COPERNICUS_PROVIDER_KEYS:
         if not _copernicus_geosave_available():
             raise AnalysisError(
@@ -1044,6 +1085,23 @@ def get_scene_tile(data: dict, request=None) -> dict:
             "super_resolution": None,
         }
 
+    if data.get("satellite") in COMMERCIAL_PROVIDER_KEYS:
+        provider_key = str(data["satellite"])
+        if not commercial_configuration(provider_key)["configured"]:
+            raise AnalysisError(f"{provider_key} belum dikonfigurasi di backend", 503)
+        if not data.get("scene_id"):
+            raise AnalysisError("scene_id is required", 400)
+        if request is None:
+            raise AnalysisError("request context is required for commercial STAC tile URLs", 500)
+        base = str(request.base_url).rstrip("/")
+        query = _cog_tile_query(data, str(data["scene_id"]))
+        return {
+            "scene_id": data["scene_id"],
+            "tile_url": f"{base}/api/imagery/commercial-tiles/{provider_key}/{{z}}/{{x}}/{{y}}.png?{query}",
+            "satellite": get_imagery_provider_meta(provider_key),
+            "super_resolution": None,
+        }
+
     if data.get("satellite") in _COPERNICUS_PROVIDER_KEYS:
         if not _copernicus_geosave_available():
             raise AnalysisError(
@@ -1143,8 +1201,10 @@ def get_scene_tile(data: dict, request=None) -> dict:
 
 
 @lru_cache(maxsize=512)
-def _stac_asset_href(item_url: str, asset_key: str) -> str:
-    with httpx.Client(timeout=30, follow_redirects=True) as client:
+def _stac_asset_href(item_url: str, asset_key: str, provider_key: str | None = None) -> str:
+    headers = commercial_request_headers(provider_key) if provider_key in COMMERCIAL_PROVIDER_KEYS else None
+    timeout = max(5, get_settings().commercial_imagery_timeout_seconds) if provider_key in COMMERCIAL_PROVIDER_KEYS else 30
+    with httpx.Client(timeout=timeout, follow_redirects=True, headers=headers or {}) as client:
         item = _fetch_json(client, item_url)
     assets = item.get("assets") or {}
     asset = assets.get(asset_key)
@@ -1153,8 +1213,8 @@ def _stac_asset_href(item_url: str, asset_key: str) -> str:
     return _abs_stac_href(item_url, asset["href"])
 
 
-def _readable_stac_asset_href(item_url: str, asset_key: str) -> str:
-    href = _stac_asset_href(item_url, asset_key)
+def _readable_stac_asset_href(item_url: str, asset_key: str, provider_key: str | None = None) -> str:
+    href = _stac_asset_href(item_url, asset_key, provider_key)
     _validate_public_http_url(href, "URL asset COG")
     # Cache the stable asset URL, never an expiring SAS token.
     if urlparse(item_url).hostname == "planetarycomputer.microsoft.com":
@@ -1208,8 +1268,8 @@ def _parse_cog_rescale(value: str | None, band_count: int) -> list[tuple[float, 
     return ranges
 
 
-def _render_cog_tile(item_url: str, z: int, x: int, y: int, asset_key: str, bands: str | None, rescale: str | None) -> bytes | None:
-    href = _readable_stac_asset_href(item_url, asset_key)
+def _render_cog_tile(item_url: str, z: int, x: int, y: int, asset_key: str, bands: str | None, rescale: str | None, provider_key: str | None = None) -> bytes | None:
+    href = _readable_stac_asset_href(item_url, asset_key, provider_key)
     _validate_public_http_url(href, "URL asset COG")
     indexes = _parse_cog_bands(bands)
     with rasterio.Env():
@@ -1229,8 +1289,8 @@ def _render_cog_tile(item_url: str, z: int, x: int, y: int, asset_key: str, band
     return rendered.render(img_format="PNG")
 
 
-def get_stac_asset_download_url(item_url: str, asset_key: str) -> str:
-    href = _readable_stac_asset_href(item_url, asset_key)
+def get_stac_asset_download_url(item_url: str, asset_key: str, provider_key: str | None = None) -> str:
+    href = _readable_stac_asset_href(item_url, asset_key, provider_key)
     _validate_public_http_url(href, "URL asset COG")
     return href
 
@@ -1333,6 +1393,34 @@ def render_maxar_open_data_tile(
     except Exception as exc:  # noqa: BLE001
         logger.exception("Vantor/Maxar Open Data tile render failed")
         raise AnalysisError(f"Gagal merender tile Vantor/Maxar Open Data: {exc}", 502)
+
+
+def render_commercial_stac_tile(
+    provider_key: str,
+    item_url: str,
+    z: int,
+    x: int,
+    y: int,
+    asset_key: str = "visual",
+    bands: str | None = None,
+    rescale: str | None = None,
+) -> bytes | None:
+    if provider_key not in COMMERCIAL_PROVIDER_KEYS:
+        raise AnalysisError("Provider commercial tidak dikenal", 400)
+    if not commercial_configuration(provider_key)["configured"]:
+        raise AnalysisError(f"{provider_key} belum dikonfigurasi di backend", 503)
+    try:
+        # The item lookup is authenticated. Providers should return a signed
+        # COG href for range-based rendering; the credential is never sent to
+        # the browser or embedded in the tile URL.
+        return _render_cog_tile(item_url, z, x, y, asset_key, bands, rescale, provider_key)
+    except (TileOutsideBounds, PointOutsideBounds):
+        return None
+    except AnalysisError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Commercial STAC tile render failed provider=%s", provider_key)
+        raise AnalysisError(f"Gagal merender tile {provider_key}: {exc}", 502)
 
 
 def get_dem_tile(data: dict) -> dict:

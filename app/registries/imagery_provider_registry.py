@@ -86,6 +86,56 @@ IMAGERY_PROVIDERS: dict[str, dict[str, Any]] = {
         "cloud_mask_techniques": None,
         "description": "Katalog open-data Planet untuk event bencana/kemanusiaan di Source Cooperative. Gratis untuk event tertentu, bukan arsip global seluruh lokasi/tanggal.",
     },
+    "planet_commercial": {
+        "key": "planet_commercial",
+        "name": "Planet commercial imagery",
+        "provider": "Planet",
+        "group": "Commercial EO",
+        "gee_collection": "",
+        "source_kind": "planet_stac",
+        "visualization": "rgb",
+        "color_mode": "natural",
+        "resolution_m": 3,
+        "revisit_days": 1,
+        "start_year": 2016,
+        "cloud_property": "eo:cloud_cover",
+        "cloud_mask_techniques": None,
+        "license": "Planet customer license",
+        "description": "Katalog Planet berlisensi melalui STAC backend. Search dan preview memakai entitlement server; order/tasking/download bulk belum dipicu otomatis.",
+    },
+    "vantor_commercial": {
+        "key": "vantor_commercial",
+        "name": "Vantor/Maxar commercial imagery",
+        "provider": "Vantor / Maxar",
+        "group": "Commercial EO",
+        "gee_collection": "",
+        "source_kind": "vantor_stac",
+        "visualization": "rgb",
+        "color_mode": "natural",
+        "resolution_m": 0.5,
+        "revisit_days": 1,
+        "start_year": 2010,
+        "cloud_property": "eo:cloud_cover",
+        "cloud_mask_techniques": None,
+        "license": "Vantor/Maxar customer license",
+        "description": "Katalog Vantor/Maxar berlisensi melalui STAC backend. Resolusi aktual mengikuti asset dan entitlement.",
+    },
+    "iceye_commercial": {
+        "key": "iceye_commercial",
+        "name": "ICEYE commercial SAR",
+        "provider": "ICEYE",
+        "group": "Commercial SAR",
+        "gee_collection": "",
+        "source_kind": "iceye_stac",
+        "visualization": "sar",
+        "resolution_m": 3,
+        "revisit_days": 1,
+        "start_year": 2018,
+        "cloud_property": None,
+        "cloud_mask_techniques": None,
+        "license": "ICEYE customer license",
+        "description": "Katalog ICEYE SAR berlisensi melalui STAC backend. Analisis InSAR/coherence tetap memerlukan pasangan SLC dan processor yang kompatibel.",
+    },
     "openaerialmap": {
         "key": "openaerialmap",
         "name": "OpenAerialMap - Open UAV/Aerial Imagery",
@@ -349,6 +399,31 @@ IMAGERY_PROVIDERS: dict[str, dict[str, Any]] = {
 }
 
 DEFAULT_IMAGERY_PROVIDER = "sentinel2"
+
+
+def provider_capabilities(meta: dict[str, Any]) -> dict[str, bool]:
+    """Normalize provider capabilities for the imagery catalog response."""
+    source_kind = str(meta.get("source_kind") or "gee")
+    visualization = str(meta.get("visualization") or "rgb")
+    visualization_only = source_kind in {"esri_wayback", "google_basemap", "apple_basemap"}
+    commercial = source_kind in {"planet", "maxar", "commercial", "planet_stac", "vantor_stac", "iceye_stac"}
+    open_data = bool(meta.get("open_data", not commercial))
+    return {
+        "searchable": True,
+        "downloadable": bool(meta.get("gee_collection") or "stac" in source_kind),
+        "analytical": not visualization_only,
+        "visualization_only": visualization_only,
+        "supports_time": True,
+        "supports_cloud_filter": bool(meta.get("cloud_property")),
+        # A single-band product still exposes a physical band (for example
+        # NO2 or night-light radiance); it just does not expose an RGB trio.
+        "supports_bands": visualization in {"rgb", "sar", "single_band"},
+        "supports_raw_data": bool(meta.get("gee_collection") or "stac" in source_kind),
+        "supports_ai": bool(meta.get("supports_ai", not visualization_only and open_data)),
+        "requires_authentication": commercial,
+        "commercial": commercial,
+        "open_data": open_data,
+    }
 
 
 def resolve_imagery_provider(key: str | None) -> str:

@@ -76,6 +76,24 @@ class Settings(BaseSettings):
     # here, or configure AWS_* credentials in the process environment for S3.
     copernicus_cdse_access_token: str = ""
 
+    # --- Licensed commercial EO providers (server-side only) ---
+    # These are intentionally backend-only.  The STAC URL may point to the
+    # provider catalog or its /search endpoint; credentials never enter the
+    # browser bundle or the imagery scene payload.
+    planet_stac_url: str = ""
+    planet_stac_collection: str = ""
+    planet_api_key: str = ""
+    planet_auth_scheme: str = "basic"
+    vantor_stac_url: str = ""
+    vantor_stac_collection: str = ""
+    vantor_api_token: str = ""
+    vantor_auth_scheme: str = "bearer"
+    iceye_stac_url: str = ""
+    iceye_stac_collection: str = ""
+    iceye_api_token: str = ""
+    iceye_auth_scheme: str = "bearer"
+    commercial_imagery_timeout_seconds: int = 30
+
     # --- Chloris carbon stock integration ---
     # Do not store Chloris username/password here. Use API credentials from the
     # Chloris profile page, or configure a direct dataPath/download URL.
@@ -92,6 +110,10 @@ class Settings(BaseSettings):
     # --- Disaster adapters ---
     bmkg_cap_url: str = "https://www.bmkg.go.id/alerts/nowcast/id"
     nasa_firms_map_key: str = ""
+    nasa_firms_base_url: str = "https://firms.modaps.eosdis.nasa.gov"
+    nasa_firms_cache_ttl_seconds: int = 900
+    nasa_firms_request_timeout_seconds: int = 20
+    nasa_firms_max_day_range: int = 7
     inarisk_wms_url: str = ""
     inarisk_wms_layers: str = ""
     inarisk_tile_url: str = ""

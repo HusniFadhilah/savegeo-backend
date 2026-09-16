@@ -5,7 +5,7 @@ import pytest
 from rio_tiler.models import ImageData
 
 from app.services import imagery_resolution, imagery_service
-from app.registries.imagery_provider_registry import get_imagery_provider_meta
+from app.registries.imagery_provider_registry import get_imagery_provider_meta, provider_capabilities
 
 
 def test_sentinel_rgb_catalog_uses_harmonized_ten_metre_bands():
@@ -13,6 +13,18 @@ def test_sentinel_rgb_catalog_uses_harmonized_ten_metre_bands():
     assert meta["gee_collection"] == "COPERNICUS/S2_SR_HARMONIZED"
     assert [meta["band_role_map"][role] for role in ("red", "green", "blue")] == ["B4", "B3", "B2"]
     assert meta["resolution_m"] == 10
+
+
+def test_provider_capabilities_describe_single_band_and_stac_access():
+    gas = provider_capabilities(get_imagery_provider_meta("sentinel5p_no2"))
+    assert gas["supports_bands"] is True
+    assert gas["supports_cloud_filter"] is False
+    assert gas["analytical"] is True
+
+    stac = provider_capabilities(get_imagery_provider_meta("stac_catalog"))
+    assert stac["downloadable"] is True
+    assert stac["supports_raw_data"] is True
+    assert stac["visualization_only"] is False
 
 
 def test_stac_never_selects_thumbnail_even_when_named_visual():
