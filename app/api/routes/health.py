@@ -21,6 +21,8 @@ def health(request: Request, db: Session = Depends(get_db)):
         "status": "ok",
         "ee_initialized": ee_initialized,
         "timestamp": dt.datetime.now(dt.UTC).isoformat(),
-        "active_credential": active_cred.client_email if active_cred else None,
+        # Never expose service-account identity in a public liveness response.
+        "active_credential": bool(active_cred),
+        "active_credential_configured": bool(active_cred),
         "active_models": active_models,
     }

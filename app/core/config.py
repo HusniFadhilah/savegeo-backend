@@ -4,13 +4,14 @@ Mirrors the legacy Flask `app.config` defaults (see backend/app.py lines ~40-90)
 but centralizes them via pydantic-settings instead of scattering `os.environ.get`
 calls through route handlers.
 """
+
 from __future__ import annotations
 
 import secrets
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -34,7 +35,10 @@ class Settings(BaseSettings):
     supabase_gee_credentials_bucket: str = "gee-credentials"
 
     # --- JWT ---
-    jwt_secret_key: str = Field(default_factory=lambda: secrets.token_urlsafe(48))
+    # Production must provide a stable secret through the environment/secret
+    # manager. Development can still receive an ephemeral secret so a local
+    # checkout works without creating a credential file.
+    jwt_secret_key: str = ""
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 1440
     password_reset_token_expire_minutes: int = 30
@@ -162,8 +166,10 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def require_production_secrets(self) -> Settings:
-        if self.app_env.lower() in {"prod", "production"} and not self.jwt_secret_key:
-            raise ValueError("JWT_SECRET_KEY must be set in production")
+        if self.app_env.lower() in {"prod", "production"} and len(self.jwt_secret_key) < 32:
+            raise ValueError("JWT_SECRET_KEY must be at least 32 characters in production")
+        if not self.jwt_secret_key:
+            self.jwt_secret_key = secrets.token_urlsafe(48)
         if self.auth_cookie_samesite.lower() not in {"lax", "strict", "none"}:
             raise ValueError("AUTH_COOKIE_SAMESITE must be lax, strict, or none")
         return self

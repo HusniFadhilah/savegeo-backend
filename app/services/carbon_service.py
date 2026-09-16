@@ -781,7 +781,7 @@ def analyze_carbon_local(db: Session, data: dict) -> dict:
 
     start_date = data.get("start_date", "2022-01-01")
     end_date = data.get("end_date", "2022-12-31")
-    scale = float(data.get("scale", 250))
+    scale = float(data.get("scale", 100))
     n_samples = int(data.get("n_samples", 2000))
     vis_min = int(data.get("vis_min", config_service.get_analysis_defaults(db)["carbon_vis_min"]))
     vis_max = int(data.get("vis_max", config_service.get_analysis_defaults(db)["carbon_vis_max"]))

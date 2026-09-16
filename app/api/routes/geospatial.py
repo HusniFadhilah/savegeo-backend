@@ -5,6 +5,7 @@ accept references and job descriptions, never credentials or large raster
 payloads in URLs. Heavy execution can be attached to the existing worker
 queue without changing the frontend contract.
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -16,12 +17,16 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator
 
 from app.core.security import get_current_app_viewer
+from app.schemas.metadata import DatasetMetadata
 
 router = APIRouter(prefix="/geospatial", tags=["geospatial"])
 
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _URL = re.compile(r"^https?://", re.IGNORECASE)
-_FORBIDDEN_SQL = re.compile(r"(?:;|--|/\*|\*/|\b(?:COPY|ATTACH|DETACH|INSTALL|LOAD|EXPORT|IMPORT|CREATE|DROP|ALTER|INSERT|UPDATE|DELETE|PRAGMA)\b)", re.IGNORECASE)
+_FORBIDDEN_SQL = re.compile(
+    r"(?:;|--|/\*|\*/|\b(?:COPY|ATTACH|DETACH|INSTALL|LOAD|EXPORT|IMPORT|CREATE|DROP|ALTER|INSERT|UPDATE|DELETE|PRAGMA)\b)",
+    re.IGNORECASE,
+)
 _catalog: dict[str, dict[str, Any]] = {}
 _jobs: dict[str, dict[str, Any]] = {}
 
@@ -44,6 +49,7 @@ class DatasetReference(BaseModel):
     sourceType: Literal["local-file", "browser-cache", "backend", "remote"]
     version: str | None = None
     module: str | None = None
+    metadata: DatasetMetadata | None = None
 
     @field_validator("id")
     @classmethod
@@ -92,13 +98,25 @@ def _safe_sql(sql: str, limit: int) -> str:
 
 def _new_job(kind: str, request: ExportRequest | QueryRequest) -> dict[str, Any]:
     job_id = str(uuid.uuid4())
-    job = {"id": job_id, "kind": kind, "status": "queued", "mode": "server", "createdAt": dt.datetime.now(dt.UTC).isoformat(), "request": request.model_dump(exclude_none=True)}
+    job = {
+        "id": job_id,
+        "kind": kind,
+        "status": "queued",
+        "mode": "server",
+        "createdAt": dt.datetime.now(dt.UTC).isoformat(),
+        "request": request.model_dump(exclude_none=True),
+    }
     _jobs[job_id] = job
     return job
 
 
 @router.get("/datasets")
-def list_cloud_datasets(module: str | None = None, format: str | None = Query(default=None), search: str | None = None, _viewer: object = Depends(get_current_app_viewer)):
+def list_cloud_datasets(
+    module: str | None = None,
+    format: str | None = Query(default=None),
+    search: str | None = None,
+    _viewer: object = Depends(get_current_app_viewer),
+):
     values = list(_catalog.values())
     if module:
         values = [item for item in values if item.get("module") == module]
@@ -106,7 +124,11 @@ def list_cloud_datasets(module: str | None = None, format: str | None = Query(de
         values = [item for item in values if item.get("format") == format]
     if search:
         term = search.lower()
-        values = [item for item in values if term in item.get("name", "").lower() or term in item.get("id", "").lower()]
+        values = [
+            item
+            for item in values
+            if term in item.get("name", "").lower() or term in item.get("id", "").lower()
+        ]
     return {"datasets": values, "count": len(values)}
 
 
@@ -122,7 +144,9 @@ def get_cloud_dataset(dataset_id: str, _viewer: object = Depends(get_current_app
 def register_cloud_dataset(reference: DatasetReference, _viewer: object = Depends(get_current_app_viewer)):
     data = reference.model_dump(exclude_none=True)
     if reference.access in {"private", "signed"} and (reference.url or reference.assetUrl):
-        raise HTTPException(status_code=400, detail="Private dataset URLs must be issued by the access endpoint")
+        raise HTTPException(
+            status_code=400, detail="Private dataset URLs must be issued by the access endpoint"
+        )
     _catalog[reference.id] = data
     return data
 

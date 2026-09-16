@@ -5,6 +5,7 @@ import_legacy_models(...); init_ee_from_db()` sequence, minus the automatic lega
 model import (moved to an explicit `scripts/import_legacy_models.py` per the
 migration plan - not run automatically on every boot).
 """
+
 from __future__ import annotations
 
 import logging
@@ -17,12 +18,15 @@ load_dotenv()
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.router import api_router
 from app.core.config import get_settings
 from app.core.cors import setup_cors
+from app.core.http import SecurityHeadersMiddleware
 from app.db.session import SessionLocal
 from app.services import gee_service
 
@@ -53,6 +57,7 @@ app = FastAPI(
 )
 
 setup_cors(app, settings)
+app.add_middleware(SecurityHeadersMiddleware, settings=settings)
 backend_root = Path(__file__).resolve().parent.parent
 disaster_raster_dir = Path(settings.disaster_raster_dir)
 if not disaster_raster_dir.is_absolute():
@@ -78,29 +83,57 @@ def root() -> dict[str, str]:
     }
 
 
-# -- Error envelope: {"error": "..."} for most cases, matching the majority of
-# legacy Flask routes (which return a bare {"error": message} dict). --
+def _problem_response(
+    request: Request,
+    status_code: int,
+    detail: object,
+    *,
+    errors: object = None,
+    headers: dict[str, str] | None = None,
+):
+    """Return RFC 9457-compatible JSON while retaining the legacy ``error`` key."""
+    detail_text = detail if isinstance(detail, str) else "Request failed"
+    body: dict[str, object] = {
+        "type": f"urn:savegeo:problem:{status_code}",
+        "title": "Request error" if status_code < 500 else "Internal server error",
+        "status": status_code,
+        "detail": detail_text,
+        "instance": request.url.path,
+        "request_id": getattr(request.state, "request_id", None),
+        # Existing frontend and integrations consume this field. Keep it as a
+        # non-breaking extension while clients migrate to Problem Details.
+        "error": detail_text,
+    }
+    if errors is not None:
+        body["errors"] = jsonable_encoder(errors)
+    return JSONResponse(
+        status_code=status_code,
+        content=body,
+        headers=headers,
+        media_type="application/problem+json",
+    )
+
+
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
-    return JSONResponse(status_code=exc.status_code, content={"error": exc.detail})
+    return _problem_response(request, exc.status_code, exc.detail, headers=exc.headers)
+
+
+@app.exception_handler(StarletteHTTPException)
+async def starlette_http_exception_handler(request: Request, exc: StarletteHTTPException):
+    """Also normalize framework-generated 404/405 responses."""
+    return _problem_response(request, exc.status_code, exc.detail, headers=exc.headers)
 
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    return JSONResponse(status_code=422, content={"error": "Validation error", "detail": exc.errors()})
+    return _problem_response(request, 422, "Validation error", errors=exc.errors())
 
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
-    logger.exception("Unhandled error on %s %s", request.method, request.url.path)
-    return JSONResponse(
-        status_code=500,
-        content={
-            "error": {
-                "message_key": "internal_server_error",
-                "params": {},
-                "id": "Terjadi kesalahan pada server. Coba lagi nanti.",
-                "en": "An internal server error occurred. Please try again later.",
-            }
-        },
+    request_id = getattr(request.state, "request_id", "unknown")
+    logger.exception(
+        "Unhandled error request_id=%s method=%s path=%s", request_id, request.method, request.url.path
     )
+    return _problem_response(request, 500, "An internal server error occurred. Please try again later.")
