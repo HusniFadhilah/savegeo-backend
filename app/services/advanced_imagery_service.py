@@ -14,6 +14,7 @@ from typing import Any
 
 import numpy as np
 import rasterio
+from rasterio.warp import transform as transform_coordinates
 
 from app.services.gee_common import AnalysisError
 
@@ -114,7 +115,11 @@ def spectral_profile(data: dict[str, Any]) -> dict[str, Any]:
 
     href = imagery_service._readable_stac_asset_href(item_url, asset_key, provider_key)
     with rasterio.open(href) as source:
-        values = [float(value) if value is not None else None for value in next(source.sample([(longitude, latitude)], indexes=list(range(1, source.count + 1)), masked=True))]
+        if source.crs is None:
+            raise AnalysisError("Asset hyperspectral tidak memiliki CRS", 422)
+        source_x, source_y = transform_coordinates("EPSG:4326", source.crs, [longitude], [latitude])
+        sample = next(source.sample([(source_x[0], source_y[0])], indexes=list(range(1, source.count + 1)), masked=True))
+        values = [None if np.ma.is_masked(value) else float(value) for value in sample]
         descriptions = list(source.descriptions or ())
         tags = source.tags()
         wavelengths = data.get("wavelengths_nm") or tags.get("wavelengths_nm")

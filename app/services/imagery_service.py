@@ -27,8 +27,10 @@ metadata, not something this endpoint filters on beyond the optional
 from __future__ import annotations
 
 import logging
+import hashlib
 import re
 import socket
+import threading
 from ipaddress import ip_address
 from functools import lru_cache
 from typing import Any
@@ -72,6 +74,8 @@ logger = logging.getLogger(__name__)
 # Keep a generous safety ceiling for one browsing response. The UI paginates
 # this collection, so users are no longer forced to stop at 200 scenes.
 _MAX_SCENES = 2000
+_COMMERCIAL_ITEM_CACHE: dict[tuple[str, str], str] = {}
+_COMMERCIAL_ITEM_CACHE_LOCK = threading.RLock()
 _COPERNICUS_PROVIDER_KEYS = {"copernicus_s2_l2a", "copernicus_s2_l1c"}
 _OPENAERIALMAP_PROVIDER_KEY = "openaerialmap"
 _MAXAR_OPEN_DATA_PROVIDER_KEY = "vantor_open_data"
@@ -94,6 +98,24 @@ _SUPER_RESOLUTION_FACTORS = {
     "bicubic_2x": 2,
     "bicubic_4x": 4,
 }
+
+
+def _store_commercial_item(provider_key: str, item_url: str) -> str:
+    token = hashlib.sha256(f"{provider_key}:{item_url}".encode("utf-8")).hexdigest()[:32]
+    public_id = f"commercial:{provider_key}:{token}"
+    with _COMMERCIAL_ITEM_CACHE_LOCK:
+        _COMMERCIAL_ITEM_CACHE[(provider_key, public_id)] = item_url
+    return public_id
+
+
+def _resolve_commercial_item(provider_key: str, item_url: str) -> str:
+    if item_url.startswith("commercial:"):
+        with _COMMERCIAL_ITEM_CACHE_LOCK:
+            resolved = _COMMERCIAL_ITEM_CACHE.get((provider_key, item_url))
+        if not resolved:
+            raise AnalysisError("Referensi scene commercial sudah kedaluwarsa; lakukan search ulang", 410)
+        return resolved
+    return item_url
 
 
 def _copernicus_geosave_service():
@@ -326,10 +348,12 @@ def _scene_from_stac_item(
     cloud = props.get(meta.get("cloud_property") or "eo:cloud_cover")
     default_asset = next((asset for asset in assets if asset["key"] == default_asset_key), assets[0])
     base = str(request.base_url).rstrip("/") if request is not None else ""
-    if base and meta.get("key") in COMMERCIAL_PROVIDER_KEYS:
+    is_commercial = meta.get("key") in COMMERCIAL_PROVIDER_KEYS
+    public_scene_id = _store_commercial_item(str(meta["key"]), scene_url) if is_commercial else scene_url
+    if base and is_commercial:
         download_url = (
             f"{base}/api/imagery/commercial-source?provider_key={quote(str(meta['key']), safe='')}"
-            f"&item_url={quote(scene_url, safe='')}&asset_key={quote(default_asset_key, safe='')}"
+            f"&item_url={quote(public_scene_id, safe='')}&asset_key={quote(default_asset_key, safe='')}"
         )
     else:
         download_url = (
@@ -338,7 +362,7 @@ def _scene_from_stac_item(
             else default_asset["href"]
         )
     return {
-        "id": scene_url,
+        "id": public_scene_id,
         "acquired_at": (item_dt.isoformat().replace("+00:00", "Z") if item_dt else ""),
         "cloud_cover_pct": round(float(cloud), 1) if cloud is not None else None,
         "bbox": item.get("bbox"),
@@ -347,7 +371,18 @@ def _scene_from_stac_item(
         "platform": props.get("platform") or props.get("constellation"),
         "producer": producer or meta.get("provider"),
         "title": props.get("title") or props.get("catalog_id") or item.get("id"),
-        "assets": assets,
+        "assets": [
+            {
+                **asset,
+                "href": (
+                    f"{base}/api/imagery/commercial-source?provider_key={quote(str(meta['key']), safe='')}"
+                    f"&item_url={quote(public_scene_id, safe='')}&asset_key={quote(asset['key'], safe='')}"
+                    if base and is_commercial
+                    else asset["href"]
+                ),
+            }
+            for asset in assets
+        ],
         "default_asset_key": default_asset_key,
         "download_url": download_url,
     }
@@ -1202,15 +1237,16 @@ def get_scene_tile(data: dict, request=None) -> dict:
 
 @lru_cache(maxsize=512)
 def _stac_asset_href(item_url: str, asset_key: str, provider_key: str | None = None) -> str:
+    fetch_url = _resolve_commercial_item(provider_key, item_url) if provider_key in COMMERCIAL_PROVIDER_KEYS else item_url
     headers = commercial_request_headers(provider_key) if provider_key in COMMERCIAL_PROVIDER_KEYS else None
     timeout = max(5, get_settings().commercial_imagery_timeout_seconds) if provider_key in COMMERCIAL_PROVIDER_KEYS else 30
     with httpx.Client(timeout=timeout, follow_redirects=True, headers=headers or {}) as client:
-        item = _fetch_json(client, item_url)
+        item = _fetch_json(client, fetch_url)
     assets = item.get("assets") or {}
     asset = assets.get(asset_key)
     if not asset or not asset.get("href") or not _is_cog_like_asset(asset_key, asset):
         raise AnalysisError("Asset COG/GeoTIFF resolusi penuh yang dipilih tidak tersedia; pilih aset lain secara eksplisit", 404)
-    return _abs_stac_href(item_url, asset["href"])
+    return _abs_stac_href(fetch_url, asset["href"])
 
 
 def _readable_stac_asset_href(item_url: str, asset_key: str, provider_key: str | None = None) -> str:

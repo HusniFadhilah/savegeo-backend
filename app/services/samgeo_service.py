@@ -76,7 +76,11 @@ def get_job(job_id: str) -> dict:
 def start_job(data: dict) -> dict:
     if not data.get("item_url") or not data.get("aoi"):
         raise AnalysisError("Scene COG dan AOI diperlukan untuk segmentasi", 400)
-    imagery._validate_public_http_url(data["item_url"], "URL scene")
+    provider_key = str(data.get("provider_key") or "")
+    if provider_key in imagery.COMMERCIAL_PROVIDER_KEYS:
+        imagery._readable_stac_asset_href(data["item_url"], data.get("asset_key") or "visual", provider_key)
+    else:
+        imagery._validate_public_http_url(data["item_url"], "URL scene")
     imagery._aoi_payload_to_bbox(data["aoi"])
     imagery._parse_cog_bands(data.get("bands"))
     imagery._parse_cog_rescale(data.get("rescale"), 3)
@@ -120,7 +124,9 @@ def _run_job(folder: Path, data: dict) -> None:
 
 
 def segment(data: dict, folder: Path) -> dict:
-    href = imagery._readable_stac_asset_href(data["item_url"], data.get("asset_key") or "visual")
+    href = imagery._readable_stac_asset_href(
+        data["item_url"], data.get("asset_key") or "visual", data.get("provider_key") or None
+    )
     bounds = imagery._aoi_payload_to_bbox(data["aoi"])
     indexes = imagery._parse_cog_bands(data.get("bands"))
     with rasterio.Env(GDAL_HTTP_TIMEOUT=60, GDAL_HTTP_MAX_RETRY=2):

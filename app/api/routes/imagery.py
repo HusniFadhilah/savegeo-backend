@@ -56,7 +56,7 @@ def imagery_providers():
 
 
 @router.get("/imagery/provider-status")
-def imagery_provider_status():
+def imagery_provider_status(viewer=Depends(get_current_app_viewer)):
     """Return commercial connector status without exposing credentials."""
     return {
         key: imagery_service.commercial_provider_meta(key)
@@ -228,7 +228,7 @@ def imagery_maxar_open_data_tile(
     )
 
 
-@router.get("/imagery/commercial-tiles/{provider_key}/{z}/{x}/{y}.png")
+@router.get("/imagery/commercial-tiles/{provider_key}/{z}/{x}/{y}.png", dependencies=[Depends(get_current_app_viewer)])
 def imagery_commercial_tile(
     provider_key: str,
     z: int,
@@ -301,7 +301,7 @@ def imagery_stac_source(item_url: str, asset_key: str = "visual"):
     return RedirectResponse(href)
 
 
-@router.get("/imagery/commercial-source")
+@router.get("/imagery/commercial-source", dependencies=[Depends(get_current_app_viewer)])
 def imagery_commercial_source(provider_key: str, item_url: str, asset_key: str = "visual"):
     try:
         href = imagery_service.get_stac_asset_download_url(item_url, asset_key, provider_key)
