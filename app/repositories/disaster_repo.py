@@ -31,6 +31,7 @@ def _event_slug(name: str) -> str:
 
 
 def create_event(db: Session, data: dict, created_by: int | None) -> DisasterEvent:
+    event_date = data.get("event_date")
     event = DisasterEvent(
         name=data["name"],
         disaster_type=data["disaster_type"],
@@ -49,7 +50,7 @@ def create_event(db: Session, data: dict, created_by: int | None) -> DisasterEve
         short_title=data.get("short_title") or data["name"],
         monitoring_from=data.get("monitoring_from") or data.get("start_date"),
         monitoring_to=data.get("monitoring_to") or data.get("end_date"),
-        year=data.get("year") or (data.get("event_date").year if data.get("event_date") else None),
+        year=data.get("year") or (getattr(event_date, "year", None) if event_date else None),
         country_code=data.get("country_code") or "ID",
         province_codes=data.get("province_codes") or [],
         city_codes=data.get("city_codes") or [],

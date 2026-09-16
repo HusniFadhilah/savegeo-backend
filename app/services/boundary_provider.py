@@ -3,6 +3,7 @@
 The provider owns the external response shape and axis-order decision. The
 frontend only receives validated GeoJSON and never receives an arbitrary URL.
 """
+
 from __future__ import annotations
 
 import copy
@@ -30,27 +31,48 @@ def _walk_coordinates(node: Any, swap: bool = False):
 def _points(geometry: dict) -> list[list[float]]:
     coords = geometry.get("coordinates", [])
     found: list[list[float]] = []
+
     def visit(node):
-        if isinstance(node, list) and len(node) == 2 and all(isinstance(value, (int, float)) for value in node):
+        if (
+            isinstance(node, list)
+            and len(node) == 2
+            and all(isinstance(value, (int, float)) for value in node)
+        ):
             found.append(node)
         elif isinstance(node, list):
             for child in node:
                 visit(child)
+
     visit(coords)
     return found
 
 
 def _in_indonesia(points: list[list[float]]) -> bool:
-    return bool(points) and sum(INDONESIA_BBOX[0] <= p[0] <= INDONESIA_BBOX[2] and INDONESIA_BBOX[1] <= p[1] <= INDONESIA_BBOX[3] for p in points) / len(points) > 0.8
+    return (
+        bool(points)
+        and sum(
+            INDONESIA_BBOX[0] <= p[0] <= INDONESIA_BBOX[2] and INDONESIA_BBOX[1] <= p[1] <= INDONESIA_BBOX[3]
+            for p in points
+        )
+        / len(points)
+        > 0.8
+    )
 
 
 def _closed_rings(geometry: dict) -> bool:
     def rings(node):
-        if isinstance(node, list) and node and isinstance(node[0], list) and len(node[0]) == 2 and isinstance(node[0][0], (int, float)):
+        if (
+            isinstance(node, list)
+            and node
+            and isinstance(node[0], list)
+            and len(node[0]) == 2
+            and isinstance(node[0][0], (int, float))
+        ):
             yield node
         elif isinstance(node, list):
             for child in node:
                 yield from rings(child)
+
     return all(len(ring) >= 4 and ring[0] == ring[-1] for ring in rings(geometry.get("coordinates", [])))
 
 
@@ -90,23 +112,46 @@ def normalize_geometry(payload: dict, *, provider_axis: str = "lat-lng") -> Vali
         geometries = [raw]
     if any(geometry is None for geometry in geometries):
         raise ValueError("geometry is missing")
-    source_points = [point for geometry in geometries for point in _points(geometry)]
     swap = provider_axis == "lat-lng"
     normalized = copy.deepcopy(raw)
     if gtype == "FeatureCollection":
         for feature in normalized["features"]:
-            feature["geometry"]["coordinates"] = _walk_coordinates(feature["geometry"].get("coordinates", []), swap)
+            feature["geometry"]["coordinates"] = _walk_coordinates(
+                feature["geometry"].get("coordinates", []), swap
+            )
     elif gtype == "Feature":
-        normalized["geometry"]["coordinates"] = _walk_coordinates(normalized["geometry"].get("coordinates", []), swap)
+        normalized["geometry"]["coordinates"] = _walk_coordinates(
+            normalized["geometry"].get("coordinates", []), swap
+        )
     else:
         normalized["coordinates"] = _walk_coordinates(normalized.get("coordinates", []), swap)
-    normalized_points = [point for geometry in ([f["geometry"] for f in normalized.get("features", [])] if gtype == "FeatureCollection" else [normalized.get("geometry", normalized)]) for point in _points(geometry)]
+    normalized_points = [
+        point
+        for geometry in (
+            [f["geometry"] for f in normalized.get("features", [])]
+            if gtype == "FeatureCollection"
+            else [normalized.get("geometry", normalized)]
+        )
+        for point in _points(geometry)
+    ]
     if not _in_indonesia(normalized_points):
         raise ValueError("normalized geometry is outside Indonesia")
-    if not all(_closed_rings(geometry) for geometry in ([f["geometry"] for f in normalized.get("features", [])] if gtype == "FeatureCollection" else [normalized.get("geometry", normalized)])):
+    if not all(
+        _closed_rings(geometry)
+        for geometry in (
+            [f["geometry"] for f in normalized.get("features", [])]
+            if gtype == "FeatureCollection"
+            else [normalized.get("geometry", normalized)]
+        )
+    ):
         raise ValueError("polygon ring is not closed")
     raw_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return ValidatedGeometry(normalized, "valid", "lat-lng to lng-lat" if swap else "none", hashlib.sha256(raw_json.encode()).hexdigest())
+    return ValidatedGeometry(
+        normalized,
+        "valid",
+        "lat-lng to lng-lat" if swap else "none",
+        hashlib.sha256(raw_json.encode()).hexdigest(),
+    )
 
 
 class Sp3StabBoundaryProvider:
