@@ -7,12 +7,26 @@ import httpx
 import numpy as np
 from PIL import Image
 
+from app.api.routes.imagery import _requires_ee
 from app.services import imagery_service as service
 from app.services.gee_common import AnalysisError
 from app.services import samgeo_service
 
 
 class StacTests(unittest.TestCase):
+    def test_stac_providers_do_not_require_earth_engine(self):
+        with patch("app.api.routes.imagery._is_copernicus_request", return_value=False):
+            for provider_key in (
+                "planet_commercial",
+                "vantor_commercial",
+                "iceye_commercial",
+                "planet_open_data",
+                "vantor_open_data",
+                "stac_catalog",
+            ):
+                with self.subTest(provider_key=provider_key):
+                    self.assertFalse(_requires_ee({"satellite": provider_key}))
+
     def test_big_ctsrt_lists_intersecting_mosaics_and_builds_tile_url(self):
         service_meta = {
             "fullExtent": {"xmin": 114.4, "ymin": -8.9, "xmax": 115.8, "ymax": -8.0},

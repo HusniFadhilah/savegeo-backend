@@ -600,7 +600,7 @@ def _build_carbon_plan(payload: dict[str, Any], message: str, capabilities: dict
         "cloud_threshold": params["cloud_threshold"],
         "reference_dataset": dataset["key"],
         "model_name": model_name,
-        "scale": payload.get("scale", payload.get("carbon_scale", 250)),
+        "scale": payload.get("scale", payload.get("carbon_scale", 10)),
         "clip_to_aoi": payload.get("clip_to_aoi", True),
     }
 

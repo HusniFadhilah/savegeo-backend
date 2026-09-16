@@ -10,7 +10,7 @@ DEFAULT_CONFIGS: list[tuple[str, str, str, str, str, str, bool]] = [
     ("analysis.cloud_threshold", os.getenv("DEFAULT_CLOUD_THRESHOLD", "10"), "int", "analysis",
      "Cloud threshold (%)", "Max cloud cover for Sentinel-2 filtering", False),
 
-    ("analysis.carbon_scale", os.getenv("DEFAULT_CARBON_SCALE", "100"), "int", "analysis",
+    ("analysis.carbon_scale", os.getenv("DEFAULT_CARBON_SCALE", "10"), "int", "analysis",
      "Carbon analysis scale (m)", "Spatial resolution for carbon estimation", False),
 
     ("analysis.veg_scale", os.getenv("DEFAULT_VEG_SCALE", "10"), "int", "analysis",

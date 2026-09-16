@@ -65,6 +65,26 @@ class EventCreateRequest(BaseModel):
     description: str | None = None
     source: str | None = None
     thumbnail: str | None = None
+    slug: str | None = None
+    short_title: str | None = None
+    monitoring_from: dt.date | None = None
+    monitoring_to: dt.date | None = None
+    year: int | None = None
+    country_code: str | None = "ID"
+    province_codes: list[str] | None = None
+    city_codes: list[str] | None = None
+    bbox: list[float] | None = None
+    center_lat: float | None = None
+    center_lon: float | None = None
+    default_zoom: int | None = None
+    source_ids: list[str] | None = None
+    hotspot_dataset_ids: list[str] | None = None
+    burned_area_dataset_ids: list[str] | None = None
+    boundary_source: str | None = None
+    methodology: str | None = None
+    limitations: list[str] | None = None
+    is_featured: bool = False
+    is_public: bool = False
 
 
 class EventUpdateRequest(BaseModel):
@@ -81,6 +101,26 @@ class EventUpdateRequest(BaseModel):
     description: str | None = None
     source: str | None = None
     thumbnail: str | None = None
+    slug: str | None = None
+    short_title: str | None = None
+    monitoring_from: dt.date | None = None
+    monitoring_to: dt.date | None = None
+    year: int | None = None
+    country_code: str | None = None
+    province_codes: list[str] | None = None
+    city_codes: list[str] | None = None
+    bbox: list[float] | None = None
+    center_lat: float | None = None
+    center_lon: float | None = None
+    default_zoom: int | None = None
+    source_ids: list[str] | None = None
+    hotspot_dataset_ids: list[str] | None = None
+    burned_area_dataset_ids: list[str] | None = None
+    boundary_source: str | None = None
+    methodology: str | None = None
+    limitations: list[str] | None = None
+    is_featured: bool | None = None
+    is_public: bool | None = None
 
 
 class AoiCreateRequest(BaseModel):
@@ -196,6 +236,8 @@ def admin_create_event(
         raise HTTPException(status_code=400, detail=f"disaster_type harus salah satu dari {DISASTER_TYPES}")
     if payload.severity is not None and payload.severity not in SEVERITIES:
         raise HTTPException(status_code=400, detail=f"severity harus salah satu dari {SEVERITIES}")
+    if payload.bbox is not None and len(payload.bbox) != 4:
+        raise HTTPException(status_code=400, detail="bbox harus berisi [west, south, east, north]")
 
     event = disaster_repo.create_event(db, payload.model_dump(), admin.id)
     audit_service.log_audit(db, admin.id, "disaster_event.create", "disaster_event", str(event.id), detail={"name": event.name})
@@ -301,6 +343,12 @@ def admin_update_event(
         raise HTTPException(status_code=400, detail=f"status harus salah satu dari {EVENT_STATUSES}")
     if "severity" in changes and changes["severity"] is not None and changes["severity"] not in SEVERITIES:
         raise HTTPException(status_code=400, detail=f"severity harus salah satu dari {SEVERITIES}")
+    if "bbox" in changes and changes["bbox"] is not None and len(changes["bbox"]) != 4:
+        raise HTTPException(status_code=400, detail="bbox harus berisi [west, south, east, north]")
+    if changes.get("status") == "published" and event.disaster_type == "forest_fire":
+        minimum = (event.slug or changes.get("slug"), event.source, event.start_date or changes.get("start_date"), event.province or changes.get("province"))
+        if not all(minimum):
+            raise HTTPException(status_code=400, detail="Event karhutla memerlukan slug, periode, cakupan wilayah, dan sumber sebelum dipublikasikan")
 
     event = disaster_repo.update_event(db, event, changes)
     audit_service.log_audit(db, admin.id, "disaster_event.update", "disaster_event", str(event.id), detail=changes)

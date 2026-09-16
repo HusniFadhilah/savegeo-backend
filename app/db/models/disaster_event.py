@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import datetime as dt
 
-from sqlalchemy import Date, DateTime, ForeignKey, String, Text
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -38,6 +38,32 @@ class DisasterEvent(Base):
     description: Mapped[str | None] = mapped_column(Text)
     source: Mapped[str | None] = mapped_column(String(255))
     thumbnail: Mapped[str | None] = mapped_column(String(500))
+    # Standalone wildfire explorer metadata. Kept on the event aggregate so a
+    # new event can be created from admin data without a new UI component.
+    slug: Mapped[str | None] = mapped_column(String(180), unique=True, index=True)
+    short_title: Mapped[str | None] = mapped_column(String(120))
+    monitoring_from: Mapped[dt.date | None] = mapped_column(Date)
+    monitoring_to: Mapped[dt.date | None] = mapped_column(Date)
+    published_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    last_data_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    last_synced_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    year: Mapped[int | None] = mapped_column(Integer)
+    country_code: Mapped[str | None] = mapped_column(String(3), default="ID")
+    province_codes: Mapped[list | None] = mapped_column(JSONB)
+    city_codes: Mapped[list | None] = mapped_column(JSONB)
+    bbox: Mapped[list | None] = mapped_column(JSONB)
+    center_lat: Mapped[float | None]
+    center_lon: Mapped[float | None]
+    default_zoom: Mapped[int | None] = mapped_column(Integer)
+    source_ids: Mapped[list | None] = mapped_column(JSONB)
+    hotspot_dataset_ids: Mapped[list | None] = mapped_column(JSONB)
+    burned_area_dataset_ids: Mapped[list | None] = mapped_column(JSONB)
+    boundary_source: Mapped[str | None] = mapped_column(String(255))
+    methodology: Mapped[str | None] = mapped_column(Text)
+    limitations: Mapped[list | None] = mapped_column(JSONB)
+    is_featured: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_public: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    updated_by: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id", ondelete="SET NULL"))
     created_by: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id", ondelete="SET NULL"))
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.UTC))
     updated_at: Mapped[dt.datetime] = mapped_column(
@@ -60,6 +86,29 @@ class DisasterEvent(Base):
             "description": self.description,
             "source": self.source,
             "thumbnail": self.thumbnail,
+            "slug": self.slug,
+            "short_title": self.short_title or self.name,
+            "monitoring_from": self.monitoring_from.isoformat() if self.monitoring_from else self.start_date.isoformat() if self.start_date else None,
+            "monitoring_to": self.monitoring_to.isoformat() if self.monitoring_to else self.end_date.isoformat() if self.end_date else None,
+            "published_at": self.published_at.isoformat() if self.published_at else None,
+            "last_data_at": self.last_data_at.isoformat() if self.last_data_at else None,
+            "last_synced_at": self.last_synced_at.isoformat() if self.last_synced_at else None,
+            "year": self.year or (self.event_date.year if self.event_date else None),
+            "country_code": self.country_code or "ID",
+            "province_codes": self.province_codes or [],
+            "city_codes": self.city_codes or [],
+            "bbox": self.bbox,
+            "center_lat": self.center_lat,
+            "center_lon": self.center_lon,
+            "default_zoom": self.default_zoom,
+            "source_ids": self.source_ids or [],
+            "hotspot_dataset_ids": self.hotspot_dataset_ids or [],
+            "burned_area_dataset_ids": self.burned_area_dataset_ids or [],
+            "boundary_source": self.boundary_source,
+            "methodology": self.methodology,
+            "limitations": self.limitations or [],
+            "is_featured": self.is_featured,
+            "is_public": self.is_public,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }

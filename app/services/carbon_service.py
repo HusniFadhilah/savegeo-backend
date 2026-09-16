@@ -781,7 +781,7 @@ def analyze_carbon_local(db: Session, data: dict) -> dict:
 
     start_date = data.get("start_date", "2022-01-01")
     end_date = data.get("end_date", "2022-12-31")
-    scale = float(data.get("scale", 100))
+    scale = float(data.get("scale", 10))
     n_samples = int(data.get("n_samples", 2000))
     vis_min = int(data.get("vis_min", config_service.get_analysis_defaults(db)["carbon_vis_min"]))
     vis_max = int(data.get("vis_max", config_service.get_analysis_defaults(db)["carbon_vis_max"]))
@@ -960,6 +960,15 @@ def analyze_carbon_delta(db: Session, data: dict) -> dict:
             "cloud_threshold": cloud_threshold,
             "scale": carbon_scale,
             "interval": interval,
+        },
+        # Keep the timelapse legend tied to the exact parameters used by
+        # Image.visualize() above. The client must not reconstruct these from
+        # a separately cached configuration value.
+        "visualization": {
+            "min": tile_vis_params["min"],
+            "max": tile_vis_params["max"],
+            "palette": tile_vis_params["palette"],
+            "legend_bins": analysis_defaults["carbon_legend_bins"],
         },
         "model_info": {
             "model_name": inference_engine.model_name,

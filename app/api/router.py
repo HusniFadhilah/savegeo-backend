@@ -1,4 +1,5 @@
 """Aggregates all domain routers under the /api prefix."""
+
 from __future__ import annotations
 
 from fastapi import APIRouter
@@ -10,6 +11,7 @@ from app.api.routes import (
     analysis_jobs,
     arcgis,
     carbon,
+    carbon_calibration,
     chat,
     chloris,
     companies,
@@ -17,6 +19,7 @@ from app.api.routes import (
     datasets,
     disaster,
     disaster_events,
+    wildfire_events,
     download,
     fields,
     health,
@@ -49,9 +52,12 @@ api_router.include_router(utils.router)
 api_router.include_router(reports.router)
 api_router.include_router(admin.router)
 api_router.include_router(carbon.router)
+api_router.include_router(carbon_calibration.router)
+api_router.include_router(carbon_calibration.public_router)
 api_router.include_router(chloris.router)
 api_router.include_router(landcover.router)
 api_router.include_router(disaster.router)
+api_router.include_router(wildfire_events.router)
 api_router.include_router(disaster_events.router)
 api_router.include_router(admin_disaster.router)
 api_router.include_router(user_auth.router)

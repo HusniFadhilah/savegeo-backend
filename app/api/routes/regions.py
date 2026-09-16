@@ -18,6 +18,7 @@ import requests
 from fastapi import APIRouter, HTTPException
 
 from app.core.config import get_settings
+from app.services.boundary_provider import CachedBoundaryProvider, Sp3StabBoundaryProvider
 
 router = APIRouter(prefix="/regions", tags=["regions"])
 
@@ -31,6 +32,7 @@ ISLAND_LABELS = {
 
 _CHILD_GEOMETRY_CACHE: dict = {}
 _CACHE_TTL_SECONDS = 3600
+_VALIDATED_BOUNDARY_PROVIDER = CachedBoundaryProvider(Sp3StabBoundaryProvider(), ttl_seconds=86400)
 
 
 def _swap_lat_lng(node):
@@ -127,6 +129,37 @@ def get_cities(province_code: str = ""):
         return r.json()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@router.get("/provinces/{code}/geometry")
+def get_province_geometry(code: str):
+    """Stable internal boundary contract for the wildfire module.
+
+    External SP3STAB response details stay behind this adapter; callers never
+    pass an external URL or need to know the legacy ``endpoint`` parameter.
+    """
+    return _get_validated_geometry("province", code)
+
+
+@router.get("/provinces/{code}/cities")
+def get_province_cities(code: str):
+    return get_cities(province_code=code)
+
+
+@router.get("/cities/{code}/geometry")
+def get_city_geometry(code: str):
+    return _get_validated_geometry("city", code)
+
+
+def _get_validated_geometry(endpoint: str, code: str):
+    try:
+        return _VALIDATED_BOUNDARY_PROVIDER.geometry(endpoint, code)[0]
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=f"Boundary geometry validation failed: {exc}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="Boundary provider temporarily unavailable") from exc
 
 
 @router.get("/districts")

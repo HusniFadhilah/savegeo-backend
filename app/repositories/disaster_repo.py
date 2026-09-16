@@ -11,6 +11,7 @@ layer instead of two routers each growing their own queries.
 from __future__ import annotations
 
 import datetime as dt
+import re
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -23,6 +24,10 @@ from app.db.models.hotspot import Hotspot
 from app.db.models.satellite_imagery import SatelliteImagery
 
 # --- Disaster events ---------------------------------------------------
+
+
+def _event_slug(name: str) -> str:
+    return re.sub(r"^-|-$", "", re.sub(r"[^a-z0-9]+", "-", name.lower()))
 
 
 def create_event(db: Session, data: dict, created_by: int | None) -> DisasterEvent:
@@ -40,6 +45,26 @@ def create_event(db: Session, data: dict, created_by: int | None) -> DisasterEve
         description=data.get("description"),
         source=data.get("source"),
         thumbnail=data.get("thumbnail"),
+        slug=data.get("slug") or _event_slug(data["name"]),
+        short_title=data.get("short_title") or data["name"],
+        monitoring_from=data.get("monitoring_from") or data.get("start_date"),
+        monitoring_to=data.get("monitoring_to") or data.get("end_date"),
+        year=data.get("year") or (data.get("event_date").year if data.get("event_date") else None),
+        country_code=data.get("country_code") or "ID",
+        province_codes=data.get("province_codes") or [],
+        city_codes=data.get("city_codes") or [],
+        bbox=data.get("bbox"),
+        center_lat=data.get("center_lat"),
+        center_lon=data.get("center_lon"),
+        default_zoom=data.get("default_zoom"),
+        source_ids=data.get("source_ids") or [],
+        hotspot_dataset_ids=data.get("hotspot_dataset_ids") or [],
+        burned_area_dataset_ids=data.get("burned_area_dataset_ids") or [],
+        boundary_source=data.get("boundary_source"),
+        methodology=data.get("methodology"),
+        limitations=data.get("limitations") or [],
+        is_featured=bool(data.get("is_featured", False)),
+        is_public=bool(data.get("is_public", data.get("status") == "published")),
         created_by=created_by,
     )
     db.add(event)
@@ -52,10 +77,16 @@ def update_event(db: Session, event: DisasterEvent, data: dict) -> DisasterEvent
     for field in (
         "name", "disaster_type", "location_name", "province", "district",
         "event_date", "start_date", "end_date", "status", "severity",
-        "description", "source", "thumbnail",
+        "description", "source", "thumbnail", "slug", "short_title", "monitoring_from", "monitoring_to",
+        "year", "country_code", "province_codes", "city_codes", "bbox", "center_lat", "center_lon",
+        "default_zoom", "source_ids", "hotspot_dataset_ids", "burned_area_dataset_ids", "boundary_source",
+        "methodology", "limitations", "is_featured", "is_public", "updated_by",
     ):
         if field in data:
             setattr(event, field, data[field])
+    if event.status == "published" and event.published_at is None:
+        event.published_at = dt.datetime.now(dt.UTC)
+    event.is_public = event.status == "published"
     db.commit()
     db.refresh(event)
     return event

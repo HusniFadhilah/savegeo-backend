@@ -126,6 +126,11 @@ def _requires_ee(data: dict) -> bool:
         "openaerialmap",
         "vantor_open_data",
         "planet_open_data",
+        # Licensed providers are queried through their server-side STAC
+        # connectors in imagery_service; they do not use Earth Engine.
+        "planet_commercial",
+        "vantor_commercial",
+        "iceye_commercial",
         "stac_catalog",
     } and not _is_copernicus_request(data)
 
