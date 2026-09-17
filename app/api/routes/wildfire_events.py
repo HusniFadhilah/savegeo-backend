@@ -187,6 +187,7 @@ def get_wildfire_summary(
 @router.get("/events/{slug}/hotspots")
 def get_wildfire_hotspots(
     slug: str,
+    from_date: str | None = Query(None, alias="from"),
     to: str | None = None,
     sensor: str | None = None,
     confidence: str | None = None,
@@ -196,14 +197,32 @@ def get_wildfire_hotspots(
     event = _event(db, slug)
     if event.bbox:
         try:
-            live = firms_service.get_fires(
+            selected_confidence = None if confidence is None else {
+                item.strip().casefold() for item in confidence.split(",") if item.strip()
+            }
+            if selected_confidence is not None:
+                selected_confidence -= {"all"}
+            end_date = (
+                to
+                or (event.last_data_at.date().isoformat() if event.last_data_at else None)
+                or (event.monitoring_to.isoformat() if event.monitoring_to else None)
+                or dt.datetime.now(dt.UTC).date().isoformat()
+            )
+            start_date = (
+                from_date
+                or (event.monitoring_from.isoformat() if event.monitoring_from else None)
+                or (event.start_date.isoformat() if event.start_date else None)
+                or (dt.date.fromisoformat(end_date) - dt.timedelta(days=6)).isoformat()
+            )
+            live = firms_service.get_fires_for_period(
                 source="ALL",
-                day_range=7,
-                requested_date=to,
+                from_date=start_date,
+                to_date=end_date,
                 bbox=tuple(event.bbox),
-                min_confidence=confidence,
+                confidence_categories=selected_confidence,
+                sensor=None if not sensor or sensor.casefold() == "all" else sensor,
                 min_frp=None,
-                limit=5000,
+                limit=2000,
             )
             summary = live.get("metadata", {}).get("summary") or _summary([], event)
             return {

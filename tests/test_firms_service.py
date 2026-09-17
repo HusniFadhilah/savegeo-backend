@@ -82,3 +82,65 @@ def test_get_fires_uses_cache_and_never_returns_map_key(monkeypatch):
     assert cached["metadata"]["cached"] is True
     assert "test-map-key" not in json.dumps(payload)
     assert "test-map-key" not in json.dumps(cached)
+
+
+def test_get_fires_splits_ranges_longer_than_nasa_limit(monkeypatch):
+    firms_service.clear_cache()
+    monkeypatch.setattr(firms_service, "get_settings", lambda: settings())
+    calls = []
+
+    class Response:
+        status_code = 200
+        text = CSV
+        headers = {"content-type": "text/csv"}
+
+        def raise_for_status(self):
+            return None
+
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs))
+        return Response()
+
+    monkeypatch.setattr(firms_service.requests, "get", fake_get)
+    result = firms_service.get_fires(
+        source="VIIRS_NOAA20_NRT",
+        day_range=7,
+        requested_date="2026-09-15",
+        bbox=(106, -7, 107, -6),
+        min_confidence=None,
+        min_frp=None,
+        limit=100,
+    )
+
+    assert len(calls) == 2
+    assert "/5/2026-09-15" in calls[0][0]
+    assert "/2/2026-09-20" in calls[1][0]
+    assert result["metadata"]["returned_count"] == 4
+
+
+def test_get_fires_for_period_filters_sensor_and_confidence(monkeypatch):
+    firms_service.clear_cache()
+    monkeypatch.setattr(firms_service, "get_settings", lambda: settings())
+
+    class Response:
+        status_code = 200
+        text = CSV
+        headers = {"content-type": "text/csv"}
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(firms_service.requests, "get", lambda url, **kwargs: Response())
+    result = firms_service.get_fires_for_period(
+        source="VIIRS_NOAA20_NRT",
+        from_date="2026-09-15",
+        to_date="2026-09-15",
+        bbox=(106, -7, 107, -6),
+        confidence_categories={"high"},
+        sensor="viirs",
+        min_frp=None,
+        limit=100,
+    )
+
+    assert result["metadata"]["count"] == 1
+    assert result["metadata"]["summary"]["high_confidence_hotspots"] == 1

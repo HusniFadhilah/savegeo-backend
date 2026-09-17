@@ -272,8 +272,18 @@ def _fetch_source(source: str, bbox: tuple[float, float, float, float], day_rang
         raise
 
 
-def _feature_matches(feature: dict, confidence: float | None, min_frp: float | None) -> bool:
+def _feature_matches(
+    feature: dict,
+    confidence: float | None,
+    min_frp: float | None,
+    confidence_categories: set[str] | None = None,
+    sensor: str | None = None,
+) -> bool:
     properties = feature.get("properties") or {}
+    if confidence_categories is not None and properties.get("confidence_label") not in confidence_categories:
+        return False
+    if sensor and str(properties.get("instrument") or "").casefold() != sensor.casefold():
+        return False
     numeric_confidence = properties.get("confidence_numeric")
     confidence_label = properties.get("confidence_label")
     if confidence is not None and numeric_confidence is not None and numeric_confidence < confidence:
@@ -305,47 +315,139 @@ def _summary(features: list[dict]) -> dict:
     }
 
 
-def get_fires(source: str, day_range: int, requested_date: str | None, bbox: tuple[float, float, float, float], min_confidence: str | None, min_frp: float | None, limit: int) -> dict:
-    source, day_range, parsed_date, confidence, min_frp, limit = validate_query(source, day_range, requested_date, min_confidence, min_frp, limit)
-    bbox = validate_bbox(bbox)
-    if not get_settings().nasa_firms_map_key:
+def _date_chunks(start: date, end: date, max_days: int = 5) -> list[tuple[date, int]]:
+    chunks = []
+    cursor = start
+    while cursor <= end:
+        days = min(max_days, (end - cursor).days + 1)
+        chunks.append((cursor, days))
+        cursor += timedelta(days=days)
+    return chunks
+
+
+def _collect_fires(
+    source: str,
+    requests_to_make: list[tuple[date | None, int]],
+    bbox: tuple[float, float, float, float],
+    confidence: float | None,
+    min_frp: float | None,
+    limit: int,
+    confidence_categories: set[str] | None = None,
+    sensor: str | None = None,
+) -> dict:
+    settings = get_settings()
+    if not settings.nasa_firms_map_key:
         raise FirmsRequestError("NASA FIRMS belum dikonfigurasi di server", 503)
-    sources = list(FIRMS_SOURCE_CATALOG) if source == "ALL" else [source]
+    if source != "ALL" and source not in FIRMS_SOURCE_CATALOG:
+        raise FirmsRequestError("Source FIRMS tidak valid", 400)
+    if not 1 <= limit <= MAX_LIMIT:
+        raise FirmsRequestError(f"limit harus berada pada 1-{MAX_LIMIT}", 400)
+    bbox = validate_bbox(bbox)
+    sources = (
+        [
+            source_id
+            for source_id, definition in FIRMS_SOURCE_CATALOG.items()
+            if not sensor or definition["sensor"].casefold() == sensor.casefold()
+        ]
+        if source == "ALL"
+        else [source]
+    )
     features: list[dict] = []
     cached = True
     stale = False
     errors = []
     for source_id in sources:
-        try:
-            source_features, was_cached, was_stale = _fetch_source(source_id, bbox, day_range, parsed_date)
-            cached = cached and was_cached
-            stale = stale or was_stale
-            features.extend(source_features)
-        except FirmsRequestError as exc:
-            if source != "ALL":
-                raise
-            errors.append({"source": source_id, "message": str(exc), "status": exc.status_code})
-    filtered = [feature for feature in features if _feature_matches(feature, confidence, min_frp)]
+        for requested_date, day_range in requests_to_make:
+            try:
+                source_features, was_cached, was_stale = _fetch_source(source_id, bbox, day_range, requested_date)
+                cached = cached and was_cached
+                stale = stale or was_stale
+                features.extend(source_features)
+            except FirmsRequestError as exc:
+                if source != "ALL":
+                    raise
+                errors.append({"source": source_id, "message": str(exc), "status": exc.status_code})
+                break
+    filtered = [
+        feature
+        for feature in features
+        if _feature_matches(feature, confidence, min_frp, confidence_categories, sensor)
+    ]
     filtered.sort(key=lambda feature: (feature.get("properties") or {}).get("acq_datetime_utc") or "", reverse=True)
-    is_near_real_time = parsed_date is None or parsed_date >= datetime.now(UTC).date() - timedelta(days=7)
+    first_requested_date = next((requested_date for requested_date, _ in requests_to_make if requested_date), None)
+    is_near_real_time = first_requested_date is None or first_requested_date >= datetime.now(UTC).date() - timedelta(days=7)
     return {
         "type": "FeatureCollection",
         "features": filtered[:limit],
         "metadata": {
             "source": source,
             "fetched_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-            "count": min(len(filtered), limit),
+            "count": len(filtered),
+            "returned_count": min(len(filtered), limit),
             "raw_count": len(features),
             "is_near_real_time": is_near_real_time,
             "cached": cached,
             "stale": stale,
             "truncated": len(filtered) > limit,
             "errors": errors,
-            "summary": _summary(filtered[:limit]),
+            "summary": _summary(filtered),
             "attribution": "Data: NASA FIRMS / NASA EOSDIS LANCE",
             "disclaimer": "Hotspot NASA FIRMS adalah deteksi panas berbasis satelit, bukan batas api atau estimasi luas kebakaran.",
         },
     }
+
+
+def get_fires(
+    source: str,
+    day_range: int,
+    requested_date: str | None,
+    bbox: tuple[float, float, float, float],
+    min_confidence: str | None,
+    min_frp: float | None,
+    limit: int,
+) -> dict:
+    source, day_range, parsed_date, confidence, min_frp, limit = validate_query(
+        source, day_range, requested_date, min_confidence, min_frp, limit
+    )
+    requests_to_make = (
+        _date_chunks(parsed_date, parsed_date + timedelta(days=day_range - 1))
+        if parsed_date
+        else [(None, min(day_range, 5))]
+    )
+    return _collect_fires(source, requests_to_make, bbox, confidence, min_frp, limit)
+
+
+def get_fires_for_period(
+    source: str,
+    from_date: str,
+    to_date: str,
+    bbox: tuple[float, float, float, float],
+    confidence_categories: set[str] | None,
+    sensor: str | None,
+    min_frp: float | None,
+    limit: int,
+) -> dict:
+    try:
+        start = date.fromisoformat(from_date)
+        end = date.fromisoformat(to_date)
+    except (TypeError, ValueError) as exc:
+        raise FirmsRequestError("from dan to harus berformat YYYY-MM-DD", 400) from exc
+    if end < start:
+        raise FirmsRequestError("to tidak boleh lebih awal dari from", 400)
+    if (end - start).days > 31:
+        raise FirmsRequestError("Rentang query FIRMS maksimal 32 hari", 400)
+    if sensor is not None and sensor.casefold() not in {"viirs", "modis", "landsat"}:
+        raise FirmsRequestError("Sensor FIRMS tidak valid", 400)
+    return _collect_fires(
+        source,
+        _date_chunks(start, end),
+        bbox,
+        confidence=None,
+        min_frp=min_frp,
+        limit=limit,
+        confidence_categories=confidence_categories,
+        sensor=sensor,
+    )
 
 
 def fetch_wms(layer: str, bbox: tuple[float, float, float, float], crs: str, width: int, height: int, image_format: str) -> dict:
