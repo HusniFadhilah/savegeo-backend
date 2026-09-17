@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import datetime as dt
-
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 

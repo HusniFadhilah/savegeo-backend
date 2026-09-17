@@ -26,7 +26,7 @@ def require_aware(value: dt.datetime, *, field: str = "timestamp") -> dt.datetim
     return value
 
 
-def parse_rfc3339(value: str | dt.datetime, *, field: str = "timestamp") -> dt.datetime:
+def parse_rfc3339(value: object, *, field: str = "timestamp") -> dt.datetime:
     """Parse an RFC 3339 instant and return a timezone-aware UTC datetime."""
     if isinstance(value, dt.datetime):
         parsed = require_aware(value, field=field)
