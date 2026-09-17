@@ -31,6 +31,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
           ruff check . --ignore E501 --ignore B904 --ignore B905
+          python scripts/audit_standards.py --check > standards-audit.json
           mypy app
           bandit -r app -lll
           # scikit-learn is pinned for existing pickle model compatibility; remove this ignore after retraining.

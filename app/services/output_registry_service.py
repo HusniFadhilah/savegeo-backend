@@ -84,6 +84,11 @@ def register_action_outputs(db: Session, action_id: str, result: Any = None) -> 
         geojson = {"type": "FeatureCollection", "features": result["features"]}
     if isinstance(geojson, dict) and geojson.get("type") in {"Feature", "FeatureCollection"}:
         features = geojson.get("features", [geojson]) if geojson.get("type") == "FeatureCollection" else [geojson]
+        geojson_metadata = {"crs": "EPSG:4326", "coordinate_order": "longitude,latitude"}
+        # Keep small synchronous results directly addressable. Large results
+        # must be streamed from object storage rather than copied into JSONB.
+        if len(json.dumps(geojson, separators=(",", ":"), ensure_ascii=False).encode("utf-8")) <= 2_000_000:
+            geojson_metadata["document"] = geojson
         outputs.append(
             register_output(
                 db,
@@ -94,7 +99,7 @@ def register_action_outputs(db: Session, action_id: str, result: Any = None) -> 
                 media_type="application/geo+json",
                 href=f"/api/actions/{action_id}/outputs/geojson/content",
                 profile="rfc-7946",
-                metadata={"crs": "EPSG:4326", "coordinate_order": "longitude,latitude"},
+                metadata=geojson_metadata,
                 checksum=_checksum(geojson),
                 feature_count=len(features),
             )

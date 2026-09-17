@@ -234,13 +234,17 @@ def create_analysis_job(
         raise HTTPException(status_code=400, detail="Missing required field: payload")
 
     job_id = str(uuid.uuid4())
-    provenance_service.create_analysis_provenance(
-        db,
-        analysis_id=job_id,
-        analysis_type=job_type,
-        payload=payload,
-        user_id=viewer.id if isinstance(viewer, User) else None,
-    )
+    try:
+        provenance_service.create_analysis_provenance(
+            db,
+            analysis_id=job_id,
+            analysis_type=job_type,
+            payload=payload,
+            user_id=viewer.id if isinstance(viewer, User) else None,
+        )
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail={"code": "INVALID_DATETIME", "message": str(exc)}) from exc
     output_registry_service.register_action_outputs(db, job_id)
     _write_job(job_id, {"job_id": job_id, "type": job_type, "status": "queued", "created_at": _now()})
     _executor.submit(_run_job, job_id, job_type, payload)

@@ -10,7 +10,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.core.temporal import format_rfc3339
+from app.core.temporal import format_rfc3339, parse_calendar_date, parse_rfc3339
 from app.db.models.analysis_provenance import AnalysisProvenance
 
 logger = logging.getLogger(__name__)
@@ -47,6 +47,17 @@ def _value(payload: dict[str, Any], *keys: str) -> Any:
     return None
 
 
+def _normalize_acquisition(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            return parse_calendar_date(value, field="acquisition_date").isoformat()
+        except ValueError:
+            return format_rfc3339(parse_rfc3339(value, field="acquisition_date"), field="acquisition_date")
+    raise ValueError("acquisition_date must be YYYY-MM-DD or an RFC 3339 timestamp")
+
+
 def create_analysis_provenance(
     db: Session,
     analysis_id: str,
@@ -64,7 +75,7 @@ def create_analysis_provenance(
         status="queued",
         dataset_id=str(dataset) if dataset is not None else None,
         dataset_version=_value(payload, "dataset_version", "datasetVersion", "year"),
-        acquisition_date=_value(payload, "acquisition_date", "acquisitionDate", "date", "start_date"),
+        acquisition_date=_normalize_acquisition(_value(payload, "acquisition_date", "acquisitionDate", "date", "start_date")),
         parameters=_safe_parameters(payload),
         aoi_checksum=_aoi_checksum(payload),
         crs=_value(payload, "crs", "CRS"),

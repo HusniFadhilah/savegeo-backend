@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime as dt
 from typing import Any, Literal
 
-from pydantic import AnyHttpUrl, BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.core.temporal import format_rfc3339, parse_rfc3339
 
@@ -34,7 +34,7 @@ class TileJSONDocument(BaseModel):
     description: str | None = None
     version: str = Field(min_length=1, max_length=64)
     scheme: Literal["xyz", "tms"] = "xyz"
-    tiles: list[AnyHttpUrl] = Field(min_length=1)
+    tiles: list[str] = Field(min_length=1)
     minzoom: int = Field(default=0, ge=0, le=30)
     maxzoom: int = Field(default=22, ge=0, le=30)
     bounds: list[float] = Field(min_length=4, max_length=4)
@@ -54,6 +54,13 @@ class TileJSONDocument(BaseModel):
         west, south, east, north = value
         if not (-180 <= west <= east <= 180 and -90 <= south <= north <= 90):
             raise ValueError("TileJSON bounds must be [west,south,east,north] in WGS84")
+        return value
+
+    @field_validator("tiles")
+    @classmethod
+    def validate_tiles(cls, value: list[str]) -> list[str]:
+        if any(not (item.startswith("/") or item.startswith("https://") or item.startswith("http://")) for item in value):
+            raise ValueError("TileJSON tile URLs must be absolute http(s) URLs or documented internal paths")
         return value
 
     @field_validator("center")

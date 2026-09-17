@@ -49,6 +49,22 @@ def get_output_metadata(action_id: str, output_id: str, _viewer: object = Depend
 @router.get("/actions/{action_id}/outputs/{output_id}/content")
 def get_output_content(action_id: str, output_id: str, _viewer: object = Depends(get_current_app_viewer), db: Session = Depends(get_db)):
     output = _output_or_404(db, action_id, output_id)
+    if output.profile == "rfc-7946":
+        document = (output.metadata_json or {}).get("document")
+        if document is not None:
+            return JSONResponse(content=document, media_type="application/geo+json")
     if output.media_type == "application/json" and isinstance(output.metadata_json, dict) and output.profile == "tilejson-3.0.0":
         return JSONResponse(content=output.metadata_json, media_type="application/json")
     raise HTTPException(status_code=501, detail="Output content is stored externally or is still being generated")
+
+
+@router.get("/actions/{action_id}/outputs/result.geojson")
+def get_named_geojson(action_id: str, _viewer: object = Depends(get_current_app_viewer), db: Session = Depends(get_db)):
+    output = _output_or_404(db, action_id, f"{action_id}:geojson")
+    return get_output_content(action_id, output.id, _viewer, db)
+
+
+@router.get("/actions/{action_id}/outputs/tilejson.json")
+def get_named_tilejson(action_id: str, _viewer: object = Depends(get_current_app_viewer), db: Session = Depends(get_db)):
+    output = _output_or_404(db, action_id, f"{action_id}:tilejson")
+    return get_output_content(action_id, output.id, _viewer, db)
