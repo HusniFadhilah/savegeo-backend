@@ -12,6 +12,7 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    bind = op.get_bind()
     op.create_table("carbon_calibration_datasets", sa.Column("id", sa.Integer(), primary_key=True), sa.Column("dataset_id", sa.String(128), nullable=False, unique=True), sa.Column("name", sa.String(255), nullable=False), sa.Column("manifest", sa.JSON(), nullable=False), sa.Column("access_classification", sa.String(32), nullable=False, server_default="restricted"), sa.Column("status", sa.String(32), nullable=False, server_default="draft"), sa.Column("is_active", sa.Boolean(), nullable=False, server_default=sa.false()), sa.Column("owner_id", sa.Integer(), sa.ForeignKey("admin_users.id", ondelete="SET NULL")), sa.Column("validation_report", sa.JSON()), sa.Column("provenance", sa.JSON()), sa.Column("created_at", sa.DateTime(timezone=True), nullable=False), sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False))
     op.create_index("ix_carbon_calibration_datasets_dataset_id", "carbon_calibration_datasets", ["dataset_id"])
     op.create_index("ix_carbon_calibration_datasets_status", "carbon_calibration_datasets", ["status"])
@@ -31,12 +32,27 @@ def upgrade() -> None:
     op.create_index("ix_carbon_calibration_models_dataset_pk", "carbon_calibration_models", ["dataset_pk"])
     op.create_index("ix_carbon_calibration_models_status", "carbon_calibration_models", ["status"])
     for code, description in (("calibration.read", "View carbon calibration datasets and validation"), ("calibration.write", "Manage carbon calibration datasets and models")):
-        op.execute(sa.text("INSERT INTO permissions (code, description) VALUES (:code, :description) ON CONFLICT (code) DO NOTHING"), {"code": code, "description": description})
-    op.execute(sa.text("INSERT INTO role_permissions (role_id, permission_id) SELECT r.id, p.id FROM roles r CROSS JOIN permissions p WHERE r.name IN ('admin', 'geospatial_expert') AND p.code IN ('calibration.read', 'calibration.write') ON CONFLICT DO NOTHING"))
+        bind.execute(
+            sa.text(
+                "INSERT INTO permissions (code, description) VALUES (:code, :description) "
+                "ON CONFLICT (code) DO NOTHING"
+            ),
+            {"code": code, "description": description},
+        )
+    bind.execute(
+        sa.text(
+            "INSERT INTO role_permissions (role_id, permission_id) "
+            "SELECT r.id, p.id FROM roles r CROSS JOIN permissions p "
+            "WHERE r.name IN ('admin', 'geospatial_expert') "
+            "AND p.code IN ('calibration.read', 'calibration.write') "
+            "ON CONFLICT DO NOTHING"
+        )
+    )
 
 
 def downgrade() -> None:
+    bind = op.get_bind()
     for table in ("carbon_calibration_models", "carbon_calibration_runs", "carbon_field_trees", "carbon_field_plots", "carbon_calibration_files", "carbon_calibration_datasets"):
         op.drop_table(table)
     for code in ("calibration.read", "calibration.write"):
-        op.execute(sa.text("DELETE FROM permissions WHERE code = :code"), {"code": code})
+        bind.execute(sa.text("DELETE FROM permissions WHERE code = :code"), {"code": code})
