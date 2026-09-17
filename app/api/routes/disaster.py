@@ -19,7 +19,7 @@ from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import require_ee
 from app.core.security import get_current_disaster_viewer
-from app.services import disaster_service, fire_multi_source_service, firms_service
+from app.services import disaster_service, fire_multi_source_service, firms_service, wind_service
 from app.services.gee_common import AnalysisError
 
 router = APIRouter(prefix="/disaster", tags=["disaster"])
@@ -84,6 +84,22 @@ def get_firms_wms(
         return Response(content=payload["content"], media_type=payload["content_type"], headers={"X-Attribution": payload["attribution"]})
     except firms_service.FirmsRequestError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@router.get("/wind")
+def get_wind(
+    west: float = Query(...),
+    south: float = Query(...),
+    east: float = Query(...),
+    north: float = Query(...),
+    date: str | None = Query(default=None),
+    viewer=Depends(get_current_disaster_viewer),
+):
+    try:
+        return wind_service.get_wind((west, south, east, north), requested_date=date)
+    except (wind_service.WindRequestError, ValueError) as exc:
+        status_code = exc.status_code if isinstance(exc, wind_service.WindRequestError) else 400
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
 
 
 @router.post("/fire-multi-source", dependencies=[Depends(get_current_disaster_viewer)])

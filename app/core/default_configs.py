@@ -70,6 +70,10 @@ DEFAULT_CONFIGS: list[tuple[str, str, str, str, str, str, bool]] = [
     ("app.version", os.getenv("APP_VERSION", "1.0.0"), "string", "app",
      "Platform version", "", True),
 
+    # -- Map providers --
+    ("maps.carto_api_key", os.getenv("CARTO_API_KEY", ""), "string", "maps",
+     "CARTO Basemaps API Key", "Key CARTO untuk tile basemap Positron dan Dark Matter", False),
+
     # -- AI controller --
     ("ai.provider", os.getenv("AI_PROVIDER", "anthropic"), "string", "ai",
      "AI Provider", "Provider aktif: anthropic | openai | openrouter | deepseek | gemini", False),

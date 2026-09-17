@@ -12,6 +12,11 @@ Endpoint consumers:
     GET /api/map-layers?module= → get_all_layers(module=)
 """
 
+from urllib.parse import quote
+
+from app.core.config import get_settings
+from app.services.config_service import get_setting
+
 TYPE_BASEMAP   = "basemap"
 TYPE_ANALYSIS  = "analysis"
 TYPE_REFERENCE = "reference"
@@ -127,7 +132,7 @@ MAP_LAYER_REGISTRY: list[dict] = [
         "module":          None,
         "provider":        "CARTO",
         "source":          "CartoDB Dark Matter",
-        "tile_url":        "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
+        "tile_url":        "https://{s}.basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}{r}.png",
         "attribution":     "&copy; OpenStreetMap contributors &copy; CARTO",
         "default_opacity": 1.0,
         "min_zoom":        1,
@@ -145,7 +150,7 @@ MAP_LAYER_REGISTRY: list[dict] = [
         "module":          None,
         "provider":        "CARTO",
         "source":          "CartoDB Positron",
-        "tile_url":        "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
+        "tile_url":        "https://{s}.basemaps.cartocdn.com/rastertiles/light_all/{z}/{x}/{y}{r}.png",
         "attribution":     "&copy; OpenStreetMap contributors &copy; CARTO",
         "default_opacity": 1.0,
         "min_zoom":        1,
@@ -220,11 +225,20 @@ def get_all_layers(
     return sorted(layers, key=lambda l: l.get("order", 999))
 
 
-def get_basemaps(enabled_only: bool = True) -> list[dict]:
+def get_basemaps(enabled_only: bool = True, db=None) -> list[dict]:
     layers = [l for l in MAP_LAYER_REGISTRY if l["type"] == TYPE_BASEMAP]
     if enabled_only:
         layers = [l for l in layers if l.get("enabled", True)]
-    return sorted(layers, key=lambda l: l.get("order", 999))
+    result = [dict(layer) for layer in sorted(layers, key=lambda l: l.get("order", 999))]
+    settings = get_settings()
+    carto_key = get_setting(db, "maps.carto_api_key", settings.carto_api_key) if db is not None else settings.carto_api_key
+    if carto_key:
+        for layer in result:
+            if layer.get("provider") != "CARTO":
+                continue
+            separator = "&" if "?" in layer["tile_url"] else "?"
+            layer["tile_url"] = f"{layer['tile_url']}{separator}key={quote(str(carto_key), safe='')}"
+    return result
 
 
 def get_layer(key: str) -> dict | None:

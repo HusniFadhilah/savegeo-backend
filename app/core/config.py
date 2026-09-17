@@ -127,6 +127,7 @@ class Settings(BaseSettings):
     demnas_wms_layers: str = ""
     demnas_tile_url: str = ""
     demnas_ee_asset: str = ""
+    carto_api_key: str = ""
 
     # --- ArcGIS ---
     arcgis_enabled: bool = True

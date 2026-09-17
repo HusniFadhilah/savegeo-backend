@@ -45,11 +45,35 @@ def get_setting(db: Session, key: str, default=None):
 
 
 def get_all_settings(db: Session, category: str | None = None) -> list[SystemConfig]:
+    ensure_default_settings(db)
     _ensure_fresh(db)
     rows = list(_cache.values())
     if category:
         rows = [r for r in rows if r.category == category]
     return rows
+
+
+def ensure_default_settings(db: Session) -> int:
+    """Add newly introduced defaults without overwriting admin-managed values."""
+    existing_keys = {key for (key,) in db.query(SystemConfig.key).all()}
+    created = 0
+    for key, value, value_type, category, label, description, is_public in DEFAULT_CONFIGS:
+        if key in existing_keys:
+            continue
+        db.add(SystemConfig(
+            key=key,
+            value=value,
+            value_type=value_type,
+            category=category,
+            label=label,
+            description=description,
+            is_public=is_public,
+        ))
+        created += 1
+    if created:
+        db.commit()
+        invalidate()
+    return created
 
 
 def mask_config_dict(cfg: SystemConfig) -> dict:

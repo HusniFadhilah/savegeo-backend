@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
 
+from app.db.session import get_db
 from app.registries.map_layer_registry import get_all_layers, get_basemaps
 
 router = APIRouter(tags=["maps"])
@@ -14,6 +16,6 @@ def map_layers(module: str | None = None):
 
 
 @router.get("/basemaps")
-def basemaps():
-    layers = get_basemaps()
+def basemaps(db: Session = Depends(get_db)):
+    layers = get_basemaps(db=db)
     return {"layers": layers, "count": len(layers)}
