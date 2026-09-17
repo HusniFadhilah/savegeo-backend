@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import require_ee
 from app.core.config import get_settings
+from app.core.temporal import format_rfc3339, utc_now
 from app.core.security import get_current_app_viewer
 from app.db.models.user import User
 from app.db.session import get_db
@@ -34,6 +35,7 @@ from app.services import (
     download_service,
     landcover_service,
     provenance_service,
+    output_registry_service,
     vegetation_service,
 )
 from app.services.gee_common import AnalysisError
@@ -74,7 +76,7 @@ def _job_path(job_id: str) -> Path:
 
 
 def _now() -> str:
-    return datetime.now(UTC).isoformat()
+    return format_rfc3339(utc_now())
 
 
 def _write_job(job_id: str, data: dict[str, Any]) -> None:
@@ -141,6 +143,7 @@ def _run_job(job_id: str, job_type: str, payload: dict[str, Any]) -> None:
                 "result": result,
             },
         )
+        output_registry_service.register_action_outputs(db, job_id, result)
         provenance_service.update_analysis_provenance(
             db,
             job_id,
@@ -238,6 +241,7 @@ def create_analysis_job(
         payload=payload,
         user_id=viewer.id if isinstance(viewer, User) else None,
     )
+    output_registry_service.register_action_outputs(db, job_id)
     _write_job(job_id, {"job_id": job_id, "type": job_type, "status": "queued", "created_at": _now()})
     _executor.submit(_run_job, job_id, job_type, payload)
     return {"job_id": job_id, "status": "queued", "status_url": f"/analysis-jobs/{job_id}"}

@@ -19,6 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator
 
 from app.core.security import get_current_app_viewer, require_permission
+from app.core.temporal import format_rfc3339, utc_now
 from app.schemas.metadata import DatasetMetadata
 
 router = APIRouter(prefix="/geospatial", tags=["geospatial"])
@@ -127,7 +128,7 @@ def _new_job(kind: str, request: ExportRequest | QueryRequest) -> dict[str, Any]
         "kind": kind,
         "status": "queued",
         "mode": "server",
-        "createdAt": dt.datetime.now(dt.UTC).isoformat(),
+        "createdAt": format_rfc3339(utc_now()),
         "request": request.model_dump(exclude_none=True),
     }
     _jobs[job_id] = job

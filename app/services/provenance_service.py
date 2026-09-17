@@ -10,6 +10,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.core.temporal import format_rfc3339
 from app.db.models.analysis_provenance import AnalysisProvenance
 
 logger = logging.getLogger(__name__)
@@ -71,7 +72,7 @@ def create_analysis_provenance(
         cloud_mask=_value(payload, "cloud_mask", "cloudMask", "cloud_masking"),
         model_id=_value(payload, "model_id", "modelId", "model"),
         model_version=_value(payload, "model_version", "modelVersion"),
-        provenance={"job_id": analysis_id, "application_version": "0.1.0", "created_at": now.isoformat()},
+        provenance={"job_id": analysis_id, "application_version": "0.1.0", "created_at": format_rfc3339(now)},
         created_by_user_id=user_id,
         created_at=now,
     )

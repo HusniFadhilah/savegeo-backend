@@ -5,7 +5,9 @@ from __future__ import annotations
 import re
 from datetime import date, datetime
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_serializer, field_validator, model_validator
+
+from app.core.temporal import format_temporal
 
 _DATASET_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _CHECKSUM = re.compile(r"^(?:sha256:)?[0-9a-fA-F]{64}$")
@@ -89,3 +91,15 @@ class DatasetMetadata(BaseModel):
         if self.processing_date < self.acquisition_date:
             raise ValueError("processing_date must not be before acquisition_date")
         return self
+
+    @model_validator(mode="after")
+    def reject_naive_datetimes(self) -> "DatasetMetadata":
+        for field_name in ("temporal_start", "temporal_end", "acquisition_date", "processing_date"):
+            value = getattr(self, field_name)
+            if isinstance(value, datetime) and (value.tzinfo is None or value.utcoffset() is None):
+                raise ValueError(f"{field_name} datetime must include a timezone")
+        return self
+
+    @field_serializer("temporal_start", "temporal_end", "acquisition_date", "processing_date")
+    def serialize_temporal(self, value: date | datetime) -> str:
+        return format_temporal(value) or ""

@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.db.models.gee_credential import GEECredential
 from app.db.models.uploaded_model import UploadedModel
 from app.db.session import get_db
+from app.core.temporal import format_rfc3339, utc_now
 
 router = APIRouter(tags=["health"])
 
@@ -20,7 +21,7 @@ def health(request: Request, db: Session = Depends(get_db)):
     return {
         "status": "ok",
         "ee_initialized": ee_initialized,
-        "timestamp": dt.datetime.now(dt.UTC).isoformat(),
+        "timestamp": format_rfc3339(utc_now()),
         # Never expose service-account identity in a public liveness response.
         "active_credential": bool(active_cred),
         "active_credential_configured": bool(active_cred),

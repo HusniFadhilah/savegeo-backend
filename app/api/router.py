@@ -6,6 +6,7 @@ from fastapi import APIRouter
 
 from app.api.routes import (
     admin,
+    actions,
     admin_disaster,
     agent,
     analysis_jobs,
@@ -32,6 +33,7 @@ from app.api.routes import (
     regions,
     reports,
     timeseries,
+    vertical,
     user_auth,
     utils,
     vegetation,
@@ -41,6 +43,7 @@ from app.api.routes import (
 api_router = APIRouter()
 
 api_router.include_router(health.router)
+api_router.include_router(actions.router)
 api_router.include_router(datasets.router)
 api_router.include_router(maps.router)
 api_router.include_router(models.router)
@@ -62,6 +65,7 @@ api_router.include_router(disaster_events.router)
 api_router.include_router(admin_disaster.router)
 api_router.include_router(user_auth.router)
 api_router.include_router(timeseries.router)
+api_router.include_router(vertical.router)
 api_router.include_router(download.router)
 api_router.include_router(arcgis.router)
 api_router.include_router(agent.router)

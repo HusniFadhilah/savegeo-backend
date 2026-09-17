@@ -8,6 +8,7 @@ from sqlalchemy import DateTime, ForeignKey, String
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.core.temporal import format_temporal
 from app.db.base import Base
 
 
@@ -54,13 +55,13 @@ class AnalysisProvenance(Base):
             "cloud_mask": self.cloud_mask,
             "model_id": self.model_id,
             "model_version": self.model_version,
-            "started_at": self.started_at.isoformat() if self.started_at else None,
-            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+            "started_at": format_temporal(self.started_at, field="started_at"),
+            "completed_at": format_temporal(self.completed_at, field="completed_at"),
             "error_code": self.error_code,
             "provenance": self.provenance,
             "quality_flags": self.quality_flags,
             "confidence": self.confidence,
             "artifact_checksums": self.artifact_checksums,
             "created_by_user_id": self.created_by_user_id,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "created_at": format_temporal(self.created_at, field="created_at"),
         }

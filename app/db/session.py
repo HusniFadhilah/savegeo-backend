@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Generator
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import get_settings
@@ -17,6 +17,18 @@ from app.core.config import get_settings
 settings = get_settings()
 
 engine = create_engine(settings.database_url, pool_pre_ping=True, future=True)
+
+
+@event.listens_for(engine, "connect")
+def _set_database_timezone(dbapi_connection, _connection_record) -> None:
+    """Keep PostgreSQL session timezone deterministic for absolute timestamps."""
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("SET TIME ZONE 'UTC'")
+    finally:
+        cursor.close()
+
+
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 
 

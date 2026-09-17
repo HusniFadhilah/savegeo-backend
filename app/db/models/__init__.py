@@ -6,6 +6,7 @@ from app.db.models.admin_user import AdminUser
 from app.db.models.analysis_result import AnalysisResult
 from app.db.models.analysis_run import AnalysisRun
 from app.db.models.analysis_provenance import AnalysisProvenance
+from app.db.models.analysis_output import AnalysisOutput
 from app.db.models.audit_log import AuditLog
 from app.db.models.chat_message import ChatMessage
 from app.db.models.chat_session import ChatSession
@@ -37,6 +38,7 @@ __all__ = [
     "AnalysisResult",
     "AnalysisRun",
     "AnalysisProvenance",
+    "AnalysisOutput",
     "AuditLog",
     "ChatMessage",
     "ChatSession",
