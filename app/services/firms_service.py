@@ -300,6 +300,8 @@ def _feature_matches(
 
 def _summary(features: list[dict]) -> dict:
     high = [feature for feature in features if (feature.get("properties") or {}).get("confidence_label") == "high"]
+    nominal = [feature for feature in features if (feature.get("properties") or {}).get("confidence_label") == "nominal"]
+    low = [feature for feature in features if (feature.get("properties") or {}).get("confidence_label") == "low"]
     frps = [float((feature.get("properties") or {}).get("frp")) for feature in features if (feature.get("properties") or {}).get("frp") is not None]
     dates = [str((feature.get("properties") or {}).get("acq_date")) for feature in features if (feature.get("properties") or {}).get("acq_date")]
     source_counts = Counter((feature.get("properties") or {}).get("source") for feature in features)
@@ -307,7 +309,10 @@ def _summary(features: list[dict]) -> dict:
     return {
         "total_hotspots": len(features),
         "high_confidence_hotspots": len(high),
+        "nominal_confidence_hotspots": len(nominal),
+        "low_confidence_hotspots": len(low),
         "total_frp": round(sum(frps), 3),
+        "average_frp": round(sum(frps) / len(frps), 3) if frps else None,
         "max_frp": round(max(frps), 3) if frps else 0,
         "latest_detection_utc": max(((feature.get("properties") or {}).get("acq_datetime_utc") for feature in features), default=None),
         "by_day": [{"date": day, "count": count} for day, count in sorted(by_day.items())],

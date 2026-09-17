@@ -103,6 +103,62 @@ def _feature(hotspot: Hotspot) -> dict | None:
     }
 
 
+def _period_dates(
+    event: DisasterEvent, from_date: str | None, to: str | None
+) -> tuple[str, str]:
+    end_date = (
+        to
+        or (event.last_data_at.date().isoformat() if event.last_data_at else None)
+        or (event.monitoring_to.isoformat() if event.monitoring_to else None)
+        or dt.datetime.now(dt.UTC).date().isoformat()
+    )
+    start_date = (
+        from_date
+        or (event.monitoring_from.isoformat() if event.monitoring_from else None)
+        or (event.start_date.isoformat() if event.start_date else None)
+        or (dt.date.fromisoformat(end_date) - dt.timedelta(days=6)).isoformat()
+    )
+    return start_date, end_date
+
+
+def _confidence_categories(confidence: str | None) -> set[str] | None:
+    if confidence is None:
+        return None
+    selected = {item.strip().casefold() for item in confidence.split(",") if item.strip()}
+    selected.discard("all")
+    return selected
+
+
+def _live_wildfire_data(
+    event: DisasterEvent,
+    from_date: str | None,
+    to: str | None,
+    sensor: str | None = None,
+    confidence: str | None = None,
+) -> tuple[dict, dict]:
+    start_date, end_date = _period_dates(event, from_date, to)
+    live = firms_service.get_fires_for_period(
+        source="ALL",
+        from_date=start_date,
+        to_date=end_date,
+        bbox=tuple(event.bbox),
+        confidence_categories=_confidence_categories(confidence),
+        sensor=None if not sensor or sensor.casefold() == "all" else sensor,
+        min_frp=None,
+        limit=2000,
+    )
+    summary = dict(live.get("metadata", {}).get("summary") or {})
+    summary.update(
+        {
+            "affected_regions": len(event.province_codes or event.province or []),
+            "burned_area_ha": None,
+            "burned_area_source": None,
+            "previous_period_change_pct": None,
+        }
+    )
+    return live, summary
+
+
 @router.get("/events")
 def list_wildfire_events(
     search: str | None = None,
@@ -172,10 +228,16 @@ def get_wildfire_summary(
     slug: str,
     from_date: str | None = Query(None, alias="from"),
     to: str | None = None,
+    confidence: str | None = None,
     viewer=Depends(get_current_disaster_viewer),
     db: Session = Depends(get_db),
 ):
     event = _event(db, slug)
+    try:
+        _, summary = _live_wildfire_data(event, from_date, to, confidence=confidence)
+        return summary
+    except firms_service.FirmsRequestError:
+        pass
     hotspots = list(
         db.execute(
             select(Hotspot).where(Hotspot.event_id == event.id, Hotspot.is_published.is_(True))
@@ -197,42 +259,11 @@ def get_wildfire_hotspots(
     event = _event(db, slug)
     if event.bbox:
         try:
-            selected_confidence = None if confidence is None else {
-                item.strip().casefold() for item in confidence.split(",") if item.strip()
-            }
-            if selected_confidence is not None:
-                selected_confidence -= {"all"}
-            end_date = (
-                to
-                or (event.last_data_at.date().isoformat() if event.last_data_at else None)
-                or (event.monitoring_to.isoformat() if event.monitoring_to else None)
-                or dt.datetime.now(dt.UTC).date().isoformat()
-            )
-            start_date = (
-                from_date
-                or (event.monitoring_from.isoformat() if event.monitoring_from else None)
-                or (event.start_date.isoformat() if event.start_date else None)
-                or (dt.date.fromisoformat(end_date) - dt.timedelta(days=6)).isoformat()
-            )
-            live = firms_service.get_fires_for_period(
-                source="ALL",
-                from_date=start_date,
-                to_date=end_date,
-                bbox=tuple(event.bbox),
-                confidence_categories=selected_confidence,
-                sensor=None if not sensor or sensor.casefold() == "all" else sensor,
-                min_frp=None,
-                limit=2000,
-            )
-            summary = live.get("metadata", {}).get("summary") or _summary([], event)
+            live, summary = _live_wildfire_data(event, from_date, to, sensor, confidence)
             return {
                 "features": live.get("features", []),
-                "summary": {
-                    **summary,
-                    "affected_regions": len(event.province_codes or event.province or []),
-                    "burned_area_ha": None,
-                    "burned_area_source": None,
-                },
+                "summary": summary,
+                "timeline": summary.get("by_day", []),
                 "metadata": {
                     "source": "NASA FIRMS",
                     "fetched_at": live.get("metadata", {}).get(
@@ -268,9 +299,21 @@ def get_wildfire_hotspots(
 
 @router.get("/events/{slug}/timeline")
 def get_wildfire_timeline(
-    slug: str, viewer=Depends(get_current_disaster_viewer), db: Session = Depends(get_db)
+    slug: str,
+    from_date: str | None = Query(None, alias="from"),
+    to: str | None = None,
+    sensor: str | None = None,
+    confidence: str | None = None,
+    viewer=Depends(get_current_disaster_viewer),
+    db: Session = Depends(get_db),
 ):
     event = _event(db, slug)
+    if event.bbox:
+        try:
+            live, _ = _live_wildfire_data(event, from_date, to, sensor, confidence)
+            return {"timeline": live.get("metadata", {}).get("summary", {}).get("by_day", [])}
+        except firms_service.FirmsRequestError:
+            pass
     hotspots = list(
         db.execute(
             select(Hotspot).where(Hotspot.event_id == event.id, Hotspot.is_published.is_(True))
