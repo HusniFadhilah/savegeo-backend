@@ -32,6 +32,40 @@ from app.providers.feature_engineering_non_gee import NonGeeStack
 
 logger = logging.getLogger(__name__)
 _CARBON_TILE_CACHE_LOCK = threading.RLock()
+_CARBON_TILE_STATS = {
+    "requests": 0,
+    "cache_hits": 0,
+    "cache_misses": 0,
+    "rendered": 0,
+    "empty": 0,
+    "errors": 0,
+    "source_reads": 0,
+    "source_limit_skips": 0,
+    "total_render_ms": 0.0,
+}
+
+
+def get_carbon_tile_metrics() -> dict:
+    """Return process-local COG tile/cache counters for operations monitoring."""
+    from app.core.config import get_settings
+
+    with _CARBON_TILE_CACHE_LOCK:
+        stats = dict(_CARBON_TILE_STATS)
+    rendered = int(stats["rendered"])
+    stats["average_render_ms"] = round(stats["total_render_ms"] / rendered, 1) if rendered else 0.0
+    stats["cache_hit_rate_pct"] = round(stats["cache_hits"] / stats["requests"] * 100, 1) if stats["requests"] else 0.0
+    stats["cache_dir"] = str(getattr(get_settings(), "carbon_tile_cache_dir", "") or "")
+    return stats
+
+
+def _tile_stat(name: str, value: int | float = 1) -> None:
+    with _CARBON_TILE_CACHE_LOCK:
+        _CARBON_TILE_STATS[name] = _CARBON_TILE_STATS.get(name, 0) + value
+
+
+def record_carbon_tile_error() -> None:
+    """Record a route-level tile failure without exposing internals."""
+    _tile_stat("errors")
 
 
 def _carbon_tile_cache_path(cache_key: str) -> Path:
@@ -402,6 +436,8 @@ def render_carbon_reference_tile(
     Reads only the requested Web-Mercator window through WarpedVRT, so global
     CTrees files remain practical and no full raster is downloaded.
     """
+    started = time.perf_counter()
+    _tile_stat("requests")
     from io import BytesIO
 
     from PIL import Image
@@ -418,7 +454,10 @@ def render_carbon_reference_tile(
     with _CARBON_TILE_CACHE_LOCK:
         cached = _read_cached_carbon_tile(cache_key)
     if cached is not None:
+        _tile_stat("cache_hits")
+        logger.info("carbon COG tile cache hit dataset=%s z=%s x=%s y=%s", dataset_key, z, x, y)
         return cached
+    _tile_stat("cache_misses")
     meta = CARBON_EXTERNAL_REGISTRY[dataset_key]
     bbox = _xyz_bounds_wgs84(z, x, y)
     n = 2 ** z
@@ -436,8 +475,19 @@ def render_carbon_reference_tile(
     urls = _carbon_tile_urls(dataset_key, bbox, year)
     if not urls:
         return None
+    from app.core.config import get_settings
+    max_sources = max(1, int(getattr(get_settings(), "carbon_tile_max_source_tiles", 32)))
+    if len(urls) > max_sources:
+        _tile_stat("source_limit_skips")
+        logger.warning(
+            "carbon COG tile skipped dataset=%s z=%s x=%s y=%s sources=%s limit=%s; zoom in for detail",
+            dataset_key, z, x, y, len(urls), max_sources,
+        )
+        return None
+    logger.info("carbon COG tile render start dataset=%s z=%s x=%s y=%s sources=%s", dataset_key, z, x, y, len(urls))
 
     for url in urls:
+        _tile_stat("source_reads")
         try:
             with rasterio.Env(**GDAL_HTTP_OPTS), rasterio.open(url) as src:
                 src_nodata = meta.get("nodata") if meta.get("nodata") is not None else src.nodata
@@ -461,6 +511,8 @@ def render_carbon_reference_tile(
             logger.debug("carbon tile source unavailable (%s): %s", url, exc)
 
     if not np.isfinite(canvas).any():
+        _tile_stat("empty")
+        logger.info("carbon COG tile empty dataset=%s z=%s x=%s y=%s elapsed_ms=%.1f", dataset_key, z, x, y, (time.perf_counter() - started) * 1000)
         return None
     lo = float(vis_min if vis_min is not None else meta.get("vis_min", 0))
     hi = float(vis_max if vis_max is not None else meta.get("vis_max", 300))
@@ -483,6 +535,10 @@ def render_carbon_reference_tile(
     content = output.getvalue()
     with _CARBON_TILE_CACHE_LOCK:
         _write_cached_carbon_tile(cache_key, content)
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    _tile_stat("rendered")
+    _tile_stat("total_render_ms", elapsed_ms)
+    logger.info("carbon COG tile rendered dataset=%s z=%s x=%s y=%s sources=%s elapsed_ms=%.1f", dataset_key, z, x, y, len(urls), elapsed_ms)
     return content
 
 

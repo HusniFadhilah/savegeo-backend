@@ -159,6 +159,9 @@ class Settings(BaseSettings):
     # next to upload_dir so containers can mount it as a persistent volume.
     carbon_tile_cache_dir: str = ""
     carbon_tile_cache_ttl_seconds: int = 86_400
+    # Avoid hundreds of remote COG opens for world-scale z0-z2 tiles. The
+    # frontend will request a detailed tile once the user zooms into an AOI.
+    carbon_tile_max_source_tiles: int = 32
     carbon_dataset_health_ttl_seconds: int = 900
 
     @field_validator("debug", mode="before")

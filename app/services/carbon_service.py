@@ -477,6 +477,9 @@ def _analyze_external_reference_only(
                 "n_samples": stats.get("n_samples"),
                 "derived_stock_mean_mg_c_ha": stock_mean,
                 "derived_stock_n_samples": stats.get("stock_n_samples"),
+                "rock_fragment_correction_applied": stats.get("rock_fragment_correction_applied", False),
+                "rock_fragment_mean_pct": stats.get("rock_fragment_mean_pct"),
+                "rock_fragment_n_samples": stats.get("rock_fragment_n_samples", 0),
             },
         },
         "area_info": {
@@ -486,7 +489,7 @@ def _analyze_external_reference_only(
             "calculation_area_ha": round(area_ha, 2),
             "total_carbon_tons": round(total_carbon_tons, 2) if total_carbon_tons is not None else None,
             "carbon_dioxide_equivalent_tons": round(total_carbon_tons * co2_factor, 2) if total_carbon_tons is not None else None,
-            "description": "SoilGrids menampilkan SOC (g/kg) dan stok 0-30 cm turunan dari bulk density bdod. Estimasi tidak memasukkan koreksi rock-fragment karena layer tersebut belum diminta.",
+            "description": "SoilGrids menampilkan SOC (g/kg) dan stok 0-30 cm turunan dari SOC, bulk density bdod, serta koreksi coarse/rock fragments cfvo per lapisan.",
         },
         "model_info": {
             "model_name": "reference_only",

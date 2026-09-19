@@ -29,7 +29,8 @@ _HTTP_RETRIES = 3
 _SOILGRIDS_CACHE_TTL_SECONDS = 3600
 _SOILGRIDS_CACHE_MAX_ITEMS = 1024
 _SOILGRIDS_CACHE: dict[tuple[float, float], tuple[float, float | None]] = {}
-_SOILGRIDS_COMPONENT_CACHE: dict[tuple[float, float], tuple[float, tuple[float | None, float | None]]] = {}
+# Cached values are (timestamp, (SOC g/kg, stock Mg C/ha, rock fraction)).
+_SOILGRIDS_COMPONENT_CACHE: dict[tuple[float, float], tuple[float, tuple[float | None, float | None, float | None]]] = {}
 
 
 # ─────────────────────────────────────────────
@@ -91,14 +92,18 @@ class ExternalRasterProvider:
         points = _sample_aoi_points(aoi_geojson, bbox, n_samples, seed)
 
         if meta.get("ingestion_method") == "soilgrids_rest":
-            components = _sample_soilgrids_components(meta, points)
+            components = _sample_soilgrids_components_detailed(meta, points)
             values = [value[0] for value in components if value[0] is not None]
             stock_values = [value[1] for value in components if value[1] is not None]
+            rock_values = [value[2] for value in components if value[2] is not None]
             if len(values) < 5:
                 raise RuntimeError(f"External provider '{meta.get('key')}' returned only {len(values)} valid values out of {n_samples} sample points in AOI.")
             result = _summarize_values(values, meta)
             if stock_values:
                 result.update(_summarize_values(stock_values, {**meta, "unit": "Mg C/ha"}, prefix="stock_"))
+            result["rock_fragment_correction_applied"] = bool(rock_values)
+            result["rock_fragment_mean_pct"] = round(sum(rock_values) / len(rock_values) * 100, 2) if rock_values else None
+            result["rock_fragment_n_samples"] = len(rock_values)
             return result
 
         raw_values = self.sample_carbon_labels(meta, points)
@@ -213,17 +218,24 @@ def _sample_soilgrids(
 
 
 def _sample_soilgrids_components(meta: dict, points: list[tuple[float, float]]) -> list[tuple[float | None, float | None]]:
-    """Return (SOC g/kg, 0-30cm stock Mg C/ha) for each point."""
+    """Return historical two-value (SOC g/kg, stock Mg C/ha) tuples."""
+    return [(soc, stock) for soc, stock, _rock in _sample_soilgrids_components_detailed(meta, points)]
+
+
+def _sample_soilgrids_components_detailed(
+    meta: dict, points: list[tuple[float, float]]
+) -> list[tuple[float | None, float | None, float | None]]:
+    """Return (SOC g/kg, stock Mg C/ha, mean rock fraction) per point."""
     service_url = meta.get("service_url", "https://rest.isric.org/soilgrids/v2.0/properties/query")
     depths = [("0-5cm", 5), ("5-15cm", 10), ("15-30cm", 15)]
-    values: list[tuple[float | None, float | None]] = []
+    values: list[tuple[float | None, float | None, float | None]] = []
     for lon, lat in points:
         key = (round(lon, 5), round(lat, 5))
         cached = _SOILGRIDS_COMPONENT_CACHE.get(key)
         if cached and time.monotonic() - cached[0] < _SOILGRIDS_CACHE_TTL_SECONDS:
             values.append(cached[1])
             continue
-        result = _soilgrids_components_point(service_url, lon, lat, depths)
+        result = _soilgrids_components_point_detailed(service_url, lon, lat, depths)
         if len(_SOILGRIDS_COMPONENT_CACHE) >= _SOILGRIDS_CACHE_MAX_ITEMS:
             oldest = min(_SOILGRIDS_COMPONENT_CACHE, key=lambda item: _SOILGRIDS_COMPONENT_CACHE[item][0])
             _SOILGRIDS_COMPONENT_CACHE.pop(oldest, None)
@@ -239,10 +251,22 @@ def _soilgrids_components_point(
     lat: float,
     depths: list[tuple[str, int]],
 ) -> tuple[float | None, float | None]:
+    """Backward-compatible two-value SoilGrids component query."""
+    soc, stock, _rock = _soilgrids_components_point_detailed(service_url, lon, lat, depths)
+    return soc, stock
+
+
+def _soilgrids_components_point_detailed(
+    service_url: str,
+    lon: float,
+    lat: float,
+    depths: list[tuple[str, int]],
+) -> tuple[float | None, float | None, float | None]:
+    """Query SOC, bulk density and coarse-fragment volume for one point."""
     params = {
         "lon": lon,
         "lat": lat,
-        "property": ["soc", "bdod"],
+        "property": ["soc", "bdod", "cfvo"],
         "depth": [label for label, _ in depths],
         "value": "mean",
     }
@@ -256,20 +280,30 @@ def _soilgrids_components_point(
             layers = {layer.get("name"): layer for layer in response.json().get("properties", {}).get("layers", [])}
             soc_map = _soilgrids_depth_map(layers.get("soc"))
             bd_map = _soilgrids_depth_map(layers.get("bdod"))
+            cfvo_map = _soilgrids_depth_map(layers.get("cfvo"))
             soc_values = [soc_map.get(label) for label, _ in depths]
             valid_soc = [(raw, thickness) for raw, (_, thickness) in zip(soc_values, depths) if raw is not None]
             soc_gkg = (sum(raw * thickness for raw, thickness in valid_soc) / sum(thickness for _, thickness in valid_soc) / 10.0) if valid_soc else None
             stock = None
+            rock_values = [cfvo_map.get(label) for label, _ in depths]
             if all(soc_map.get(label) is not None and bd_map.get(label) is not None for label, _ in depths):
-                # SOC is dg/kg (÷10 → g/kg); bdod is cg/cm³ (÷100 → g/cm³).
-                stock = sum((soc_map[label] / 10.0) * (bd_map[label] / 100.0) * thickness / 10.0 for label, thickness in depths)
-            return soc_gkg, stock
+                stock_parts = []
+                for label, thickness in depths:
+                    raw_cfvo = cfvo_map.get(label)
+                    # SoilGrids cfvo is cm3/dm3, so /1000 is the occupied
+                    # coarse-fragment volume fraction (0..1).
+                    correction = 1.0 if raw_cfvo is None else max(0.0, 1.0 - min(float(raw_cfvo) / 1000.0, 0.95))
+                    stock_parts.append((soc_map[label] / 10.0) * (bd_map[label] / 100.0) * thickness / 10.0 * correction)
+                stock = sum(stock_parts)
+            valid_rock = [max(0.0, min(float(raw) / 1000.0, 0.95)) for raw in rock_values if raw is not None]
+            rock_mean = sum(valid_rock) / len(valid_rock) if valid_rock else None
+            return soc_gkg, stock, rock_mean
         except (requests.RequestException, ValueError, TypeError, KeyError) as exc:
             if attempt < _HTTP_RETRIES - 1:
                 time.sleep(1.0)
             else:
                 logger.debug("SoilGrids components (%s,%s) failed: %s", lon, lat, exc)
-    return None, None
+    return None, None, None
 
 
 def _soilgrids_depth_map(layer: dict | None) -> dict[str, float | None]:

@@ -313,11 +313,11 @@ CARBON_EXTERNAL_REGISTRY: dict[str, dict] = {
         "year_range":       [2017, 2017],
         "time_aware":       False,
         "transform":        "divide_10",  # native dg/kg → g/kg
-        "description":      "ISRIC SoilGrids v2.0 SOC at 0–30 cm depth-weighted mean, 250 m global. Point queries via REST API. SOC pool — do not compare totals with aboveground biomass datasets.",
+        "description":      "ISRIC SoilGrids v2.0 SOC at 0–30 cm depth-weighted mean, 250 m global. Point queries via REST API; stock uses SOC, bulk density (bdod), and coarse-fragment volume (cfvo) correction. SOC pool — do not compare totals with aboveground biomass datasets.",
         "attribution":      "ISRIC — World Soil Information (SoilGrids v2.0 / Poggio et al. 2021)",
         "limitations":      [
             "SOC pool — not comparable with aboveground biomass carbon.",
-            "No tile rendering: only sampled point statistics available in current implementation.",
+            "No tile rendering: sampled point statistics are available; stock is a 0–30 cm derived estimate.",
             "API rate-limited; large AOI statistics use ≤100 sample points.",
         ],
         "vis_min":          0,

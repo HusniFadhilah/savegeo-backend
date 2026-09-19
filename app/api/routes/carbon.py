@@ -117,7 +117,7 @@ def carbon_reference_tile(
     max: float | None = Query(default=None),
 ):
     """Serve XYZ tiles for public COG carbon references (Hansen/ESA/CTrees)."""
-    from app.providers.local_raster_provider import render_carbon_reference_tile
+    from app.providers.local_raster_provider import record_carbon_tile_error, render_carbon_reference_tile
     from app.registries.carbon_dataset_registry import get_external_carbon_meta
 
     meta = get_external_carbon_meta(dataset_key)
@@ -126,6 +126,7 @@ def carbon_reference_tile(
     try:
         content = render_carbon_reference_tile(dataset_key, z, x, y, year=year, vis_min=min, vis_max=max)
     except Exception as exc:  # noqa: BLE001 - return a stable tile response, log details server-side
+        record_carbon_tile_error()
         logger.warning("Carbon reference tile failed for %s/%s/%s/%s: %s", dataset_key, z, x, y, exc)
         raise HTTPException(status_code=503, detail="Tile referensi sedang tidak tersedia") from exc
     if content is None:
@@ -138,8 +139,21 @@ def carbon_reference_tile(
 def carbon_dataset_health(refresh: bool = False):
     """Return cached reachability checks for public external carbon sources."""
     from app.registries.carbon_dataset_registry import CARBON_EXTERNAL_REGISTRY
+    from app.providers.local_raster_provider import get_carbon_tile_metrics
 
     return {
         "datasets": [carbon_service.check_external_dataset_health(key, refresh=refresh) for key in CARBON_EXTERNAL_REGISTRY],
+        "tile_cache": get_carbon_tile_metrics(),
+        "checked_at": datetime.now(UTC).isoformat(),
+    }
+
+
+@router.get("/carbon/tiles/metrics")
+def carbon_tile_metrics():
+    """Return process-local COG tile counters for dashboards and probes."""
+    from app.providers.local_raster_provider import get_carbon_tile_metrics
+
+    return {
+        "tile_cache": get_carbon_tile_metrics(),
         "checked_at": datetime.now(UTC).isoformat(),
     }

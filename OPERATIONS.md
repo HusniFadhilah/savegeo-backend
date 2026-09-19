@@ -71,7 +71,32 @@ var/saved_models/
 var/gee-credentials/
 var/disaster_rasters/
 var/exports/
+var/carbon_tile_cache/
 ```
+
+### Carbon COG cache and monitoring
+
+Production compose mounts `./var/carbon_tile_cache` at
+`/app/var/carbon_tile_cache` and sets `CARBON_TILE_CACHE_DIR` to that path.
+Keep this directory on persistent storage so rendered COG tiles survive API
+restarts and deployments. `CARBON_TILE_CACHE_TTL_SECONDS` controls expiry
+(default 24 hours).
+
+Probe external source reachability and tile counters with:
+
+```bash
+curl -fsS https://begeo.husnifd.my.id/api/carbon/datasets/health
+curl -fsS https://begeo.husnifd.my.id/api/carbon/tiles/metrics
+```
+
+The response includes per-dataset HTTP status/latency and process-local tile
+cache counters (`requests`, `cache_hits`, `cache_misses`, `source_reads`,
+`rendered`, `empty`, and `errors`). COG tile render logs are emitted at INFO
+with dataset, XYZ coordinates, source count, and elapsed milliseconds; source
+read failures remain at DEBUG because missing ocean tiles are expected.
+World-scale low-zoom requests that would open more than
+`CARBON_TILE_MAX_SOURCE_TILES` COGs are skipped with a transparent response;
+zooming into the AOI then requests the detailed, cacheable tiles.
 
 For disaster imagery, database `local_file_path` values must point to the target server. Thumbnail URLs use `/disaster-thumbnails/...` and the web server must proxy that path to FastAPI.
 

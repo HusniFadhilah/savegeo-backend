@@ -29,6 +29,7 @@ services:
       DATABASE_URL: postgresql+psycopg://savegeo:${POSTGRES_PASSWORD}@db:5432/savegeo
       UPLOAD_DIR: /app/var/uploads
       MODEL_DIR: /app/var/saved_models
+      CARBON_TILE_CACHE_DIR: /app/var/carbon_tile_cache
     depends_on:
       db:
         condition: service_healthy
@@ -48,6 +49,9 @@ services:
       - ./var/saved_models:/app/var/saved_models
       - ./var/disaster_rasters:/app/var/disaster_rasters
       - ./var/samgeo:/app/var/samgeo
+      # Persistent rendered COG tiles. Keep this outside source sync so cache
+      # survives deploy/restart and can be shared by all API workers.
+      - ./var/carbon_tile_cache:/app/var/carbon_tile_cache
       - ./var/gee-credentials:/app/var/gee-credentials
 
 volumes:
