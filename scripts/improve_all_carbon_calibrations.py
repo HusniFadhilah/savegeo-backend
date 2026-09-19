@@ -11,7 +11,6 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent))
 from compare_advanced_calibration_techniques import cross_validate as contextual_cv  # noqa: E402
 from compare_calibration_techniques import evaluate as scalar_cv  # noqa: E402
-from compare_calibration_techniques import fit_predict as scalar_fit_predict  # noqa: E402
 
 
 def metric(y: np.ndarray, p: np.ndarray) -> dict[str, float | int]:
