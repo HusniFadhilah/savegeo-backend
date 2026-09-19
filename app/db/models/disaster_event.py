@@ -47,6 +47,7 @@ class DisasterEvent(Base):
     published_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     last_data_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     last_synced_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    hotspot_last_synced_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     year: Mapped[int | None] = mapped_column(Integer)
     country_code: Mapped[str | None] = mapped_column(String(3), default="ID")
     province_codes: Mapped[list | None] = mapped_column(JSONB)
@@ -93,6 +94,7 @@ class DisasterEvent(Base):
             "published_at": self.published_at.isoformat() if self.published_at else None,
             "last_data_at": self.last_data_at.isoformat() if self.last_data_at else None,
             "last_synced_at": self.last_synced_at.isoformat() if self.last_synced_at else None,
+            "hotspot_last_synced_at": self.hotspot_last_synced_at.isoformat() if self.hotspot_last_synced_at else None,
             "year": self.year or (self.event_date.year if self.event_date else None),
             "country_code": self.country_code or "ID",
             "province_codes": self.province_codes or [],

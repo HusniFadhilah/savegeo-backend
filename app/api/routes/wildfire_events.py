@@ -11,8 +11,9 @@ from sqlalchemy.orm import Session
 from app.core.security import get_current_disaster_viewer
 from app.db.models.disaster_event import DisasterEvent
 from app.db.models.hotspot import Hotspot
+from app.db.models.wildfire_hotspot import WildfireHotspot
 from app.db.session import get_db
-from app.services import firms_service
+from app.services import firms_service, wildfire_hotspot_service
 
 router = APIRouter(prefix="/disasters/wildfires", tags=["wildfires"])
 
@@ -129,34 +130,78 @@ def _confidence_categories(confidence: str | None) -> set[str] | None:
     return selected
 
 
-def _live_wildfire_data(
+def _stored_wildfire_data(
+    db: Session,
     event: DisasterEvent,
     from_date: str | None,
     to: str | None,
     sensor: str | None = None,
     confidence: str | None = None,
-) -> tuple[dict, dict]:
+) -> tuple[list[dict], dict, dict]:
+    """Read the persisted cache, initializing it once when necessary."""
+    try:
+        wildfire_hotspot_service.ensure_initial_sync(db, event)
+    except firms_service.FirmsRequestError:
+        # Keep the public endpoint useful when NASA is temporarily unavailable;
+        # an already-populated database cache remains the source of truth.
+        pass
+
     start_date, end_date = _period_dates(event, from_date, to)
-    live = firms_service.get_fires_for_period(
-        source="ALL",
-        from_date=start_date,
-        to_date=end_date,
-        bbox=tuple(event.bbox),
+    normalized_sensor = None if not sensor or sensor.casefold() == "all" else sensor
+    features = wildfire_hotspot_service.list_event_features(
+        db,
+        event.id,
+        start_date,
+        end_date,
+        sensor=normalized_sensor,
         confidence_categories=_confidence_categories(confidence),
-        sensor=None if not sensor or sensor.casefold() == "all" else sensor,
-        min_frp=None,
-        limit=2000,
     )
-    summary = dict(live.get("metadata", {}).get("summary") or {})
-    summary.update(
-        {
-            "affected_regions": len(event.province_codes or event.province or []),
-            "burned_area_ha": None,
-            "burned_area_source": None,
-            "previous_period_change_pct": None,
+    # A populated cache can validly return no rows for a sensor/confidence
+    # filter, so don't fall back to legacy curated rows in that case.
+    has_persisted_rows = wildfire_hotspot_service.has_event_rows(db, event.id)
+
+    if has_persisted_rows:
+        summary = wildfire_hotspot_service.summarize(features)
+        summary.update(
+            {
+                "affected_regions": len(event.province_codes or event.province or []),
+                "burned_area_ha": None,
+                "burned_area_source": None,
+                "previous_period_change_pct": None,
+            }
+        )
+        synced_at = event.hotspot_last_synced_at or event.last_synced_at
+        metadata = {
+            "source": "NASA FIRMS",
+            "storage": "database",
+            "fetched_at": synced_at.isoformat() if synced_at else None,
+            "last_synced_at": synced_at.isoformat() if synced_at else None,
+            "stale": False,
+            "attribution": "Data: NASA FIRMS / NASA EOSDIS LANCE",
+            "disclaimer": "Hotspot adalah indikasi anomali termal dan bukan bukti tunggal area terbakar.",
         }
+        return features, summary, metadata
+
+    # Backward-compatible fallback for legacy admin-curated rows created before
+    # the persisted NASA observation table was introduced.
+    hotspots = list(
+        db.execute(
+            select(Hotspot).where(Hotspot.event_id == event.id, Hotspot.is_published.is_(True))
+        ).scalars()
     )
-    return live, summary
+    return (
+        [feature for hotspot in hotspots if (feature := _feature(hotspot))],
+        _summary(hotspots, event),
+        {
+            "source": "curated",
+            "storage": "database",
+            "fetched_at": dt.datetime.now(dt.UTC).isoformat(),
+            "last_synced_at": None,
+            "stale": False,
+            "attribution": event.source or "SaveGeo",
+            "disclaimer": "Hotspot adalah indikasi anomali termal dan bukan bukti tunggal area terbakar.",
+        },
+    )
 
 
 @router.get("/events")
@@ -185,10 +230,21 @@ def list_wildfire_events(
     items = []
     for event in events:
         count = len(
-            db.execute(select(Hotspot).where(Hotspot.event_id == event.id, Hotspot.is_published.is_(True)))
-            .scalars()
-            .all()
+            db.execute(
+                select(WildfireHotspot).where(
+                    WildfireHotspot.event_id == event.id,
+                    WildfireHotspot.is_published.is_(True),
+                )
+            ).scalars().all()
         )
+        if count == 0:
+            count = len(
+                db.execute(
+                    select(Hotspot).where(Hotspot.event_id == event.id, Hotspot.is_published.is_(True))
+                )
+                .scalars()
+                .all()
+            )
         data = event.to_dict()
         data.update(
             {
@@ -233,17 +289,8 @@ def get_wildfire_summary(
     db: Session = Depends(get_db),
 ):
     event = _event(db, slug)
-    try:
-        _, summary = _live_wildfire_data(event, from_date, to, confidence=confidence)
-        return summary
-    except firms_service.FirmsRequestError:
-        pass
-    hotspots = list(
-        db.execute(
-            select(Hotspot).where(Hotspot.event_id == event.id, Hotspot.is_published.is_(True))
-        ).scalars()
-    )
-    return _summary(hotspots, event)
+    _, summary, _ = _stored_wildfire_data(db, event, from_date, to, confidence=confidence)
+    return summary
 
 
 @router.get("/events/{slug}/hotspots")
@@ -257,43 +304,12 @@ def get_wildfire_hotspots(
     db: Session = Depends(get_db),
 ):
     event = _event(db, slug)
-    if event.bbox:
-        try:
-            live, summary = _live_wildfire_data(event, from_date, to, sensor, confidence)
-            return {
-                "features": live.get("features", []),
-                "summary": summary,
-                "timeline": summary.get("by_day", []),
-                "metadata": {
-                    "source": "NASA FIRMS",
-                    "fetched_at": live.get("metadata", {}).get(
-                        "fetched_at", dt.datetime.now(dt.UTC).isoformat()
-                    ),
-                    "stale": live.get("metadata", {}).get("stale", False),
-                    "attribution": live.get("metadata", {}).get("attribution", "NASA FIRMS"),
-                    "disclaimer": live.get("metadata", {}).get(
-                        "disclaimer",
-                        "Hotspot adalah indikasi anomali termal dan bukan bukti tunggal area terbakar.",
-                    ),
-                },
-            }
-        except firms_service.FirmsRequestError:
-            pass
-    hotspots = list(
-        db.execute(
-            select(Hotspot).where(Hotspot.event_id == event.id, Hotspot.is_published.is_(True))
-        ).scalars()
-    )
+    features, summary, metadata = _stored_wildfire_data(db, event, from_date, to, sensor, confidence)
     return {
-        "features": [feature for hotspot in hotspots if (feature := _feature(hotspot))],
-        "summary": _summary(hotspots, event),
-        "metadata": {
-            "source": "curated",
-            "fetched_at": dt.datetime.now(dt.UTC).isoformat(),
-            "stale": False,
-            "attribution": event.source or "SaveGeo",
-            "disclaimer": "Hotspot adalah indikasi anomali termal dan bukan bukti tunggal area terbakar.",
-        },
+        "features": features,
+        "summary": summary,
+        "timeline": summary.get("by_day", []),
+        "metadata": metadata,
     }
 
 
@@ -308,23 +324,8 @@ def get_wildfire_timeline(
     db: Session = Depends(get_db),
 ):
     event = _event(db, slug)
-    if event.bbox:
-        try:
-            live, _ = _live_wildfire_data(event, from_date, to, sensor, confidence)
-            return {"timeline": live.get("metadata", {}).get("summary", {}).get("by_day", [])}
-        except firms_service.FirmsRequestError:
-            pass
-    hotspots = list(
-        db.execute(
-            select(Hotspot).where(Hotspot.event_id == event.id, Hotspot.is_published.is_(True))
-        ).scalars()
-    )
-    counts: dict[str, int] = {}
-    for hotspot in hotspots:
-        date = str((hotspot.stats or {}).get("acq_date", "unknown"))
-        if date != "unknown":
-            counts[date] = counts.get(date, 0) + 1
-    return {"timeline": [{"date": date, "count": count} for date, count in sorted(counts.items())]}
+    _, summary, _ = _stored_wildfire_data(db, event, from_date, to, sensor, confidence)
+    return {"timeline": summary.get("by_day", [])}
 
 
 @router.get("/events/{slug}/regions")

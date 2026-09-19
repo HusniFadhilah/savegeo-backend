@@ -17,6 +17,7 @@ from app.db.models.disaster_event import DisasterEvent
 from app.db.models.field import Field
 from app.db.models.gee_credential import GEECredential
 from app.db.models.hotspot import Hotspot
+from app.db.models.wildfire_hotspot import WildfireHotspot
 from app.db.models.role import Permission, Role, role_permissions
 from app.db.models.satellite_imagery import SatelliteImagery
 from app.db.models.satellite_provider_entry import SatelliteProviderEntry
@@ -49,6 +50,7 @@ __all__ = [
     "Field",
     "GEECredential",
     "Hotspot",
+    "WildfireHotspot",
     "Permission",
     "Role",
     "SatelliteImagery",

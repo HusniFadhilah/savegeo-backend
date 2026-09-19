@@ -29,6 +29,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -36,12 +37,18 @@ from app.core.security import get_current_admin_panel, require_permission
 from app.db.models.admin_user import AdminUser
 from app.db.models.analysis_run import RUN_STATUSES
 from app.db.models.audit_log import AuditLog
-from app.db.models.disaster_event import DISASTER_TYPES, EVENT_STATUSES, SEVERITIES
+from app.db.models.disaster_event import DISASTER_TYPES, EVENT_STATUSES, SEVERITIES, DisasterEvent
 from app.db.models.hotspot import IMPACT_LEVELS, Hotspot
 from app.db.session import get_db
 from app.registries.disaster_model_registry import list_models
 from app.repositories import disaster_repo
-from app.services import audit_service, disaster_analysis_service, local_imagery_tile_service
+from app.services import (
+    audit_service,
+    disaster_analysis_service,
+    firms_service,
+    local_imagery_tile_service,
+    wildfire_hotspot_service,
+)
 from app.services.gee_common import AnalysisError
 from app.services.geo_utils import bbox_and_centroid, estimate_area_ha
 
@@ -181,6 +188,11 @@ class HotspotUpdateRequest(BaseModel):
     analysis_result_id: int | None = None
     stats: dict | None = None
     is_published: bool | None = None
+
+
+class WildfireSyncRequest(BaseModel):
+    from_date: dt.date | None = None
+    to_date: dt.date | None = None
 
 
 # -- helpers --
@@ -795,6 +807,42 @@ def admin_qc_summary(id: int, admin: AdminUser = Depends(require_permission("dis
 
 
 # -- Hotspots -----------------------------------------------------------------
+
+
+@router.post("/disasters/wildfires/{slug}/sync")
+def admin_sync_wildfire_hotspots(
+    slug: str,
+    payload: WildfireSyncRequest | None = None,
+    admin: AdminUser = Depends(get_current_admin_panel),
+    _perm: AdminUser = Depends(require_permission("disaster.update")),
+    db: Session = Depends(get_db),
+):
+    event = db.execute(
+        select(DisasterEvent).where(
+            DisasterEvent.slug == slug,
+            DisasterEvent.disaster_type == "forest_fire",
+        )
+    ).scalar_one_or_none()
+    if event is None:
+        raise HTTPException(status_code=404, detail="Wildfire event not found")
+    try:
+        result = wildfire_hotspot_service.sync_event_hotspots(
+            db,
+            event,
+            from_date=payload.from_date if payload else None,
+            to_date=payload.to_date if payload else None,
+        )
+    except firms_service.FirmsRequestError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    audit_service.log_audit(
+        db,
+        admin.id,
+        "wildfire_hotspots.sync",
+        "disaster_event",
+        str(event.id),
+        detail={"slug": slug, "from": result["from"], "to": result["to"], "stored": result["stored"]},
+    )
+    return result
 
 
 @router.get("/disasters/{id}/hotspots")
