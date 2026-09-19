@@ -13,6 +13,9 @@ logger = logging.getLogger(__name__)
 
 CHLORIS_S3_PREFIX = "s3://chloris-app-data/"
 DEFAULT_PRODUCT = "stock"
+PC_STAC_URL = "https://planetarycomputer.microsoft.com/api/stac/v1"
+PC_CHLORIS_COLLECTION = "chloris-biomass"
+PC_CHLORIS_YEAR_RANGE = (2003, 2019)
 
 
 @dataclass(frozen=True)
@@ -31,7 +34,9 @@ def is_chloris_configured() -> bool:
     status = chloris_config_status()
     has_direct_path = status["has_data_path"] or _has_direct_download_url()
     has_api_path = status["has_organization_id"] and (status["has_id_token"] or status["has_refresh_token"])
-    return bool(has_direct_path or has_api_path)
+    # The public Planetary Computer collection is a usable fallback when a
+    # licensed Chloris reporting unit has not been configured.
+    return bool(has_direct_path or has_api_path or status["has_planetary_computer_fallback"])
 
 
 def chloris_config_status() -> dict[str, Any]:
@@ -45,6 +50,7 @@ def chloris_config_status() -> dict[str, Any]:
         "has_refresh_token": bool(settings.chloris_refresh_token),
         "has_data_path": bool(settings.chloris_data_path),
         "has_direct_download_url": _has_direct_download_url(),
+        "has_planetary_computer_fallback": is_planetary_computer_available(),
     }
 
 
@@ -74,22 +80,102 @@ def resolve_chloris_download(product: str = DEFAULT_PRODUCT, year: int | None = 
             metadata={"source": "direct_env_url"},
         )
 
-    data_path = _get_data_path()
-    downloads_url = _join_url(data_path, "downloads.json")
-    downloads = _request_json(downloads_url)
-    entry = _select_download(downloads, normalized_product, year)
-    url = entry.get("url")
-    if not url:
+    # Prefer the licensed Chloris reporting-unit download when configured.
+    # If it is not available, use the public annual collection hosted by
+    # Microsoft's Planetary Computer. This keeps the dataset selectable on a
+    # fresh install while preserving the higher-resolution licensed path.
+    licensed_error: Exception | None = None
+    try:
+        data_path = _get_data_path()
+        downloads_url = _join_url(data_path, "downloads.json")
+        downloads = _request_json(downloads_url)
+        entry = _select_download(downloads, normalized_product, year)
+        url = entry.get("url")
+        if not url:
+            raise ValueError(
+                f"Chloris downloads.json tidak memiliki field url untuk product='{normalized_product}'."
+            )
+
+        return ChlorisDownload(
+            url=_to_https_url(str(url)),
+            product=normalized_product,
+            date=str(entry.get("date")) if entry.get("date") is not None else None,
+            format=str(entry.get("format")) if entry.get("format") is not None else None,
+            metadata=entry,
+        )
+    except Exception as exc:  # noqa: BLE001 - public STAC fallback is attempted below
+        licensed_error = exc
+
+    if normalized_product != DEFAULT_PRODUCT:
         raise ValueError(
-            f"Chloris downloads.json tidak memiliki field url untuk product='{normalized_product}'."
+            f"Chloris product '{normalized_product}' belum tersedia pada fallback Planetary Computer. "
+            f"Licensed resolver error: {licensed_error}"
+        ) from licensed_error
+
+    try:
+        return _resolve_planetary_computer_download(year)
+    except Exception as pc_error:  # noqa: BLE001 - include both setup failures in the API error
+        raise ValueError(
+            "Chloris licensed download tidak dapat diakses dan fallback Planetary Computer juga gagal. "
+            f"Licensed error: {licensed_error}; Planetary Computer error: {pc_error}"
+        ) from pc_error
+
+
+def is_planetary_computer_available() -> bool:
+    """Return whether the public Chloris STAC fallback can be attempted."""
+    try:
+        import planetary_computer  # noqa: F401
+        import pystac_client  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _resolve_planetary_computer_download(year: int | None = None) -> ChlorisDownload:
+    """Resolve a signed annual Chloris biomass COG from Planetary Computer."""
+    if not is_planetary_computer_available():
+        raise ValueError("Dependency pystac-client/planetary-computer belum terpasang.")
+
+    from pystac_client import Client
+    import planetary_computer
+
+    requested_year = int(year) if year is not None else PC_CHLORIS_YEAR_RANGE[1]
+    if requested_year < PC_CHLORIS_YEAR_RANGE[0] or requested_year > PC_CHLORIS_YEAR_RANGE[1]:
+        raise ValueError(
+            f"Planetary Computer Chloris hanya menyediakan tahun {PC_CHLORIS_YEAR_RANGE[0]}-"
+            f"{PC_CHLORIS_YEAR_RANGE[1]}; tahun yang diminta: {requested_year}."
         )
 
+    client = Client.open(PC_STAC_URL)
+    start = f"{requested_year}-01-01T00:00:00Z"
+    end = f"{requested_year}-12-31T23:59:59Z"
+    items = list(client.search(
+        collections=[PC_CHLORIS_COLLECTION],
+        datetime=f"{start}/{end}",
+    ).items())
+    if not items:
+        raise ValueError(f"Tidak ada item STAC Chloris untuk tahun {requested_year}.")
+
+    item = sorted(items, key=lambda candidate: str(candidate.datetime or ""), reverse=True)[0]
+    asset = item.assets.get("biomass") or item.assets.get("biomass_wm")
+    if asset is None:
+        raise ValueError(f"Item STAC Chloris '{item.id}' tidak memiliki asset biomass.")
+
+    signed_asset = planetary_computer.sign(asset)
+    item_year = item.datetime.year if item.datetime else requested_year
     return ChlorisDownload(
-        url=_to_https_url(str(url)),
-        product=normalized_product,
-        date=str(entry.get("date")) if entry.get("date") is not None else None,
-        format=str(entry.get("format")) if entry.get("format") is not None else None,
-        metadata=entry,
+        url=signed_asset.href,
+        product=DEFAULT_PRODUCT,
+        date=str(item_year),
+        format="cog",
+        metadata={
+            "source": "planetary_computer_stac",
+            "collection": PC_CHLORIS_COLLECTION,
+            "item_id": item.id,
+            "year": item_year,
+            "asset": "biomass",
+            "license": "CC-BY-NC-SA-4.0",
+        },
     )
 
 

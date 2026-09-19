@@ -1024,8 +1024,7 @@ def _pick_carbon_dataset(payload: dict[str, Any], message: str, datasets: list[d
 
 def _dataset_replacement(key: str) -> str | None:
     replacements = {
-        "ESA_CCI": "ESA_CCI_SATIO_AGB",
-        "GLOBAL_MANGROVE_WATCH_AGB": "HANSEN_TREECOVER_AGB_PROXY",
+        "ESA_CCI": "ESA_CCI_BIOMASS_V7_COG",
         "GEDI_L4A_MONTHLY": "GEDI_L4B_STACK",
     }
     return replacements.get(key)

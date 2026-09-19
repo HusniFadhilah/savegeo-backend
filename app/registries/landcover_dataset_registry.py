@@ -423,6 +423,7 @@ LAND_COVER_DATASET_OPTIONS: dict[str, dict] = {
         "accuracy":            "Mengikuti karakteristik Dynamic World untuk label kelas; gunakan confidence threshold untuk memfilter piksel rendah keyakinan.",
         "attribution":         "GeoSave Engine, Copernicus CDSE, Google Dynamic World/WRI",
         "class_schema":        "DYNAMIC_WORLD_9_CLASS",
+        "alias_of":            "Dynamic_World",
     },
     "ESRI_LandCover": {
         "name":                "ESRI 10m Annual LULC v3 (GEE Community Catalog)",
@@ -478,6 +479,7 @@ LAND_COVER_DATASET_OPTIONS: dict[str, dict] = {
         "attribution":         "Esri, Impact Observatory",
         "class_schema":        "ESRI_9_CLASS",
         "description":         "Official Living Atlas item. Updated to 2025 as of 2026-04-23.",
+        "alias_of":             "ESRI_LandCover",
     },
     "MODIS_LandCover": {
         "name":                "MODIS MCD12Q1 IGBP",
@@ -585,6 +587,8 @@ LAND_COVER_DATASET_OPTIONS: dict[str, dict] = {
         "limitations":         [],
         "model":               "Region-dependent SAR backscatter thresholding on ALOS PALSAR/PALSAR-2 mosaics using FAO forest definition.",
         "accuracy":            "Classification accuracy checked with in-situ photos and high-resolution optical satellite images; no single global OA stated on GEE catalog.",
+        "deprecated":           True,
+        "replacement_key":      "JAXA_FNF4",
     },
     "JAXA_FNF4": {
         "name":                "JAXA PALSAR Forest/Non-Forest 4-class",
@@ -657,6 +661,7 @@ LAND_COVER_DATASET_OPTIONS: dict[str, dict] = {
         "accuracy":            "Mengikuti dokumentasi dan metodologi MapBiomas Indonesia LANDY.",
         "attribution":         "MapBiomas Indonesia / Auriga Nusantara",
         "class_schema":        "MAPBIOMAS_INDONESIA_LANDY",
+        "alias_of":            "MapBiomas_Indonesia",
     },
     "DEA_Mangroves": {
         "name":                "Digital Earth Australia Mangroves Landsat (ArcGIS Living Atlas)",
@@ -747,6 +752,8 @@ LAND_COVER_DATASET_OPTIONS: dict[str, dict] = {
         "accuracy":            "Overall accuracy 72.8% reported in the FROM-GLC10 paper (Chen et al. 2019). Validation against 38,400 reference samples globally.",
         "attribution":         "Department of Earth System Science, Tsinghua University",
         "class_schema":        "FROM_GLC10_10CLASS",
+        "deprecated":           True,
+        "replacement_key":      "ESRI_LandCover",
     },
     "GLAD_GLCLUC": {
         "name":                "GLAD Annual Global Land Use/Land Cover (Potapov et al. 2022)",
@@ -908,6 +915,9 @@ def get_dataset_list(
             "requires_auth":      info.get("requires_auth", False),
             "supports_summary":   info.get("supports_summary", True),
             "supports_transition":info.get("supports_transition", True),
+            "deprecated":        bool(info.get("deprecated", False)),
+            "replacement_key":   info.get("replacement_key"),
+            "alias_of":          info.get("alias_of"),
             "official_url":       info.get("official_url"),
             "limitations":        info.get("limitations", []),
             "arcgis_item_id":     info.get("arcgis_item_id"),

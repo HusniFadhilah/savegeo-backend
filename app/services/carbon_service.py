@@ -119,6 +119,9 @@ def get_carbon_dataset_list(
             "resolution": meta.get("resolution"),
             "year": meta.get("year"),
             "year_range": meta.get("year_range"),
+            "available_years": meta.get("available_years"),
+            "deprecated": bool(meta.get("deprecated", False)),
+            "replacement_key": meta.get("replacement_key"),
             "description": meta.get("description"),
             "attribution": meta.get("attribution"),
             "limitations": meta.get("limitations", []),
@@ -133,21 +136,192 @@ def get_carbon_dataset_list(
 
 def _dataset_runtime_status(key: str, meta: dict) -> dict:
     """Return lightweight runtime availability metadata for dataset pickers."""
+    if meta.get("ingestion_method") == "mask_only":
+        return {
+            "is_configured": False,
+            "requires_configuration": False,
+            "availability_error": "Dataset ini hanya mask extent, bukan raster AGB/carbon yang dapat dianalisis.",
+        }
     if key == "CHLORIS_AGB_STOCK" or meta.get("ingestion_method") == "chloris_downloads_index":
         from app.services.chloris_service import is_chloris_configured
 
         configured = is_chloris_configured()
         return {
             "is_configured": configured,
-            "requires_configuration": True,
+            "requires_configuration": not configured,
             "availability_error": None
             if configured
             else (
-                "Isi CHLORIS_AGB_STOCK_URL atau CHLORIS_DATA_PATH. Alternatif: "
-                "CHLORIS_ORGANIZATION_ID + CHLORIS_REFRESH_TOKEN/CHLORIS_ID_TOKEN."
+                "Isi CHLORIS_AGB_STOCK_URL atau CHLORIS_DATA_PATH, atau pastikan "
+                "dependency pystac-client dan planetary-computer tersedia untuk "
+                "fallback Planetary Computer. Alternatif: CHLORIS_ORGANIZATION_ID "
+                "+ CHLORIS_REFRESH_TOKEN/CHLORIS_ID_TOKEN."
             ),
         }
     return {"is_configured": True, "requires_configuration": False, "availability_error": None}
+
+
+def _aoi_bbox_and_geometry(aoi: dict) -> tuple[tuple[float, float, float, float], dict | None]:
+    """Return a WGS84 bbox and optional GeoJSON geometry for local rasters."""
+    if aoi.get("geojson"):
+        payload = aoi["geojson"]
+        if payload.get("type") == "Feature":
+            geometry = payload.get("geometry")
+        elif payload.get("type") == "FeatureCollection":
+            geometry = {
+                "type": "GeometryCollection",
+                "geometries": [feature["geometry"] for feature in payload.get("features", [])],
+            }
+        else:
+            geometry = payload
+        if not geometry:
+            raise AnalysisError("AOI GeoJSON tidak memiliki geometry.", 400)
+
+        coordinates: list[float] = []
+
+        def collect(value):
+            if isinstance(value, dict):
+                if "coordinates" in value:
+                    collect(value["coordinates"])
+                if "geometries" in value:
+                    collect(value["geometries"])
+                return
+            if isinstance(value, (list, tuple)):
+                if len(value) >= 2 and all(isinstance(v, (int, float)) for v in value[:2]):
+                    coordinates.extend([float(value[0]), float(value[1])])
+                    return
+                for child in value:
+                    collect(child)
+
+        collect(geometry.get("coordinates"))
+        if len(coordinates) < 4:
+            raise AnalysisError("AOI GeoJSON coordinates tidak valid.", 400)
+        lons = coordinates[0::2]
+        lats = coordinates[1::2]
+        return (min(lons), min(lats), max(lons), max(lats)), geometry
+
+    return (
+        float(aoi["west"]), float(aoi["south"]),
+        float(aoi["east"]), float(aoi["north"]),
+    ), None
+
+
+def _local_aoi_areas_ha(data: dict, bbox: tuple[float, float, float, float], geometry: dict | None) -> tuple[float, float, float]:
+    """Compute AOI areas locally so COG-only analysis does not call EE getInfo()."""
+    from pyproj import Geod
+    from shapely.geometry import box, shape
+
+    geod = Geod(ellps="WGS84")
+    original_geometry = shape(geometry) if geometry is not None else box(*bbox)
+    original_area = abs(geod.geometry_area_perimeter(original_geometry)[0]) / 10000.0
+    bbox_area = abs(geod.geometry_area_perimeter(box(*bbox))[0]) / 10000.0
+    calculation_area = original_area if data.get("clip_to_aoi", True) and geometry is not None else bbox_area
+    return original_area, original_area, calculation_area
+
+
+def _analyze_local_reference_only(
+    data: dict,
+    dataset_info: dict,
+    dataset_meta: dict,
+    dataset_year: int,
+    roi_original,
+    roi_for_calculation,
+    roi_for_filtering,
+    calculation_mode: str,
+    vis_min: int,
+    vis_max: int,
+    vis_palette: list[str],
+    db: Session,
+) -> dict:
+    """Calculate reference-only statistics from a tiled/global COG without GEE."""
+    import numpy as np
+    from rasterio.features import geometry_mask
+    from rasterio.warp import transform_geom
+    from app.providers.local_raster_provider import GridSpec, load_carbon_reference_to_grid
+
+    bbox, geometry = _aoi_bbox_and_geometry(data["aoi"])
+    resolution = float(dataset_meta.get("resolution") or 100)
+    grid = GridSpec(bbox, resolution_m=resolution)
+    labels, load_info = load_carbon_reference_to_grid(dataset_info["key"], grid, year=dataset_year)
+
+    valid = np.isfinite(labels)
+    if geometry is not None:
+        geometry_projected = transform_geom("EPSG:4326", grid.crs, geometry)
+        inside = geometry_mask([geometry_projected], out_shape=grid.shape, transform=grid.transform, invert=True)
+        valid &= inside
+    values = labels[valid]
+    if values.size == 0:
+        raise AnalysisError(
+            f"Dataset '{dataset_info['key']}' tidak memiliki nilai valid pada AOI.",
+            422,
+            extra={"dataset": dataset_info["key"]},
+        )
+
+    mean_carbon = float(np.mean(values))
+    std_carbon = float(np.std(values))
+    min_carbon = float(np.min(values))
+    max_carbon = float(np.max(values))
+    original_area, filtering_area, calculation_area = _local_aoi_areas_ha(data, bbox, geometry)
+    total_carbon_tons = mean_carbon * calculation_area
+    co2_factor = config_service.get_analysis_defaults(db)["carbon_co2_factor"]
+    stats_out = {
+        "mean": round(mean_carbon, 2),
+        "std_dev": round(std_carbon, 2),
+        "min": round(min_carbon, 2),
+        "max": round(max_carbon, 2),
+    }
+    ref_vis_params = {
+        "min": dataset_info.get("vis_min", vis_min),
+        "max": dataset_info.get("vis_max", vis_max),
+        "palette": dataset_info.get("vis_palette", vis_palette),
+    }
+    return {
+        "carbon_estimated": {
+            "tile_url": None,
+            "statistics": stats_out,
+            "unit": dataset_info.get("unit", "Mg C/ha"),
+            "vis_params": ref_vis_params,
+            "inference_mode": "reference_only",
+        },
+        "carbon_reference": {
+            "tile_url": None,
+            "name": dataset_info["name"],
+            "full_name": dataset_info["full_name"],
+            "year": load_info.get("label_year", dataset_info.get("year")),
+            "resolution": dataset_info.get("resolution"),
+            "unit": dataset_info.get("unit", "Mg C/ha"),
+            "target_pool": dataset_info.get("target_pool"),
+            "gee_id": None,
+            "service_url": dataset_info.get("service_url"),
+            "provider_type": dataset_info.get("provider_type", "external_raster"),
+            "is_temporal": dataset_info.get("is_temporal", False),
+            "requested_year": dataset_info.get("requested_year"),
+            "description": dataset_info["description"],
+            "vis_params": ref_vis_params,
+            "statistics": stats_out,
+            "load_info": load_info,
+        },
+        "area_info": {
+            "calculation_mode": calculation_mode,
+            "original_aoi_area_ha": round(original_area, 2),
+            "filtering_area_ha": round(filtering_area, 2),
+            "calculation_area_ha": round(calculation_area, 2),
+            "total_carbon_tons": round(total_carbon_tons, 2),
+            "carbon_dioxide_equivalent_tons": round(total_carbon_tons * co2_factor, 2),
+            "description": "Mode reference-only: statistik dihitung langsung dari COG referensi lokal, tanpa model estimasi SAVEGEO.",
+        },
+        "model_info": {
+            "model_name": "reference_only",
+            "algorithm": "direct_cog_raster",
+            "calculation_mode": calculation_mode,
+            "display_mode": "reference_only",
+            "scale": resolution,
+            "reference_dataset": dataset_info["key"],
+            "reference_dataset_year": load_info.get("label_year", dataset_info.get("year")),
+            "target_pool": dataset_info.get("target_pool"),
+            "analysis_year": int(data.get("year")),
+        },
+    }
 
 
 # ─────────────────────────────────────────────
@@ -253,7 +427,14 @@ def analyze_carbon(db: Session, data: dict) -> dict:
     dataset_year = int(data.get("dataset_year", 2010))
     reference_dataset = data.get("reference_dataset", "WCMC")
     reference_only = bool(data.get("reference_only")) or (
-        reference_dataset == "CHLORIS_AGB_STOCK" and not model_name
+        not model_name
+        and (
+                reference_dataset == "CHLORIS_AGB_STOCK"
+                or (
+                    reference_dataset in CARBON_EXTERNAL_REGISTRY
+                    and get_external_carbon_meta(reference_dataset).get("ingestion_method") == "cog_rasterio"
+                )
+        )
     )
     vis_min = int(data.get("vis_min", config_service.get_analysis_defaults(db)["carbon_vis_min"]))
     vis_max = int(data.get("vis_max", config_service.get_analysis_defaults(db)["carbon_vis_max"]))
@@ -306,6 +487,27 @@ def analyze_carbon(db: Session, data: dict) -> dict:
         and _external_ref_meta is not None
         and _external_ref_meta.get("ingestion_method") in {"cloud_geotiff_ee", "chloris_downloads_index"}
     )
+    if (
+        reference_only
+        and _is_external_ref
+        and _external_ref_meta is not None
+        and _external_ref_meta.get("ingestion_method") == "cog_rasterio"
+    ):
+        return _analyze_local_reference_only(
+            data=data,
+            dataset_info=dataset_info,
+            dataset_meta=_external_ref_meta,
+            dataset_year=dataset_year,
+            roi_original=roi_original,
+            roi_for_calculation=roi_for_calculation,
+            roi_for_filtering=roi_for_filtering,
+            calculation_mode=calculation_mode,
+            vis_min=vis_min,
+            vis_max=vis_max,
+            vis_palette=vis_palette,
+            db=db,
+        )
+
     if not _is_arcgis_ref and not _is_external_ref:
         carbon_reference = load_carbon_reference_ee(reference_dataset, dataset_year=dataset_year, roi=roi_for_calculation)
     elif _is_cloud_geotiff_ee_ref:

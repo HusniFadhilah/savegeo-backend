@@ -187,6 +187,8 @@ CARBON_DATASET_REGISTRY: dict[str, dict] = {
         "transform":   "multiply_0.47",
         "description": "ESA CCI AGB via sat-io community GEE asset. AGB band in Mg biomass/ha × 0.47.",
         "notes":       "Community asset — verify band name with bandNames() before production use. May not be accessible in all GEE projects.",
+        "deprecated":  True,
+        "replacement_key": "ESA_CCI_BIOMASS_V7_COG",
     },
     # Legacy proxy — kept for backward compatibility. Use GEDI or ESA_CCI instead.
     "Simard": {
@@ -205,6 +207,8 @@ CARBON_DATASET_REGISTRY: dict[str, dict] = {
         "transform":   "multiply_2.0",
         "description": "Legacy Hansen tree cover × 2.0 proxy. Not a real biomass dataset. Retained for backward compatibility.",
         "notes":       "DEPRECATED. Use GEDI, ESA_CCI, or SPAWN for actual biomass reference.",
+        "deprecated":  True,
+        "replacement_key": "CTREES_AGB_100M",
     },
 }
 # fmt: on
@@ -289,8 +293,8 @@ CARBON_ARCGIS_REGISTRY: dict[str, dict] = {
 
 # ─────────────────────────────────────────────
 # External / Open-Data raster carbon datasets
-# provider_type = "external_raster" → stats via HTTP REST/WCS/COG,
-# tiles NOT available in current implementation (explicit error returned).
+# provider_type = "external_raster" → stats via HTTP REST/WCS/COG;
+# COG entries use AOI-windowed reads and expose no GEE tile URL.
 # ─────────────────────────────────────────────
 # fmt: off
 CARBON_EXTERNAL_REGISTRY: dict[str, dict] = {
@@ -326,30 +330,32 @@ CARBON_EXTERNAL_REGISTRY: dict[str, dict] = {
     "GLOBAL_MANGROVE_WATCH_AGB": {
         "key":              "GLOBAL_MANGROVE_WATCH_AGB",
         "provider_type":    "external_raster",
-        "name":             "GMW Mangrove AGB Carbon",
-        "full_name":        "JAXA Global Mangrove Watch — Aboveground Biomass Carbon (2020, 25 m)",
+        "name":             "GMW Mangrove Extent (mask only)",
+        "full_name":        "JAXA Global Mangrove Watch — extent/change mask (1996-2020, 25 m)",
         "service_url":      None,
         "source_url":       "https://www.eorc.jaxa.jp/ALOS/en/dataset/gmw_e.htm",
-        "band":             "agb",
-        "unit":             "Mg C/ha",
-        "target_pool":      "mangrove_aboveground_biomass_carbon",
+        "band":             "extent",
+        "unit":             "binary mask",
+        "target_pool":      "mangrove_extent_mask",
         "resolution":       25,
         "year":             2020,
         "year_range":       [1996, 2020],
         "time_aware":       False,
-        "transform":        "multiply_0.47",  # Mg biomass/ha → Mg C/ha
-        "description":      "JAXA Global Mangrove Watch 2020 AGB at 25 m. Mangrove/coastal ecosystems only — not valid for terrestrial forest carbon. Carbon = AGB × 0.47.",
+        "transform":        "none",
+        "description":      "JAXA Global Mangrove Watch is an extent/change mask, not an above-ground biomass raster. Keep it for mangrove masking only; use CTREES_AGB_100M or a verified mangrove AGB product for carbon density.",
         "attribution":      "JAXA / Global Mangrove Watch Consortium",
         "limitations":      [
             "Mangrove ecosystems only — results invalid for terrestrial forest areas.",
-            "Point sampling requires rasterio + COG access; not available without optional dependency.",
-            "No tile rendering without rasterio or GEE re-ingestion.",
+            "This registry entry is not a biomass/carbon reference and cannot produce Mg C/ha statistics.",
+            "No direct AGB download is configured; do not select it for carbon estimation.",
         ],
         "vis_min":          0,
-        "vis_max":          150,
+        "vis_max":          1,
         "vis_palette":      ["f7fcfd","e0ecf4","bfd3e6","9ebcda","8c96c6","88419d","6e016b"],
-        "ingestion_method": "cog_rasterio",
-        "training_capable": False,  # requires rasterio + COG; not bundled
+        "training_capable": False,
+        "deprecated":       True,
+        "replacement_key":  "CTREES_AGB_100M",
+        "ingestion_method": "mask_only",
     },
     # ── Experimental / 2026 ─────────────────────────────────────────────────
     "ESA_BIOMASS_2026": {
@@ -404,34 +410,42 @@ CARBON_EXTERNAL_REGISTRY: dict[str, dict] = {
         "service_url":      "https://app.chloris.earth/api/reportingUnit/",
         "source_url":       "https://app.chloris.earth/",
         # Optional override: set CHLORIS_AGB_STOCK_URL or CHLORIS_STOCK_URL to
-        # a direct HTTPS/gs:// GeoTIFF. Otherwise the adapter resolves
-        # CHLORIS_DATA_PATH/downloads.json, or dataPath from the Chloris API.
+        # a direct HTTPS/gs:// GeoTIFF. Otherwise the adapter first resolves a
+        # licensed Chloris downloads.json and then falls back to the public
+        # Planetary Computer chloris-biomass STAC collection.
         "raster_url":       None,
         "band":             "stock",
         "output_band":      "agb",
         "unit":             "Mg C/ha",
         "target_pool":      "aboveground_biomass_carbon",
-        "resolution":       30,
-        "year":             2025,
-        "year_range":       [2000, 2025],
+        "resolution":       4633,
+        "year":             2019,
+        "year_range":       [2003, 2019],
         "time_aware":       True,
         "transform":        "multiply_0.47",
+        # The open STAC stock asset stores tonnes of biomass per pixel. It is
+        # converted to Mg C/ha after loading; licensed Chloris rasters retain
+        # the x0.47 biomass-to-carbon transform above.
+        "planetary_computer_transform": "tonnes_per_pixel_to_mg_c_ha",
         "ingestion_method": "chloris_downloads_index",
         "chloris_product":  "stock",
-        "requires_auth":    True,
-        "experimental":     True,
+        "requires_auth":    False,
+        "experimental":     False,
         "training_capable": False,
         "description":      (
-            "Chloris annual above-ground biomass stock GeoTIFF resolved from the "
-            "licensed Chloris reporting unit downloads index. The stock product is "
-            "converted to carbon with x0.47 for comparison with AGB carbon models."
+            "Chloris annual above-ground biomass stock. The backend prefers a "
+            "licensed Chloris reporting-unit GeoTIFF when configured and otherwise "
+            "loads the public Planetary Computer chloris-biomass STAC asset "
+            "(2003-2019, ~4.6 km). Open stock values are converted from tonnes per "
+            "pixel to Mg C/ha using a 0.47 carbon fraction."
         ),
-        "attribution":      "Chloris Geospatial",
+        "attribution":      "Chloris Geospatial / Microsoft Planetary Computer",
         "limitations":      [
-            "Requires a Chloris license/API credentials and a reporting unit with downloadable GeoTIFFs.",
-            "Earth Engine loadGeoTIFF can only load URLs it can fetch; if Chloris returns a private URL, set CHLORIS_AGB_STOCK_URL to an accessible signed/public GeoTIFF.",
+            "The public Planetary Computer fallback covers 2003-2019 at circa 4.6 km; licensed Chloris reporting units may provide other years/resolutions.",
+            "The public collection is licensed CC BY-NC-SA-4.0 and is for non-commercial/share-alike use; review the license before production use.",
+            "Earth Engine loadGeoTIFF must be able to fetch the signed COG URL; direct URLs must be accessible from Earth Engine.",
             "Uses above-ground biomass stock only; belowground and soil carbon are not included.",
-            "Availability and native resolution depend on the licensed Chloris reporting unit and year.",
+            "Open stock values are per pixel, then normalized to Mg C/ha using pixel area and a 0.47 carbon fraction.",
         ],
         "vis_min":          0,
         "vis_max":          250,
@@ -458,6 +472,7 @@ CARBON_EXTERNAL_REGISTRY: dict[str, dict] = {
         "time_aware":       False,
         "transform":        "multiply_0.94",  # % cover × 2.0 Mg biomass/ha × 0.47 C fraction ≈ × 0.94
         "description":      "Hansen GFC v1.11 treecover2000 band as AGB carbon proxy. Forest cover (%) × 0.94 ≈ Mg C/ha. S2 spectral features correlate strongly with tree cover — expected R² 0.4–0.6. PROXY: not a calibrated biomass map.",
+        "notes":            "Retained as a first-class reference for existing Hansen-compatible models. Use CTREES_AGB_100M for new calibrated biomass workflows; do not mix model targets across datasets.",
         "attribution":      "Hansen/UMD/Google/USGS/NASA — Global Forest Change v1.11 (2023)",
         "limitations":      [
             "AGB PROXY only — treecover × 2.0 Mg/ha × 0.47 C fraction; not a validated biomass measurement.",
@@ -491,6 +506,7 @@ CARBON_EXTERNAL_REGISTRY: dict[str, dict] = {
         "resolution":       100,
         "year":             2020,
         "year_range":       [2010, 2020],
+        "available_years":  [2010, 2017, 2018, 2019, 2020],
         "time_aware":       False,
         "transform":        "multiply_0.47",  # ESA CCI band is Mg biomass/ha -> Mg C/ha
         "description":      (
@@ -513,11 +529,89 @@ CARBON_EXTERNAL_REGISTRY: dict[str, dict] = {
         "nodata":           0,
         "ingestion_method": "cog_rasterio",
         "training_capable": True,
+        "deprecated":       True,
+        "replacement_key":  "ESA_CCI_BIOMASS_V7_COG",
+    },
+    "ESA_CCI_BIOMASS_V7_COG": {
+        "key":              "ESA_CCI_BIOMASS_V7_COG",
+        "provider_type":    "external_raster",
+        "name":             "ESA CCI Biomass v7 (COG)",
+        "full_name":        "ESA CCI Aboveground Biomass v7.0 — public COG (CEDA)",
+        "service_url":      None,
+        "tile_url_template": "https://dap.ceda.ac.uk/neodc/esacci/biomass/data/agb/maps/v7.0/geotiff/{year}/{tile_id}_ESACCI-BIOMASS-L4-AGB-MERGED-100m-{year}-fv7.0.tif?download=1",
+        "is_tiled":         True,
+        "tile_size_deg":    10,
+        "source_url":       "https://catalogue.ceda.ac.uk/uuid/6429d1aafe1e43b9b414e4a5a7f8b903/",
+        "band":             "agb",
+        "unit":             "Mg C/ha",
+        "target_pool":      "aboveground_biomass_carbon",
+        "resolution":       100,
+        "year":             2024,
+        "year_range":       [2005, 2024],
+        "available_years":  [2005, 2006, 2007, 2008, 2009, 2010, 2011, 2012, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024],
+        "time_aware":       True,
+        "transform":        "multiply_0.47",
+        "description":      (
+            "ESA CCI Biomass v7.0 annual forest above-ground biomass maps. "
+            "Global 100 m GeoTIFF tiles are read directly from the public CEDA archive "
+            "and converted from Mg biomass/ha to Mg C/ha."
+        ),
+        "attribution":      "ESA Climate Change Initiative Biomass / CEDA",
+        "limitations":      [
+            "Maps are available for 2005-2012 and 2015-2024; 2013-2014 are not available.",
+            "Forest woody above-ground biomass only; do not interpret as belowground or soil carbon.",
+            "CEDA archive access is public but remains subject to the ESA CCI Biomass terms and citation requirements.",
+            "No GEE tile rendering; AOI statistics use windowed COG reads.",
+        ],
+        "vis_min":          0,
+        "vis_max":          300,
+        "vis_palette":      ["f7fcf5","e5f5e0","c7e9c0","a1d99b","74c476","41ab5d","238b45","006d2c","00441b"],
+        "nodata":           0,
+        "ingestion_method": "cog_rasterio",
+        "training_capable": True,
+    },
+    "CTREES_AGB_100M": {
+        "key":              "CTREES_AGB_100M",
+        "provider_type":    "external_raster",
+        "name":             "CTrees Global AGB",
+        "full_name":        "CTrees Global Aboveground Biomass Density (100 m)",
+        "service_url":      None,
+        "global_url_template": "https://ctrees-agb-100m-global.s3.us-west-2.amazonaws.com/cogs/global_agb_100m_landsat0024_all_{year}_densenet_l1_agb_mosaic_100m_base_cd_ts.tif",
+        "uncertainty_url_template": "https://ctrees-agb-100m-global.s3.us-west-2.amazonaws.com/cogs/global_agb_100m_landsat0024_all_{year}_densenet_l1_agb_mosaic_100m_base_cd_ts_uncertainty_sem.tif",
+        "source_url":       "https://registry.opendata.aws/ctrees-agb-100m-global/",
+        "band":             "agb",
+        "unit":             "Mg C/ha",
+        "target_pool":      "aboveground_biomass_carbon",
+        "resolution":       100,
+        "year":             2025,
+        "year_range":       [2000, 2025],
+        "available_years":  list(range(2000, 2026)),
+        "time_aware":       True,
+        # Raw CTrees COG values are int16 Mg biomass/ha scaled by 10.
+        "transform":        "divide_10_multiply_0.47",
+        "description":      (
+            "CTrees global above-ground biomass density, annual 2000-2025 at 100 m. "
+            "Public COGs are read with HTTP range requests over the requested AOI, "
+            "then converted from scaled biomass to Mg C/ha."
+        ),
+        "attribution":      "CTrees / Yang, Saatchi et al.",
+        "limitations":      [
+            "Each global COG is tens of gigabytes; only AOI windows should be read.",
+            "AGB above-ground stock only; uncertainty is available as a separate COG asset.",
+            "Raw values use a scale factor of 10 and nodata=-9999 before conversion.",
+        ],
+        "vis_min":          0,
+        "vis_max":          300,
+        "vis_palette":      ["f7fcf5","e5f5e0","c7e9c0","a1d99b","74c476","41ab5d","238b45","006d2c","00441b"],
+        "nodata":           -9999,
+        "ingestion_method": "cog_rasterio",
+        "training_capable": True,
     },
 }
 # fmt: on
 
-# Keys exposed for training CLI choices (excludes deprecated Simard)
+# Keys exposed for training CLI choices. Deprecated keys remain here so
+# existing model metadata can still be resolved; the UI labels them legacy.
 TRAINING_DATASET_KEYS: list[str] = [
     "WCMC",
     "ESA_CCI",
@@ -537,6 +631,8 @@ TRAINING_DATASET_KEYS: list[str] = [
     "SOILGRIDS_SOC_30CM",
     "HANSEN_TREECOVER_AGB_PROXY",
     "ESA_CCI_BIOMASS_COG",
+    "ESA_CCI_BIOMASS_V7_COG",
+    "CTREES_AGB_100M",
     "CHLORIS_AGB_STOCK",
 ]
 
@@ -592,20 +688,24 @@ def load_external_carbon_reference_ee(
         or os.getenv(f"{key.upper()}_URL")
         or meta.get("raster_url")
     )
+    resolved_metadata: dict = {}
     if not raster_url and ingestion_method == "chloris_downloads_index":
         from app.services.chloris_service import resolve_chloris_download
 
         try:
-            raster_url = resolve_chloris_download(
+            resolved = resolve_chloris_download(
                 product=meta.get("chloris_product", "stock"),
                 year=dataset_year,
-            ).url
+            )
+            raster_url = resolved.url
+            resolved_metadata = resolved.metadata
         except Exception as exc:  # noqa: BLE001 - surface a user-actionable setup error
             raise ValueError(
                 f"Could not resolve Chloris download for '{key}'. "
                 "Set CHLORIS_AGB_STOCK_URL/CHLORIS_STOCK_URL directly, or configure "
                 "CHLORIS_DATA_PATH, or configure CHLORIS_ORGANIZATION_ID plus "
-                "CHLORIS_REFRESH_TOKEN/CHLORIS_ID_TOKEN. Original error: "
+                "CHLORIS_REFRESH_TOKEN/CHLORIS_ID_TOKEN. The public Planetary Computer "
+                "fallback requires pystac-client and planetary-computer. Original error: "
                 f"{exc}"
             ) from exc
 
@@ -625,12 +725,26 @@ def load_external_carbon_reference_ee(
             f"Verify the URI is a public Cloud-Optimized GeoTIFF. Original error: {load_err}"
         ) from load_err
 
+    if resolved_metadata.get("source") == "planetary_computer_stac":
+        # The STAC collection declares 2147483647 as the uint32 nodata value
+        # for the annual stock asset. Mask it before converting units so a
+        # missing pixel cannot become an extreme carbon-density outlier.
+        img = img.updateMask(img.neq(2147483647))
+
     if roi is not None:
         img = img.clip(roi)
 
     transform = meta.get("transform", "none")
+    if resolved_metadata.get("source") == "planetary_computer_stac":
+        transform = meta.get("planetary_computer_transform", transform)
     if transform == "multiply_0.47":
         img = img.multiply(0.47).rename("agb")
+    elif transform == "tonnes_per_pixel_to_mg_c_ha":
+        # Planetary Computer's open Chloris stock asset is documented as
+        # tonnes of biomass per pixel. Convert to Mg C/ha for the common
+        # carbon-analysis contract used by this service.
+        pixel_area_ha = ee.Image.pixelArea().divide(10000)
+        img = img.multiply(0.47).divide(pixel_area_ha).rename("agb")
     elif transform == "multiply_2.0":
         img = img.multiply(2.0).rename("agb")
     elif transform.startswith("multiply_"):

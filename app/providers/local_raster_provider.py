@@ -8,10 +8,10 @@ signed STAC asset href is just an HTTPS URL rasterio can open the same way
 as a local path).
 
 Also implements `load_carbon_reference_to_grid()`: non-GEE label ingestion
-for the tiled-COG carbon reference datasets in CARBON_EXTERNAL_REGISTRY
-(HANSEN_TREECOVER_AGB_PROXY, ESA_CCI_BIOMASS_COG) — mosaics whichever 10x10
-degree tiles intersect the target grid, applies nodata/lossyear masking and
-the registry's unit transform.
+for the tiled/global-COG carbon reference datasets in CARBON_EXTERNAL_REGISTRY
+(HANSEN_TREECOVER_AGB_PROXY, ESA_CCI_BIOMASS_COG, ESA_CCI_BIOMASS_V7_COG,
+CTREES_AGB_100M) — reads only the AOI window, applies nodata/lossyear masking,
+and applies the registry's unit transform.
 
 Requires: rasterio (already installed, 1.4.4). No new dependency.
 """
@@ -178,6 +178,8 @@ def _apply_transform_array(arr: np.ndarray, transform: str) -> np.ndarray:
     (that one is scalar-only: `if value is None` breaks on ndarrays)."""
     if transform == "divide_10":
         return arr / 10.0
+    if transform == "divide_10_multiply_0.47":
+        return (arr / 10.0) * 0.47
     if transform == "multiply_0.47":
         return arr * 0.47
     if transform == "multiply_0.94":
@@ -236,17 +238,18 @@ def load_carbon_reference_to_grid(
     transform. Returns (label_array[H,W] in Mg C/ha with NaN outside
     coverage, info dict with n_tiles_used/transform/unit for provenance).
 
-    Supported today: HANSEN_TREECOVER_AGB_PROXY, ESA_CCI_BIOMASS_COG.
+    Supported today: HANSEN_TREECOVER_AGB_PROXY, ESA_CCI_BIOMASS_COG,
+    ESA_CCI_BIOMASS_V7_COG, and CTREES_AGB_100M.
     """
     from carbon_dataset_registry import CARBON_EXTERNAL_REGISTRY
 
     meta = CARBON_EXTERNAL_REGISTRY.get(dataset_key)
     if meta is None:
         raise ValueError(f"'{dataset_key}' not found in CARBON_EXTERNAL_REGISTRY")
-    if not meta.get("is_tiled"):
+    if not meta.get("is_tiled") and not meta.get("global_url_template"):
         raise NotImplementedError(
-            f"load_carbon_reference_to_grid only supports tiled COG datasets currently; "
-            f"'{dataset_key}' has is_tiled={meta.get('is_tiled')}"
+            f"load_carbon_reference_to_grid only supports tiled/global COG datasets currently; "
+            f"'{dataset_key}' has no tile_url_template or global_url_template"
         )
 
     if dataset_key == "HANSEN_TREECOVER_AGB_PROXY":
@@ -260,13 +263,25 @@ def load_carbon_reference_to_grid(
             url_builder, grid, nodata=meta.get("nodata"), resampling="bilinear",
             lossyear_url_builder=loss_builder,
         )
-    elif dataset_key == "ESA_CCI_BIOMASS_COG":
+    elif dataset_key in {"ESA_CCI_BIOMASS_COG", "ESA_CCI_BIOMASS_V7_COG"}:
         target_year = year or meta.get("year", 2020)
-        nearest_year = min(_CEDA_AVAILABLE_YEARS, key=lambda y: abs(y - target_year))
+        available_years = meta.get("available_years") or _CEDA_AVAILABLE_YEARS
+        nearest_year = min(available_years, key=lambda y: abs(y - target_year))
         if nearest_year != target_year:
-            logger.info(f"ESA_CCI_BIOMASS_COG: year {target_year} unavailable, using nearest available {nearest_year}")
+            logger.info(f"{dataset_key}: year {target_year} unavailable, using nearest available {nearest_year}")
         url_builder = lambda la, lo: _ceda_tile_url(la, lo, meta["tile_url_template"], nearest_year)
         mosaic, n_tiles = _mosaic_tiled_cog(url_builder, grid, nodata=meta.get("nodata"), resampling="bilinear")
+    elif dataset_key == "CTREES_AGB_100M":
+        target_year = year or meta.get("year", 2025)
+        available_years = meta.get("available_years") or []
+        nearest_year = min(available_years, key=lambda y: abs(y - target_year)) if available_years else target_year
+        if nearest_year != target_year:
+            logger.info(f"CTREES_AGB_100M: year {target_year} unavailable, using nearest available {nearest_year}")
+        url = meta["global_url_template"].format(year=nearest_year)
+        mosaic = load_raster_to_grid(url, grid, resampling="bilinear", src_nodata=meta.get("nodata"))
+        n_tiles = 1 if mosaic is not None else 0
+        if mosaic is None:
+            mosaic = np.full(grid.shape, np.nan, dtype=np.float32)
     else:
         raise NotImplementedError(f"No tiled-COG mosaicking logic implemented for '{dataset_key}' yet")
 
@@ -284,7 +299,11 @@ def load_carbon_reference_to_grid(
         "transform": meta.get("transform", "none"),
         "unit": meta.get("unit"),
         "target_pool": meta.get("target_pool"),
-        "label_year": (nearest_year if dataset_key == "ESA_CCI_BIOMASS_COG" else meta.get("year")),
+        "label_year": (
+            nearest_year
+            if dataset_key in {"ESA_CCI_BIOMASS_COG", "ESA_CCI_BIOMASS_V7_COG", "CTREES_AGB_100M"}
+            else meta.get("year")
+        ),
     }
 
 

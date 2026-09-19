@@ -22,7 +22,10 @@ def _init_from_key_file(client_email: str, key_path: str) -> bool:
     import ee
 
     credentials = ee.ServiceAccountCredentials(client_email, key_path)
-    ee.Initialize(credentials)
+    # Supplying the configured Cloud project avoids relying on the default
+    # Earth Engine discovery context, which can time out for service accounts.
+    project_id = get_settings().gee_project_id or None
+    ee.Initialize(credentials, project=project_id)
     return True
 
 
