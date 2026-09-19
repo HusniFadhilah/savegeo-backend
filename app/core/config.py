@@ -155,6 +155,11 @@ class Settings(BaseSettings):
     carbon_vis_max: float = 200
     carbon_vis_palette: str = "440154,414487,2a788e,22a884,7ad151,fde725"
     carbon_legend_bins: int = 6
+    # On-disk cache for remote COG map tiles. Empty uses a sibling directory
+    # next to upload_dir so containers can mount it as a persistent volume.
+    carbon_tile_cache_dir: str = ""
+    carbon_tile_cache_ttl_seconds: int = 86_400
+    carbon_dataset_health_ttl_seconds: int = 900
 
     @field_validator("debug", mode="before")
     @classmethod

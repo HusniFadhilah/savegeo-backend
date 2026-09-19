@@ -477,7 +477,7 @@ CARBON_EXTERNAL_REGISTRY: dict[str, dict] = {
         "limitations":      [
             "AGB PROXY only — treecover × 2.0 Mg/ha × 0.47 C fraction; not a validated biomass measurement.",
             "treecover2000 baseline — does not account for post-2000 deforestation without lossyear masking.",
-            "No tile rendering; sampled statistics only.",
+            "Tile peta dirender melalui proxy COG backend; statistik tetap dihitung dari pembacaan AOI.",
             "nodata=255 (non-land pixels); 0 = non-forest land, valid label.",
         ],
         "vis_min":          0,
@@ -521,7 +521,7 @@ CARBON_EXTERNAL_REGISTRY: dict[str, dict] = {
             ("Tile naming is SW-corner-based (e.g. N00E000, S10E110) — ocean/no-data tiles simply "
              "don't exist server-side (404), handled as a missing tile, not an error."),
             "Available years: 2010, 2017, 2018, 2019, 2020 only (no continuous annual coverage).",
-            "No tile rendering; sampled/gridded statistics only via this non-GEE pipeline.",
+            "Tile peta dirender melalui proxy COG backend; statistik dihitung dari pembacaan AOI windowed.",
         ],
         "vis_min":          0,
         "vis_max":          300,
@@ -561,7 +561,7 @@ CARBON_EXTERNAL_REGISTRY: dict[str, dict] = {
             "Maps are available for 2005-2012 and 2015-2024; 2013-2014 are not available.",
             "Forest woody above-ground biomass only; do not interpret as belowground or soil carbon.",
             "CEDA archive access is public but remains subject to the ESA CCI Biomass terms and citation requirements.",
-            "No GEE tile rendering; AOI statistics use windowed COG reads.",
+            "Tile peta dirender melalui proxy COG backend; AOI statistics use windowed COG reads.",
         ],
         "vis_min":          0,
         "vis_max":          300,

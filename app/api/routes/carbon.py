@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 
 import ee
 import requests
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_ee
@@ -23,10 +25,17 @@ UPSTREAM_CONNECTION_ERROR = (
 )
 
 
-@router.post("/analyze/carbon", dependencies=[Depends(get_current_app_viewer), Depends(require_ee)])
-def analyze_carbon(data: dict = Body(...), db: Session = Depends(get_db)):
+@router.post("/analyze/carbon", dependencies=[Depends(get_current_app_viewer)])
+def analyze_carbon(request: Request, data: dict = Body(...), db: Session = Depends(get_db)):
     if "aoi" not in data:
         raise HTTPException(status_code=400, detail="Missing required field: aoi")
+    from app.registries.carbon_dataset_registry import get_external_carbon_meta
+    reference_dataset = str(data.get("reference_dataset") or "")
+    external_meta = get_external_carbon_meta(reference_dataset)
+    direct_reference = bool(data.get("reference_only")) or not data.get("model_name")
+    requires_ee = not (direct_reference and external_meta and external_meta.get("ingestion_method") in {"cog_rasterio", "soilgrids_rest"})
+    if requires_ee and not getattr(request.app.state, "ee_initialized", False):
+        raise HTTPException(status_code=503, detail="Google Earth Engine belum diinisialisasi. Cek kredensial di Admin Panel.")
     try:
         return carbon_service.analyze_carbon(db, data)
     except AnalysisError as e:
@@ -95,3 +104,42 @@ def analyze_carbon_delta(data: dict = Body(...), db: Session = Depends(get_db)):
     except Exception as e:  # noqa: BLE001
         logger.error(f"Carbon delta error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/carbon/reference-tiles/{dataset_key}/{z}/{x}/{y}.png")
+def carbon_reference_tile(
+    dataset_key: str,
+    z: int,
+    x: int,
+    y: int,
+    year: int | None = Query(default=None),
+    min: float | None = Query(default=None),
+    max: float | None = Query(default=None),
+):
+    """Serve XYZ tiles for public COG carbon references (Hansen/ESA/CTrees)."""
+    from app.providers.local_raster_provider import render_carbon_reference_tile
+    from app.registries.carbon_dataset_registry import get_external_carbon_meta
+
+    meta = get_external_carbon_meta(dataset_key)
+    if not meta or meta.get("ingestion_method") != "cog_rasterio":
+        raise HTTPException(status_code=404, detail="Dataset tidak memiliki tile COG publik")
+    try:
+        content = render_carbon_reference_tile(dataset_key, z, x, y, year=year, vis_min=min, vis_max=max)
+    except Exception as exc:  # noqa: BLE001 - return a stable tile response, log details server-side
+        logger.warning("Carbon reference tile failed for %s/%s/%s/%s: %s", dataset_key, z, x, y, exc)
+        raise HTTPException(status_code=503, detail="Tile referensi sedang tidak tersedia") from exc
+    if content is None:
+        # A transparent PNG keeps Leaflet from retrying ocean/missing tiles.
+        return Response(content=b"", status_code=204, media_type="image/png", headers={"Cache-Control": "public, max-age=3600"})
+    return Response(content=content, media_type="image/png", headers={"Cache-Control": "public, max-age=86400"})
+
+
+@router.get("/carbon/datasets/health")
+def carbon_dataset_health(refresh: bool = False):
+    """Return cached reachability checks for public external carbon sources."""
+    from app.registries.carbon_dataset_registry import CARBON_EXTERNAL_REGISTRY
+
+    return {
+        "datasets": [carbon_service.check_external_dataset_health(key, refresh=refresh) for key in CARBON_EXTERNAL_REGISTRY],
+        "checked_at": datetime.now(UTC).isoformat(),
+    }

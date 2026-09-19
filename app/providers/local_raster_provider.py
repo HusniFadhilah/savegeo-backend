@@ -19,13 +19,55 @@ from __future__ import annotations
 
 import logging
 import math
+import hashlib
+import os
 from collections.abc import Callable
+from pathlib import Path
+import threading
+import time
 
 import numpy as np
 
 from app.providers.feature_engineering_non_gee import NonGeeStack
 
 logger = logging.getLogger(__name__)
+_CARBON_TILE_CACHE_LOCK = threading.RLock()
+
+
+def _carbon_tile_cache_path(cache_key: str) -> Path:
+    """Return the persistent cache path for one rendered tile."""
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    configured = str(getattr(settings, "carbon_tile_cache_dir", "") or "").strip()
+    root = Path(configured) if configured else Path(settings.upload_dir).resolve().parent / "carbon_tile_cache"
+    root.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256(cache_key.encode("utf-8")).hexdigest()
+    return root / digest[:2] / f"{digest}.png"
+
+
+def _read_cached_carbon_tile(cache_key: str) -> bytes | None:
+    from app.core.config import get_settings
+
+    path = _carbon_tile_cache_path(cache_key)
+    ttl = max(60, int(getattr(get_settings(), "carbon_tile_cache_ttl_seconds", 86_400)))
+    try:
+        if time.time() - path.stat().st_mtime <= ttl:
+            return path.read_bytes()
+    except OSError:
+        return None
+    return None
+
+
+def _write_cached_carbon_tile(cache_key: str, content: bytes) -> None:
+    path = _carbon_tile_cache_path(cache_key)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(f".{os.getpid()}.tmp")
+        temporary.write_bytes(content)
+        os.replace(temporary, path)
+    except OSError as exc:
+        logger.debug("Could not persist carbon tile cache %s: %s", path, exc)
 
 BBox = tuple[float, float, float, float]  # (west, south, east, north) in EPSG:4326
 
@@ -37,13 +79,18 @@ BBox = tuple[float, float, float, float]  # (west, south, east, north) in EPSG:4
 GDAL_HTTP_OPTS = {
     "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
     "CPL_VSIL_CURL_ALLOWED_EXTENSIONS": ".tif,.TIF,.tiff",
-    "GDAL_HTTP_MULTIPLEX": "YES",
-    "GDAL_HTTP_VERSION": "2",
+    # GDAL/libcurl on the Windows deployment occasionally terminates the
+    # process while opening large public COGs over HTTP/2. HTTP/1.1 keeps
+    # range reads stable; connection reuse remains enabled by the VSI cache.
+    "GDAL_HTTP_MULTIPLEX": "NO",
+    "GDAL_HTTP_VERSION": "1.1",
     "VSI_CACHE": True,
     "VSI_CACHE_SIZE": 200_000_000,
     "GDAL_CACHEMAX": 200,
     "GDAL_HTTP_MAX_RETRY": 3,
     "GDAL_HTTP_RETRY_DELAY": 1,
+    "GDAL_HTTP_TIMEOUT": 30,
+    "GDAL_HTTP_CONNECTTIMEOUT": 10,
 }
 
 
@@ -161,7 +208,7 @@ def _enumerate_tile_origins(bbox: BBox, tile_size_deg: int = 10) -> list[tuple[i
 
 
 def _hansen_tile_url(lat_origin: int, lon_origin: int, template: str, tile_size_deg: int = 10) -> str:
-    from providers.external_carbon_provider import _tile_key
+    from app.providers.external_carbon_provider import _tile_key
     lat_str, lon_str = _tile_key(lat_origin + tile_size_deg / 2, lon_origin + tile_size_deg / 2, tile_size_deg)
     return template.format(lat_tile=lat_str, lon_tile=lon_str)
 
@@ -305,6 +352,138 @@ def load_carbon_reference_to_grid(
             else meta.get("year")
         ),
     }
+
+
+def _xyz_bounds_wgs84(z: int, x: int, y: int) -> BBox:
+    """Return the geographic bounds of an XYZ/Web-Mercator tile."""
+    n = 2 ** z
+    x = x % n
+    west = x / n * 360.0 - 180.0
+    east = (x + 1) / n * 360.0 - 180.0
+    north = math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * y / n))))
+    south = math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * (y + 1) / n))))
+    return west, south, east, north
+
+
+def _carbon_tile_urls(dataset_key: str, bbox: BBox, year: int | None) -> list[str]:
+    """Build only the public COG URLs intersecting one map tile."""
+    from app.registries.carbon_dataset_registry import CARBON_EXTERNAL_REGISTRY
+
+    meta = CARBON_EXTERNAL_REGISTRY[dataset_key]
+    urls: list[str] = []
+    if dataset_key == "HANSEN_TREECOVER_AGB_PROXY":
+        for lat_o, lon_o in _enumerate_tile_origins(bbox, int(meta.get("tile_size_deg", 10))):
+            urls.append(_hansen_tile_url(lat_o, lon_o, meta["tile_url_template"], int(meta.get("tile_size_deg", 10))))
+    elif dataset_key in {"ESA_CCI_BIOMASS_COG", "ESA_CCI_BIOMASS_V7_COG"}:
+        available = meta.get("available_years") or [meta.get("year", 2020)]
+        target = year or meta.get("year", 2020)
+        selected = min(available, key=lambda item: abs(item - target))
+        for lat_o, lon_o in _enumerate_tile_origins(bbox, int(meta.get("tile_size_deg", 10))):
+            urls.append(_ceda_tile_url(lat_o, lon_o, meta["tile_url_template"], selected))
+    elif dataset_key == "CTREES_AGB_100M":
+        available = meta.get("available_years") or [meta.get("year", 2025)]
+        target = year or meta.get("year", 2025)
+        selected = min(available, key=lambda item: abs(item - target))
+        urls.append(meta["global_url_template"].format(year=selected))
+    return urls
+
+
+def render_carbon_reference_tile(
+    dataset_key: str,
+    z: int,
+    x: int,
+    y: int,
+    year: int | None = None,
+    vis_min: float | None = None,
+    vis_max: float | None = None,
+) -> bytes | None:
+    """Render a 256px transparent PNG from a public COG reference.
+
+    Reads only the requested Web-Mercator window through WarpedVRT, so global
+    CTrees files remain practical and no full raster is downloaded.
+    """
+    from io import BytesIO
+
+    from PIL import Image
+    import rasterio
+    from rasterio.enums import Resampling
+    from rasterio.transform import from_bounds
+    from rasterio.vrt import WarpedVRT
+
+    from app.registries.carbon_dataset_registry import CARBON_EXTERNAL_REGISTRY
+
+    if dataset_key not in CARBON_EXTERNAL_REGISTRY or z < 0 or z > 22 or y < 0 or y >= 2 ** z:
+        return None
+    cache_key = f"{dataset_key}:{z}:{x % (2 ** z)}:{y}:{year}:{vis_min}:{vis_max}"
+    with _CARBON_TILE_CACHE_LOCK:
+        cached = _read_cached_carbon_tile(cache_key)
+    if cached is not None:
+        return cached
+    meta = CARBON_EXTERNAL_REGISTRY[dataset_key]
+    bbox = _xyz_bounds_wgs84(z, x, y)
+    n = 2 ** z
+    x = x % n
+    r = 6378137.0
+    west, south, east, north = bbox
+    mercator_bounds = (
+        math.radians(west) * r,
+        math.log(math.tan(math.pi / 4 + math.radians(south) / 2)) * r,
+        math.radians(east) * r,
+        math.log(math.tan(math.pi / 4 + math.radians(north) / 2)) * r,
+    )
+    dst_transform = from_bounds(*mercator_bounds, 256, 256)
+    canvas = np.full((256, 256), np.nan, dtype=np.float32)
+    urls = _carbon_tile_urls(dataset_key, bbox, year)
+    if not urls:
+        return None
+
+    for url in urls:
+        try:
+            with rasterio.Env(**GDAL_HTTP_OPTS), rasterio.open(url) as src:
+                src_nodata = meta.get("nodata") if meta.get("nodata") is not None else src.nodata
+                with WarpedVRT(
+                    src,
+                    crs="EPSG:3857",
+                    transform=dst_transform,
+                    width=256,
+                    height=256,
+                    resampling=Resampling.bilinear,
+                    src_nodata=src_nodata,
+                    nodata=np.nan,
+                ) as vrt:
+                    raw = vrt.read(1).astype(np.float32)
+                raw = _apply_transform_array(raw, meta.get("transform", "none"))
+                valid = np.isfinite(raw)
+                canvas[np.isnan(canvas) & valid] = raw[np.isnan(canvas) & valid]
+                if np.isfinite(canvas).all():
+                    break
+        except Exception as exc:  # noqa: BLE001 - missing ocean tiles are expected
+            logger.debug("carbon tile source unavailable (%s): %s", url, exc)
+
+    if not np.isfinite(canvas).any():
+        return None
+    lo = float(vis_min if vis_min is not None else meta.get("vis_min", 0))
+    hi = float(vis_max if vis_max is not None else meta.get("vis_max", 300))
+    if hi <= lo:
+        hi = lo + 1
+    normalized = np.clip((canvas - lo) / (hi - lo), 0, 1)
+    palette = meta.get("vis_palette") or ["ffffff", "006d2c"]
+    rgb = np.zeros((256, 256, 3), dtype=np.uint8)
+    for channel in range(3):
+        stops = np.array([int(color.lstrip("#")[channel * 2:channel * 2 + 2], 16) for color in palette], dtype=float)
+        positions = normalized * (len(stops) - 1)
+        low = np.floor(positions).astype(int).clip(0, len(stops) - 1)
+        high = np.ceil(positions).astype(int).clip(0, len(stops) - 1)
+        fraction = positions - low
+        rgb[:, :, channel] = np.where(np.isfinite(canvas), stops[low] * (1 - fraction) + stops[high] * fraction, 0).astype(np.uint8)
+    alpha = np.where(np.isfinite(canvas), 220, 0).astype(np.uint8)
+    image = Image.fromarray(np.dstack([rgb, alpha]), mode="RGBA")
+    output = BytesIO()
+    image.save(output, format="PNG", optimize=True)
+    content = output.getvalue()
+    with _CARBON_TILE_CACHE_LOCK:
+        _write_cached_carbon_tile(cache_key, content)
+    return content
 
 
 if __name__ == "__main__":

@@ -11,9 +11,11 @@ from __future__ import annotations
 import itertools
 import json
 import logging
+import time
 from datetime import UTC, datetime
 
 import ee
+import requests
 from sqlalchemy.orm import Session
 
 from app.db.models.uploaded_model import UploadedModel
@@ -51,6 +53,7 @@ from app.services.gee_common import (
 )
 
 logger = logging.getLogger(__name__)
+_DATASET_HEALTH_CACHE: dict[str, tuple[float, dict]] = {}
 
 
 def active_carbon_model_compatibility(db: Session) -> dict[str, list[str]]:
@@ -114,6 +117,8 @@ def get_carbon_dataset_list(
             "full_name": meta.get("full_name"),
             "module": "carbon",
             "provider_type": provider_type,
+            "ingestion_method": meta.get("ingestion_method"),
+            "reference_only_capable": meta.get("ingestion_method") in {"cog_rasterio", "soilgrids_rest", "cloud_geotiff_ee", "chloris_downloads_index"} or key in CARBON_ARCGIS_REGISTRY or key in CARBON_DATASET_REGISTRY,
             "unit": meta.get("unit"),
             "target_pool": meta.get("target_pool"),
             "resolution": meta.get("resolution"),
@@ -159,6 +164,62 @@ def _dataset_runtime_status(key: str, meta: dict) -> dict:
             ),
         }
     return {"is_configured": True, "requires_configuration": False, "availability_error": None}
+
+
+def check_external_dataset_health(key: str, refresh: bool = False) -> dict:
+    """Check a public reference endpoint with a short, cached request."""
+    from app.core.config import get_settings
+
+    meta = CARBON_EXTERNAL_REGISTRY.get(key)
+    if not meta:
+        return {"key": key, "status": "unknown", "error": "Dataset bukan external raster"}
+    now = time.time()
+    ttl = max(60, int(getattr(get_settings(), "carbon_dataset_health_ttl_seconds", 900)))
+    cached = _DATASET_HEALTH_CACHE.get(key)
+    if cached and not refresh and now - cached[0] <= ttl:
+        return cached[1]
+
+    url = meta.get("service_url")
+    if meta.get("global_url_template"):
+        years = meta.get("available_years") or [meta.get("year", 2025)]
+        url = meta["global_url_template"].format(year=max(years))
+    elif meta.get("tile_url_template"):
+        template = meta["tile_url_template"]
+        if "{tile_id}" in template:
+            url = template.format(tile_id="N00E100", year=max(meta.get("available_years") or [meta.get("year", 2020)]))
+        else:
+            url = template.format(lat_tile="00N", lon_tile="100E")
+    if not url:
+        result = {"key": key, "status": "unknown", "error": "Tidak ada URL health check"}
+        _DATASET_HEALTH_CACHE[key] = (now, result)
+        return result
+
+    started = time.perf_counter()
+    try:
+        response = requests.head(url, timeout=5, allow_redirects=True)
+        if response.status_code in {405, 501}:
+            response = requests.get(url, headers={"Range": "bytes=0-1023"}, timeout=5, stream=True)
+        ok = 200 <= response.status_code < 400
+        result = {
+            "key": key,
+            "status": "healthy" if ok else "unavailable",
+            "http_status": response.status_code,
+            "latency_ms": round((time.perf_counter() - started) * 1000, 1),
+            "checked_at": datetime.now(UTC).isoformat(),
+            "url": url,
+            "error": None if ok else f"HTTP {response.status_code}",
+        }
+    except requests.RequestException as exc:
+        result = {
+            "key": key,
+            "status": "unavailable",
+            "latency_ms": round((time.perf_counter() - started) * 1000, 1),
+            "checked_at": datetime.now(UTC).isoformat(),
+            "url": url,
+            "error": str(exc),
+        }
+    _DATASET_HEALTH_CACHE[key] = (now, result)
+    return result
 
 
 def _aoi_bbox_and_geometry(aoi: dict) -> tuple[tuple[float, float, float, float], dict | None]:
@@ -275,19 +336,24 @@ def _analyze_local_reference_only(
         "max": dataset_info.get("vis_max", vis_max),
         "palette": dataset_info.get("vis_palette", vis_palette),
     }
+    label_year = load_info.get("label_year", dataset_info.get("year"))
+    reference_tile_url = (
+        f"/api/carbon/reference-tiles/{dataset_info['key']}/{{z}}/{{x}}/{{y}}.png"
+        f"?year={label_year}&min={ref_vis_params['min']}&max={ref_vis_params['max']}"
+    )
     return {
         "carbon_estimated": {
-            "tile_url": None,
+            "tile_url": reference_tile_url,
             "statistics": stats_out,
             "unit": dataset_info.get("unit", "Mg C/ha"),
             "vis_params": ref_vis_params,
             "inference_mode": "reference_only",
         },
         "carbon_reference": {
-            "tile_url": None,
+            "tile_url": reference_tile_url,
             "name": dataset_info["name"],
             "full_name": dataset_info["full_name"],
-            "year": load_info.get("label_year", dataset_info.get("year")),
+            "year": label_year,
             "resolution": dataset_info.get("resolution"),
             "unit": dataset_info.get("unit", "Mg C/ha"),
             "target_pool": dataset_info.get("target_pool"),
@@ -320,6 +386,126 @@ def _analyze_local_reference_only(
             "reference_dataset_year": load_info.get("label_year", dataset_info.get("year")),
             "target_pool": dataset_info.get("target_pool"),
             "analysis_year": int(data.get("year")),
+        },
+    }
+
+
+def _analyze_external_reference_only(
+    data: dict,
+    dataset_info: dict,
+    dataset_meta: dict,
+    dataset_year: int,
+    db: Session,
+) -> dict:
+    """Analyze REST-backed references without constructing an EE geometry.
+
+    SoilGrids returns SOC concentration and bulk density. We expose the SOC
+    statistics and derive a 0-30 cm stock estimate in Mg C/ha from both layers.
+    """
+    from app.providers.external_carbon_provider import _geojson_to_bbox
+
+    aoi = data["aoi"]
+    aoi_geojson = aoi.get("geojson")
+    if aoi_geojson:
+        bbox = _geojson_to_bbox(aoi_geojson)
+    else:
+        bbox = (float(aoi["west"]), float(aoi["south"]), float(aoi["east"]), float(aoi["north"]))
+        aoi_geojson = {
+            "type": "Polygon",
+            "coordinates": [[
+                [bbox[0], bbox[1]], [bbox[2], bbox[1]],
+                [bbox[2], bbox[3]], [bbox[0], bbox[3]], [bbox[0], bbox[1]],
+            ]],
+        }
+
+    stats = ExternalRasterProvider().get_stats_for_aoi(dataset_meta, aoi_geojson)
+    from pyproj import Geod
+    from shapely.geometry import box, shape
+    from shapely.ops import unary_union
+
+    geod = Geod(ellps="WGS84")
+    geometry_payload = aoi_geojson
+    if aoi_geojson.get("type") == "Feature":
+        geometry_payload = aoi_geojson.get("geometry") or {}
+    elif aoi_geojson.get("type") == "FeatureCollection":
+        geometry_payload = None
+        geometries = [feature.get("geometry") for feature in aoi_geojson.get("features", []) if feature.get("geometry")]
+        if geometries:
+            geometry = unary_union([shape(item) for item in geometries])
+        else:
+            geometry = box(*bbox)
+    if geometry_payload is not None:
+        geometry = shape(geometry_payload)
+    area_ha = abs(geod.geometry_area_perimeter(geometry)[0]) / 10000.0
+    if not data.get("clip_to_aoi", True):
+        area_ha = abs(geod.geometry_area_perimeter(box(*bbox))[0]) / 10000.0
+    stats_out = {key: stats.get(key) for key in ("mean", "std_dev", "min", "max")}
+    stock_mean = stats.get("stock_mean")
+    total_carbon_tons = stock_mean * area_ha if stock_mean is not None else None
+    co2_factor = config_service.get_analysis_defaults(db)["carbon_co2_factor"]
+    vis_params = {
+        "min": dataset_info.get("vis_min", 0),
+        "max": dataset_info.get("vis_max", 80),
+        "palette": dataset_info.get("vis_palette", []),
+    }
+    return {
+        "carbon_estimated": {
+            "tile_url": None,
+            "statistics": stats_out,
+            "unit": dataset_info.get("unit", stats.get("unit", "")),
+            "vis_params": vis_params,
+            "inference_mode": "reference_only",
+        },
+        "carbon_reference": {
+            "tile_url": None,
+            "name": dataset_info["name"],
+            "full_name": dataset_info["full_name"],
+            "year": dataset_info.get("year"),
+            "resolution": dataset_info.get("resolution"),
+            "unit": dataset_info.get("unit", stats.get("unit", "")),
+            "target_pool": dataset_info.get("target_pool"),
+            "gee_id": None,
+            "service_url": dataset_info.get("service_url"),
+            "provider_type": dataset_info.get("provider_type", "external_raster"),
+            "is_temporal": dataset_info.get("is_temporal", False),
+            "requested_year": dataset_year,
+            "description": dataset_info["description"],
+            "vis_params": vis_params,
+            "statistics": stats_out,
+            "load_info": {
+                "method": "soilgrids_rest",
+                "n_samples": stats.get("n_samples"),
+                "derived_stock_mean_mg_c_ha": stock_mean,
+                "derived_stock_n_samples": stats.get("stock_n_samples"),
+            },
+        },
+        "area_info": {
+            "calculation_mode": "clipped_aoi" if data.get("clip_to_aoi", True) else "full_tiles",
+            "original_aoi_area_ha": round(area_ha, 2),
+            "filtering_area_ha": round(area_ha, 2),
+            "calculation_area_ha": round(area_ha, 2),
+            "total_carbon_tons": round(total_carbon_tons, 2) if total_carbon_tons is not None else None,
+            "carbon_dioxide_equivalent_tons": round(total_carbon_tons * co2_factor, 2) if total_carbon_tons is not None else None,
+            "description": "SoilGrids menampilkan SOC (g/kg) dan stok 0-30 cm turunan dari bulk density bdod. Estimasi tidak memasukkan koreksi rock-fragment karena layer tersebut belum diminta.",
+        },
+        "model_info": {
+            "model_name": "reference_only",
+            "algorithm": "soilgrids_rest",
+            "calculation_mode": "reference_only",
+            "display_mode": "reference_only",
+            "scale": dataset_info.get("resolution"),
+            "reference_dataset": dataset_info["key"],
+            "reference_dataset_year": dataset_year,
+            "target_pool": dataset_info.get("target_pool"),
+            "analysis_year": int(data.get("year")),
+        },
+        "data_quality": {
+            "valid_pixel_pct": None,
+            "gap_filled": None,
+            "images_used": stats.get("n_samples"),
+            "coefficient_of_variation_pct": round((stats["std_dev"] / stats["mean"]) * 100, 1) if stats.get("mean") else None,
+            "model_r2": None,
+            "model_rmse": None,
         },
     }
 
@@ -434,6 +620,11 @@ def analyze_carbon(db: Session, data: dict) -> dict:
                     reference_dataset in CARBON_EXTERNAL_REGISTRY
                     and get_external_carbon_meta(reference_dataset).get("ingestion_method") == "cog_rasterio"
                 )
+                or (
+                    reference_dataset in CARBON_EXTERNAL_REGISTRY
+                    and get_external_carbon_meta(reference_dataset).get("ingestion_method") == "soilgrids_rest"
+                )
+                or reference_dataset in CARBON_DATASET_REGISTRY
         )
     )
     vis_min = int(data.get("vis_min", config_service.get_analysis_defaults(db)["carbon_vis_min"]))
@@ -458,6 +649,15 @@ def analyze_carbon(db: Session, data: dict) -> dict:
         )
 
     dataset_info = get_dataset_meta(reference_dataset, dataset_year)
+
+    # SoilGrids is a REST reference and must remain usable when Earth Engine
+    # credentials are unavailable. Handle it before constructing any ee.Geometry.
+    if (
+        reference_only
+        and reference_dataset in CARBON_EXTERNAL_REGISTRY
+        and CARBON_EXTERNAL_REGISTRY[reference_dataset].get("ingestion_method") == "soilgrids_rest"
+    ):
+        return _analyze_external_reference_only(data, dataset_info, CARBON_EXTERNAL_REGISTRY[reference_dataset], dataset_year, db)
 
     _is_arcgis_ref = is_arcgis_carbon_dataset(reference_dataset)
     _arcgis_ref_meta = get_arcgis_carbon_meta(reference_dataset) if _is_arcgis_ref else None

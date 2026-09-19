@@ -26,6 +26,10 @@ logger = logging.getLogger(__name__)
 _AOI_STATS_N_SAMPLES = 80
 # Max retry attempts per point on transient HTTP errors
 _HTTP_RETRIES = 3
+_SOILGRIDS_CACHE_TTL_SECONDS = 3600
+_SOILGRIDS_CACHE_MAX_ITEMS = 1024
+_SOILGRIDS_CACHE: dict[tuple[float, float], tuple[float, float | None]] = {}
+_SOILGRIDS_COMPONENT_CACHE: dict[tuple[float, float], tuple[float, tuple[float | None, float | None]]] = {}
 
 
 # ─────────────────────────────────────────────
@@ -84,11 +88,18 @@ class ExternalRasterProvider:
         bbox = _geojson_to_bbox(aoi_geojson)
         west, south, east, north = bbox
 
-        rng = random.Random(seed)
-        points = [
-            (rng.uniform(west, east), rng.uniform(south, north))
-            for _ in range(n_samples)
-        ]
+        points = _sample_aoi_points(aoi_geojson, bbox, n_samples, seed)
+
+        if meta.get("ingestion_method") == "soilgrids_rest":
+            components = _sample_soilgrids_components(meta, points)
+            values = [value[0] for value in components if value[0] is not None]
+            stock_values = [value[1] for value in components if value[1] is not None]
+            if len(values) < 5:
+                raise RuntimeError(f"External provider '{meta.get('key')}' returned only {len(values)} valid values out of {n_samples} sample points in AOI.")
+            result = _summarize_values(values, meta)
+            if stock_values:
+                result.update(_summarize_values(stock_values, {**meta, "unit": "Mg C/ha"}, prefix="stock_"))
+            return result
 
         raw_values = self.sample_carbon_labels(meta, points)
 
@@ -117,19 +128,45 @@ class ExternalRasterProvider:
         }
 
     def get_tile_url(self, meta: dict, dataset_key: str) -> str | None:
-        """
-        Return a tile URL template for the dataset, or None if not available.
-
-        External raster providers generally do not support per-tile rendering
-        in the current implementation. Returns None with a log message.
-        """
+        """External raster providers expose no direct tile URL here."""
         logger.info(
-            f"Tile rendering not available for external provider '{dataset_key}' "
-            f"(ingestion_method='{meta.get('ingestion_method')}'). "
-            "Only sampled statistics are supported."
+            "Tile rendering not available for external provider '%s' (ingestion_method='%s').",
+            dataset_key,
+            meta.get("ingestion_method"),
         )
         return None
 
+
+def _sample_aoi_points(aoi_geojson: dict, bbox: tuple[float, float, float, float], n_samples: int, seed: int) -> list[tuple[float, float]]:
+    west, south, east, north = bbox
+    rng = random.Random(seed)
+    try:
+        from shapely.geometry import Point, shape
+        geometry_payload = aoi_geojson.get("geometry") if aoi_geojson.get("type") == "Feature" else aoi_geojson
+        geometry = shape(geometry_payload)
+    except Exception:  # noqa: BLE001
+        geometry = None
+    points: list[tuple[float, float]] = []
+    attempts = 0
+    while len(points) < n_samples and attempts < max(n_samples * 20, 100):
+        attempts += 1
+        candidate = (rng.uniform(west, east), rng.uniform(south, north))
+        if geometry is None or geometry.contains(Point(*candidate)) or geometry.touches(Point(*candidate)):
+            points.append(candidate)
+    return points if len(points) >= 5 else [(rng.uniform(west, east), rng.uniform(south, north)) for _ in range(n_samples)]
+
+
+def _summarize_values(values: list[float], meta: dict, prefix: str = "") -> dict:
+    mean_v = sum(values) / len(values)
+    return {
+        f"{prefix}mean": round(mean_v, 3),
+        f"{prefix}std_dev": round(math.sqrt(sum((v - mean_v) ** 2 for v in values) / len(values)), 3),
+        f"{prefix}min": round(min(values), 3),
+        f"{prefix}max": round(max(values), 3),
+        f"{prefix}n_samples": len(values),
+        f"{prefix}unit": meta.get("unit", ""),
+        "provider": meta.get("provider_type"),
+    }
 
 # ─────────────────────────────────────────────
 # SoilGrids REST ingestion
@@ -154,7 +191,18 @@ def _sample_soilgrids(
 
     values: list[float | None] = []
     for lon, lat in points:
+        cache_key = (round(lon, 5), round(lat, 5))
+        cached = _SOILGRIDS_CACHE.get(cache_key)
+        if cached and time.monotonic() - cached[0] < _SOILGRIDS_CACHE_TTL_SECONDS:
+            values.append(cached[1])
+            continue
         val = _soilgrids_point(service_url, lon, lat, depth_weights, total_depth)
+        if len(_SOILGRIDS_CACHE) >= _SOILGRIDS_CACHE_MAX_ITEMS:
+            # Drop the oldest entry without introducing a dependency on a
+            # cache service; this endpoint is also used in local deployments.
+            oldest = min(_SOILGRIDS_CACHE, key=lambda key: _SOILGRIDS_CACHE[key][0])
+            _SOILGRIDS_CACHE.pop(oldest, None)
+        _SOILGRIDS_CACHE[cache_key] = (time.monotonic(), val)
         values.append(val)
         # Polite rate limiting: 10 req/s max recommended by ISRIC
         time.sleep(0.12)
@@ -162,6 +210,76 @@ def _sample_soilgrids(
     valid = sum(1 for v in values if v is not None)
     logger.info(f"SoilGrids sampled {len(points)} points → {valid} valid")
     return values
+
+
+def _sample_soilgrids_components(meta: dict, points: list[tuple[float, float]]) -> list[tuple[float | None, float | None]]:
+    """Return (SOC g/kg, 0-30cm stock Mg C/ha) for each point."""
+    service_url = meta.get("service_url", "https://rest.isric.org/soilgrids/v2.0/properties/query")
+    depths = [("0-5cm", 5), ("5-15cm", 10), ("15-30cm", 15)]
+    values: list[tuple[float | None, float | None]] = []
+    for lon, lat in points:
+        key = (round(lon, 5), round(lat, 5))
+        cached = _SOILGRIDS_COMPONENT_CACHE.get(key)
+        if cached and time.monotonic() - cached[0] < _SOILGRIDS_CACHE_TTL_SECONDS:
+            values.append(cached[1])
+            continue
+        result = _soilgrids_components_point(service_url, lon, lat, depths)
+        if len(_SOILGRIDS_COMPONENT_CACHE) >= _SOILGRIDS_CACHE_MAX_ITEMS:
+            oldest = min(_SOILGRIDS_COMPONENT_CACHE, key=lambda item: _SOILGRIDS_COMPONENT_CACHE[item][0])
+            _SOILGRIDS_COMPONENT_CACHE.pop(oldest, None)
+        _SOILGRIDS_COMPONENT_CACHE[key] = (time.monotonic(), result)
+        values.append(result)
+        time.sleep(0.12)
+    return values
+
+
+def _soilgrids_components_point(
+    service_url: str,
+    lon: float,
+    lat: float,
+    depths: list[tuple[str, int]],
+) -> tuple[float | None, float | None]:
+    params = {
+        "lon": lon,
+        "lat": lat,
+        "property": ["soc", "bdod"],
+        "depth": [label for label, _ in depths],
+        "value": "mean",
+    }
+    for attempt in range(_HTTP_RETRIES):
+        try:
+            response = requests.get(service_url, params=params, timeout=30)
+            if response.status_code == 429:
+                time.sleep(2 ** attempt)
+                continue
+            response.raise_for_status()
+            layers = {layer.get("name"): layer for layer in response.json().get("properties", {}).get("layers", [])}
+            soc_map = _soilgrids_depth_map(layers.get("soc"))
+            bd_map = _soilgrids_depth_map(layers.get("bdod"))
+            soc_values = [soc_map.get(label) for label, _ in depths]
+            valid_soc = [(raw, thickness) for raw, (_, thickness) in zip(soc_values, depths) if raw is not None]
+            soc_gkg = (sum(raw * thickness for raw, thickness in valid_soc) / sum(thickness for _, thickness in valid_soc) / 10.0) if valid_soc else None
+            stock = None
+            if all(soc_map.get(label) is not None and bd_map.get(label) is not None for label, _ in depths):
+                # SOC is dg/kg (÷10 → g/kg); bdod is cg/cm³ (÷100 → g/cm³).
+                stock = sum((soc_map[label] / 10.0) * (bd_map[label] / 100.0) * thickness / 10.0 for label, thickness in depths)
+            return soc_gkg, stock
+        except (requests.RequestException, ValueError, TypeError, KeyError) as exc:
+            if attempt < _HTTP_RETRIES - 1:
+                time.sleep(1.0)
+            else:
+                logger.debug("SoilGrids components (%s,%s) failed: %s", lon, lat, exc)
+    return None, None
+
+
+def _soilgrids_depth_map(layer: dict | None) -> dict[str, float | None]:
+    if not layer:
+        return {}
+    output: dict[str, float | None] = {}
+    for depth in layer.get("depths", []):
+        raw = depth.get("values", {}).get("mean")
+        output[depth.get("label", "")] = float(raw) if raw is not None else None
+    return output
 
 
 def _soilgrids_point(

@@ -19,10 +19,9 @@ from typing import Any
 
 import ee
 import requests
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
-from app.api.deps import require_ee
 from app.core.config import get_settings
 from app.core.temporal import format_rfc3339, utc_now
 from app.core.security import get_current_app_viewer
@@ -220,8 +219,9 @@ def _run_job(job_id: str, job_type: str, payload: dict[str, Any]) -> None:
         db.close()
 
 
-@router.post("/analysis-jobs", dependencies=[Depends(get_current_app_viewer), Depends(require_ee)])
+@router.post("/analysis-jobs", dependencies=[Depends(get_current_app_viewer)])
 def create_analysis_job(
+    request: Request,
     data: dict[str, Any] = Body(...),
     viewer: object = Depends(get_current_app_viewer),
     db: Session = Depends(get_db),
@@ -232,6 +232,19 @@ def create_analysis_job(
         raise HTTPException(status_code=400, detail=f"Unsupported analysis job type: {job_type}")
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Missing required field: payload")
+
+    # Pure local/reference jobs do not need an Earth Engine session. Keep the
+    # gate for all GEE workflows, but allow COG/SoilGrids references to work
+    # during credential outages and in offline deployments.
+    needs_ee = job_type not in {"carbon_local"}
+    if job_type == "carbon":
+        from app.registries.carbon_dataset_registry import get_external_carbon_meta
+        dataset = str(payload.get("reference_dataset") or "")
+        meta = get_external_carbon_meta(dataset)
+        direct = bool(payload.get("reference_only")) or not payload.get("model_name")
+        needs_ee = not (direct and meta and meta.get("ingestion_method") in {"cog_rasterio", "soilgrids_rest"})
+    if needs_ee and not getattr(request.app.state, "ee_initialized", False):
+        raise HTTPException(status_code=503, detail="Google Earth Engine belum diinisialisasi. Cek kredensial di Admin Panel.")
 
     job_id = str(uuid.uuid4())
     try:
