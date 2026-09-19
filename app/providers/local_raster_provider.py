@@ -54,7 +54,9 @@ def get_carbon_tile_metrics() -> dict:
     rendered = int(stats["rendered"])
     stats["average_render_ms"] = round(stats["total_render_ms"] / rendered, 1) if rendered else 0.0
     stats["cache_hit_rate_pct"] = round(stats["cache_hits"] / stats["requests"] * 100, 1) if stats["requests"] else 0.0
-    stats["cache_dir"] = str(getattr(get_settings(), "carbon_tile_cache_dir", "") or "")
+    settings = get_settings()
+    configured = str(getattr(settings, "carbon_tile_cache_dir", "") or "").strip()
+    stats["cache_dir"] = str(Path(configured) if configured else Path(settings.upload_dir).resolve().parent / "carbon_tile_cache")
     return stats
 
 
