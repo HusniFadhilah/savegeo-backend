@@ -445,7 +445,10 @@ def _analyze_local_reference_only(
             "reference_dataset": dataset_info["key"],
             "reference_dataset_year": load_info.get("label_year", dataset_info.get("year")),
             "target_pool": dataset_info.get("target_pool"),
-            "analysis_year": int(data.get("year")),
+            # Reference-only mode has no Sentinel-2 inference year. Report the
+            # selected raster vintage so the result cannot be mistaken for a
+            # model prediction from the current imagery year.
+            "analysis_year": label_year,
         },
     }
 
@@ -560,7 +563,9 @@ def _analyze_external_reference_only(
             "reference_dataset": dataset_info["key"],
             "reference_dataset_year": dataset_year,
             "target_pool": dataset_info.get("target_pool"),
-            "analysis_year": int(data.get("year")),
+            # SoilGrids is a static 2017 product; the Sentinel-2 year is not
+            # used by this direct reference calculation.
+            "analysis_year": dataset_year,
         },
         "data_quality": {
             "valid_pixel_pct": None,
@@ -870,7 +875,11 @@ def analyze_carbon(db: Session, data: dict) -> dict:
                 "calculation_area_ha": round(calculation_area, 2),
                 "total_carbon_tons": round(total_carbon_tons, 2),
                 "carbon_dioxide_equivalent_tons": round(total_carbon_tons * co2_factor, 2),
-                "description": "Mode reference-only: total dihitung langsung dari raster referensi Chloris, tanpa model estimasi SAVEGEO.",
+                "description": (
+                    f"Mode reference-only: total dihitung langsung dari raster "
+                    f"referensi {dataset_info.get('name') or reference_dataset} "
+                    "pada AOI, tanpa model estimasi SAVEGEO."
+                ),
             },
             "model_info": {
                 "model_name": "reference_only",
@@ -881,7 +890,9 @@ def analyze_carbon(db: Session, data: dict) -> dict:
                 "reference_dataset": reference_dataset,
                 "reference_dataset_year": dataset_info.get("year"),
                 "target_pool": dataset_info.get("target_pool"),
-                "analysis_year": year,
+                # No Sentinel-2 inference is performed in reference-only mode;
+                # expose the selected reference vintage as the effective year.
+                "analysis_year": dataset_info.get("year", dataset_year),
             },
             "data_quality": {
                 "valid_pixel_pct": None,
