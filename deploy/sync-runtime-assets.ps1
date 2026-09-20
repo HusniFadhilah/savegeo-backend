@@ -41,10 +41,49 @@ if ($LegacyModelsDir -and (Test-Path $LegacyModelsDir -PathType Container)) {
     $tarArgs += @("-C", $LegacyModelsDir, ".")
 }
 
+# These model artifacts are intentionally outside Git and must travel with
+# the runtime asset bundle. Fail before opening an SSH/scp session if the
+# local bundle is incomplete; otherwise the server can restart successfully
+# while silently losing the GEDI choices from the model picker.
+$requiredModels = @(
+    "gedi_l4a_monthly_s2_dem_hgb_2023.pkl",
+    "gedi_l4a_monthly_s2_dem_hgb_2023.json",
+    "gedi_l4a_monthly_s2_dem_hgb_2023.gee_clf.json",
+    "gedi_l4d_best_cv_model_2023.pkl",
+    "gedi_l4d_best_cv_model_2023.json",
+    "gedi_l4d_ridge_s2_dem_lc_2023.pkl",
+    "gedi_l4d_ridge_s2_dem_lc_2023.json"
+)
+$modelSources = @((Join-Path $backendRoot "var\saved_models"))
+if ($LegacyModelsDir -and (Test-Path $LegacyModelsDir -PathType Container)) {
+    $modelSources += $LegacyModelsDir
+}
+foreach ($required in $requiredModels) {
+    $found = $false
+    foreach ($source in $modelSources) {
+        if (Test-Path (Join-Path $source $required) -PathType Leaf) {
+            $found = $true
+            break
+        }
+    }
+    if (-not $found) {
+        throw "Model runtime wajib tidak ditemukan: $required. Lengkapi var\saved_models atau LegacyModelsDir sebelum upload."
+    }
+}
+Write-Host ("Preflight model runtime lulus: {0} artifact GEDI wajib tersedia." -f $requiredModels.Count)
+
 try {
     Write-Host "Membuat satu arsip runtime aset (transfer hanya meminta password SSH dua kali)..."
     & tar @tarArgs
     if ($LASTEXITCODE -ne 0) { throw "Gagal membuat arsip runtime aset." }
+
+    $archiveEntries = @(tar -tf $archivePath)
+    foreach ($required in $requiredModels) {
+        if (-not ($archiveEntries -match ([regex]::Escape($required) + '$'))) {
+            throw "Arsip runtime tidak memuat model wajib: $required"
+        }
+    }
+    Write-Host ("Preflight arsip lulus: {0} artifact GEDI wajib masuk bundle." -f $requiredModels.Count)
 
     Write-Host "Mengunggah $archiveName..."
     scp -P $DeployPort $archivePath "$remote`:$RemoteBackendDir/$archiveName"
