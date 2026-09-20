@@ -15,7 +15,10 @@ from app.db.models.wildfire_hotspot import WildfireHotspot
 from app.services import firms_service
 
 _INITIAL_SYNC_LOCK = threading.RLock()
-MAX_SYNC_SPAN_DAYS = 31
+# FIRMS area queries return at most ``limit`` rows after all requested date
+# chunks are combined. Keep sync chunks aligned with FIRMS' five-day request
+# window so a busy period cannot discard the older dates before persistence.
+MAX_SYNC_SPAN_DAYS = 4
 MAX_RETURNED_FEATURES = 2000
 
 

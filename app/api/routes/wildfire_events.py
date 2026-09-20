@@ -16,6 +16,16 @@ from app.db.session import get_db
 from app.services import firms_service, wildfire_hotspot_service
 
 router = APIRouter(prefix="/disasters/wildfires", tags=["wildfires"])
+MAX_MAP_FEATURES = 5000
+
+
+def _map_features(features: list[dict]) -> tuple[list[dict], bool]:
+    """Keep map payloads responsive without reducing stored/summary data."""
+    if len(features) <= MAX_MAP_FEATURES:
+        return features, False
+    step = max(1, len(features) // MAX_MAP_FEATURES)
+    sampled = features[::step][:MAX_MAP_FEATURES]
+    return sampled, True
 
 
 def _public_status(event: DisasterEvent) -> str:
@@ -305,8 +315,15 @@ def get_wildfire_hotspots(
 ):
     event = _event(db, slug)
     features, summary, metadata = _stored_wildfire_data(db, event, from_date, to, sensor, confidence)
+    map_features, truncated = _map_features(features)
+    metadata = {
+        **metadata,
+        "total_features": len(features),
+        "returned_features": len(map_features),
+        "truncated_for_map": truncated,
+    }
     return {
-        "features": features,
+        "features": map_features,
         "summary": summary,
         "timeline": summary.get("by_day", []),
         "metadata": metadata,

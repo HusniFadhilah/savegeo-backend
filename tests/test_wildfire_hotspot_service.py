@@ -19,8 +19,13 @@ def test_date_chunks_cover_period_without_gaps():
     chunks = list(wildfire._date_chunks(date(2026, 8, 1), date(2026, 9, 2)))
 
     assert chunks == [
-        (date(2026, 8, 1), date(2026, 9, 1)),
-        (date(2026, 9, 2), date(2026, 9, 2)),
+        (date(2026, 8, 1), date(2026, 8, 5)),
+        (date(2026, 8, 6), date(2026, 8, 10)),
+        (date(2026, 8, 11), date(2026, 8, 15)),
+        (date(2026, 8, 16), date(2026, 8, 20)),
+        (date(2026, 8, 21), date(2026, 8, 25)),
+        (date(2026, 8, 26), date(2026, 8, 30)),
+        (date(2026, 8, 31), date(2026, 9, 2)),
     ]
 
 
@@ -60,7 +65,7 @@ def test_sync_fetches_each_firms_source_and_deduplicates_in_db():
     with patch.object(wildfire.firms_service, "get_fires_for_period", side_effect=fake_fetch) as fetch:
         result = wildfire.sync_event_hotspots(db, event)
 
-    assert fetch.call_count == len(wildfire.firms_service.FIRMS_SOURCE_CATALOG)
+    assert fetch.call_count == 2 * len(wildfire.firms_service.FIRMS_SOURCE_CATALOG)
     assert result["stored"] == len(wildfire.firms_service.FIRMS_SOURCE_CATALOG)
     assert result["from"] == "2026-08-20"
     assert result["to"] == "2026-08-27"
