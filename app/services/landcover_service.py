@@ -53,6 +53,81 @@ _ESRI_COLLECTION_ID = LAND_COVER_DATASET_OPTIONS.get("ESRI_LandCover", {}).get(
 _GEOSAVE_DYNAMIC_WORLD_DATASETS = {"GeoSave_Copernicus_DynamicWorld"}
 
 
+def get_direct_landcover_reference_layer(
+    dataset: str,
+    year: int,
+    start_month: int = 1,
+    end_month: int = 12,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> dict:
+    """Build a global LULC tile layer without AOI statistics."""
+    if dataset not in LAND_COVER_DATASET_OPTIONS:
+        raise AnalysisError(f"Dataset land cover '{dataset}' tidak ditemukan.", 404)
+    meta = LAND_COVER_DATASET_OPTIONS[dataset]
+    if meta.get("provider_type", "").startswith("arcgis") and not meta.get("gee_id"):
+        legend = {
+            str(class_value): {
+                "label": class_info.get("label"),
+                "color": class_info.get("color"),
+                "class_value": int(class_value),
+            }
+            for class_value, class_info in LAND_COVER_LEGENDS.get(dataset, {}).items()
+        }
+        return {
+            "dataset": dataset,
+            "dataset_name": meta.get("name", dataset),
+            "tile_url": f"/api/arcgis/tiles/{dataset}/{{z}}/{{y}}/{{x}}?year={year}",
+            "year": year,
+            "requested_year": year,
+            "resolution": f"{LAND_COVER_NATIVE_SCALE.get(dataset, meta.get('resolution', 30))}m",
+            "provider_type": meta.get("provider_type"),
+            "legend": legend,
+            "direct": True,
+            "statistics_available": False,
+        }
+
+    # A global rectangle is only used to keep the existing dataset loaders'
+    # filterBounds/clip calls valid; no area reduction or AOI statistics run.
+    world = ee.Geometry.Rectangle([-179.999, -85, 179.999, 85], geodesic=False)
+    image, metadata = get_landcover_image(
+        dataset,
+        int(year),
+        world,
+        start_month=start_month,
+        end_month=end_month,
+        start_date=start_date,
+        end_date=end_date,
+        include_diagnostics=False,
+    )
+    visual_image, visual_params = landcover_visual_image(dataset, image)
+    tile = get_tile_url(visual_image, visual_params, metadata.get("dataset_name", dataset))
+    if not tile or not tile.get("tile_url"):
+        raise AnalysisError(f"Tile dataset land cover '{dataset}' tidak tersedia.", 502)
+    legend = {
+        str(class_value): {
+            "label": class_info.get("label"),
+            "color": class_info.get("color"),
+            "class_value": int(class_value),
+        }
+        for class_value, class_info in LAND_COVER_LEGENDS.get(dataset, {}).items()
+    }
+    return {
+        "dataset": dataset,
+        "dataset_name": metadata.get("dataset_name", meta.get("name", dataset)),
+        "tile_url": tile["tile_url"],
+        "year": metadata.get("year"),
+        "requested_year": metadata.get("requested_year", year),
+        "resolution": f"{LAND_COVER_NATIVE_SCALE.get(dataset, meta.get('resolution', 30))}m",
+        "provider_type": metadata.get("provider_type", meta.get("provider_type")),
+        "date_range": metadata.get("date_range"),
+        "legend": legend,
+        "vis_params": visual_params,
+        "direct": True,
+        "statistics_available": False,
+    }
+
+
 def _default_year_max() -> int:
     return datetime.now(UTC).year
 
@@ -190,6 +265,7 @@ def get_landcover_image(
     dw_probability_threshold: float | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
+    include_diagnostics: bool = True,
 ):
     """Return a single class-label image and effective metadata for a LULC dataset.
 
@@ -249,7 +325,7 @@ def get_landcover_image(
             "source_kind": "geosave_cdse_stac" if dataset in _GEOSAVE_DYNAMIC_WORLD_DATASETS else "gee",
             "classification_backend": "Dynamic_World",
             "dw_probability_threshold": dw_probability_threshold,
-            "confidence": _dw_confidence_stats(dw, aoi, LAND_COVER_NATIVE_SCALE.get(dataset, 30), dw_probability_threshold),
+            "confidence": _dw_confidence_stats(dw, aoi, LAND_COVER_NATIVE_SCALE.get(dataset, 30), dw_probability_threshold) if include_diagnostics else None,
             "coverage_note": _dw_coverage_note(dw_start_date, display_end_date or dw_end_date, _dw_size),
         }
 

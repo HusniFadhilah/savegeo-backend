@@ -25,6 +25,28 @@ UPSTREAM_CONNECTION_ERROR = (
 )
 
 
+@router.get("/carbon/reference-layers/{dataset_key}", dependencies=[Depends(get_current_app_viewer)])
+def direct_carbon_reference_layer(
+    dataset_key: str,
+    request: Request,
+    year: int = Query(default=2020),
+    min: float | None = Query(default=None),
+    max: float | None = Query(default=None),
+):
+    """Return a global carbon reference tile layer without an AOI/model."""
+    from app.registries.carbon_dataset_registry import CARBON_ARCGIS_REGISTRY, get_external_carbon_meta
+
+    meta = get_external_carbon_meta(dataset_key)
+    if not (meta and meta.get("ingestion_method") == "cog_rasterio") and dataset_key not in CARBON_ARCGIS_REGISTRY and not getattr(request.app.state, "ee_initialized", False):
+        raise HTTPException(status_code=503, detail="Google Earth Engine belum diinisialisasi untuk dataset ini.")
+    try:
+        return carbon_service.get_direct_carbon_reference_layer(dataset_key, year, vis_min=min, vis_max=max)
+    except AnalysisError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except (ValueError, ee.EEException, requests.RequestException) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @router.post("/analyze/carbon", dependencies=[Depends(get_current_app_viewer)])
 def analyze_carbon(request: Request, data: dict = Body(...), db: Session = Depends(get_db)):
     if "aoi" not in data:

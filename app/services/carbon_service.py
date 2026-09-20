@@ -56,6 +56,66 @@ logger = logging.getLogger(__name__)
 _DATASET_HEALTH_CACHE: dict[str, tuple[float, dict]] = {}
 
 
+def get_direct_carbon_reference_layer(
+    dataset_key: str,
+    dataset_year: int = 2020,
+    vis_min: float | None = None,
+    vis_max: float | None = None,
+    vis_palette: list[str] | None = None,
+) -> dict:
+    """Build a global reference tile layer without AOI statistics/model inference.
+
+    AOI remains required for summaries and totals, but a reference raster can
+    be viewed globally using its native COG, ArcGIS, or Earth Engine tiles.
+    """
+    from app.services.arcgis_helpers import _gee_visualize_params
+
+    meta = get_dataset_meta(dataset_key, dataset_year)
+    ingestion = meta.get("ingestion_method")
+    if ingestion == "soilgrids_rest":
+        raise AnalysisError("SoilGrids hanya menyediakan statistik sampling; pilih AOI untuk memuat nilainya.", 422)
+
+    tile_url = None
+    if ingestion == "cog_rasterio":
+        tile_url = f"/api/carbon/reference-tiles/{dataset_key}/{{z}}/{{x}}/{{y}}.png?year={dataset_year}"
+    elif dataset_key in CARBON_ARCGIS_REGISTRY:
+        tile_url = f"/api/arcgis/tiles/{dataset_key}/{{z}}/{{y}}/{{x}}?year={dataset_year}"
+    else:
+        if ingestion in {"cloud_geotiff_ee", "chloris_downloads_index"}:
+            image = load_external_carbon_reference_ee(dataset_key, dataset_year, roi=None)
+        elif dataset_key in CARBON_DATASET_REGISTRY:
+            image = load_carbon_reference_ee(dataset_key, dataset_year, roi=None)
+        else:
+            raise AnalysisError(f"Dataset '{dataset_key}' tidak mendukung pemuatan langsung.", 422)
+        vis = {
+            "min": vis_min if vis_min is not None else meta.get("vis_min", 0),
+            "max": vis_max if vis_max is not None else meta.get("vis_max", 300),
+            "palette": vis_palette or meta.get("vis_palette") or ["440154", "fde725"],
+        }
+        map_id = image.getMapId(_gee_visualize_params(vis))
+        tile_url = map_id["tile_fetcher"].url_format
+
+    return {
+        "dataset": dataset_key,
+        "dataset_name": meta.get("name") or meta.get("full_name") or dataset_key,
+        "full_name": meta.get("full_name"),
+        "tile_url": tile_url,
+        "year": meta.get("year", dataset_year),
+        "requested_year": dataset_year,
+        "resolution": meta.get("resolution"),
+        "unit": meta.get("unit"),
+        "target_pool": meta.get("target_pool"),
+        "provider_type": meta.get("provider_type"),
+        "vis_params": {
+            "min": vis_min if vis_min is not None else meta.get("vis_min", 0),
+            "max": vis_max if vis_max is not None else meta.get("vis_max", 300),
+            "palette": vis_palette or meta.get("vis_palette") or [],
+        },
+        "direct": True,
+        "statistics_available": False,
+    }
+
+
 def active_carbon_model_compatibility(db: Session) -> dict[str, list[str]]:
     """Return active carbon model names grouped by compatible reference dataset key."""
     grouped: dict[str, list[str]] = {}
