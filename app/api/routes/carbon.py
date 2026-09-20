@@ -38,7 +38,8 @@ def direct_carbon_reference_layer(
     from app.registries.carbon_dataset_registry import CARBON_ARCGIS_REGISTRY, get_external_carbon_meta
 
     meta = get_external_carbon_meta(dataset_key)
-    if not (meta and meta.get("ingestion_method") == "cog_rasterio") and dataset_key not in CARBON_ARCGIS_REGISTRY and not getattr(request.app.state, "ee_initialized", False):
+    direct_without_ee = meta and meta.get("ingestion_method") in {"cog_rasterio", "soilgrids_rest"}
+    if not direct_without_ee and dataset_key not in CARBON_ARCGIS_REGISTRY and not getattr(request.app.state, "ee_initialized", False):
         raise HTTPException(status_code=503, detail="Google Earth Engine belum diinisialisasi untuk dataset ini.")
     try:
         return carbon_service.get_direct_carbon_reference_layer(dataset_key, year, vis_min=min, vis_max=max)
@@ -61,8 +62,11 @@ def analyze_carbon(request: Request, data: dict = Body(...), db: Session = Depen
     from app.registries.carbon_dataset_registry import get_external_carbon_meta
     reference_dataset = str(data.get("reference_dataset") or "")
     external_meta = get_external_carbon_meta(reference_dataset)
-    direct_reference = bool(data.get("reference_only")) or not data.get("model_name")
-    requires_ee = not (direct_reference and external_meta and external_meta.get("ingestion_method") in {"cog_rasterio", "soilgrids_rest"})
+    direct_reference = bool(data.get("reference_only")) or bool(data.get("load_only")) or not data.get("model_name")
+    from app.registries.carbon_dataset_registry import CARBON_ARCGIS_REGISTRY
+    local_reference = external_meta and external_meta.get("ingestion_method") in {"cog_rasterio", "soilgrids_rest"}
+    local_reference = local_reference or reference_dataset in CARBON_ARCGIS_REGISTRY
+    requires_ee = not (direct_reference and local_reference)
     if requires_ee and not getattr(request.app.state, "ee_initialized", False):
         raise HTTPException(status_code=503, detail="Google Earth Engine belum diinisialisasi. Cek kredensial di Admin Panel.")
     try:

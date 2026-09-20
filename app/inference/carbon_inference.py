@@ -36,7 +36,7 @@ class CarbonInferenceEngine:
     """
     
     def __init__(self, model_name: str | None = None, model_path: str | None = None,
-                 cloud_mask_technique: str = "scl"):
+                 cloud_mask_technique: str = "scl", quality_checks: bool = True):
         """
         Initialize inference engine
 
@@ -46,9 +46,14 @@ class CarbonInferenceEngine:
                 gee_common.build_s2_cloud_masked_collection. Set once per
                 engine instance (not per predict_for_region* call) since one
                 engine is reused across a whole analyze_carbon_delta year loop.
+            quality_checks: Run the optional coverage and wider-window gap-fill
+                round trips. Analysis endpoints disable these by default because
+                they add two large reduce/collection requests without changing the
+                prediction itself; callers that need diagnostics can opt in.
         """
         self.registry = ModelRegistry()
         self.cloud_mask_technique = resolve_cloud_mask_technique(cloud_mask_technique)
+        self.quality_checks = bool(quality_checks)
         
         if model_name is None:
             model_name = self.registry.registry.get('default')
@@ -160,6 +165,14 @@ class CarbonInferenceEngine:
         self.last_s2_image_count = sum(self._s2_image_counts)
         composite = collection.median().multiply(0.0001).select(S2_BANDS)
 
+        if not self.quality_checks:
+            # Keep the lightweight prediction path free of extra reduceRegion
+            # and wide-window collection requests. The primary composite is
+            # still fully cloud masked; only optional diagnostics/fill are off.
+            self.last_valid_pixel_pct = None
+            self.last_gap_filled = None
+            return composite
+
         # Data-quality signal: what fraction of the AOI actually has a
         # cloud-free pixel in the *primary* date-range composite, before any
         # gap-fill patches holes with a wider window/looser threshold. A low
@@ -168,7 +181,7 @@ class CarbonInferenceEngine:
         # the pixel itself won't look "missing" after unmask() below.
         try:
             coverage = composite.select(S2_BANDS[0]).mask().reduceRegion(
-                reducer=ee.Reducer.mean(), geometry=roi, scale=100, bestEffort=True, maxPixels=int(1e8), tileScale=4,
+                reducer=ee.Reducer.mean(), geometry=roi, scale=100, bestEffort=True, maxPixels=int(1e8), tileScale=8,
             ).getInfo()
             self.last_valid_pixel_pct = round(float(coverage.get(S2_BANDS[0], 0) or 0) * 100, 1)
         except Exception as e:  # noqa: BLE001
@@ -587,7 +600,10 @@ class CarbonInferenceEngine:
                 .classify(trained_clf)
                 .max(ee.Image(0))
                 .rename("carbon_estimated")
-                .reproject(crs="EPSG:4326", scale=scale)
+                # Do not force a projection here. Earth Engine can choose a
+                # tiled projection at the downstream reduceRegion/getMapId
+                # scale; reproject() materializes the whole AOI and is a
+                # common cause of user-memory-limit failures.
             )
             logger.info(f"Native GEE classifier applied (features={len(gee_features)}, scale={scale} m)")
             return carbon_predicted
@@ -627,7 +643,8 @@ class CarbonInferenceEngine:
             .add(intercept)
             .max(ee.Image(0))
             .rename('carbon_estimated')
-            .reproject(crs='EPSG:4326', scale=scale)
+            # Let the consumer set scale/projection lazily. A forced
+            # reproject() here expands large AOIs before tiling.
         )
 
         logger.info(
@@ -781,7 +798,7 @@ class CarbonInferenceEngine:
             .reduce(ee.Reducer.sum())
             .add(intercept)                         # FIX D: intercept added cleanly
             .rename('carbon_estimated')
-            .reproject(crs='EPSG:4326', scale=scale)  # FIX E: match training scale
+            # Keep projection lazy; downstream sampling supplies the scale.
         )
     
         logger.info(

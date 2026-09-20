@@ -85,12 +85,13 @@ def get_direct_carbon_reference_layer(
     effective_year = dataset_year if available_years or selectable_year else meta.get("year")
     source_year = effective_year if isinstance(effective_year, int) else dataset_year
     ingestion = meta.get("ingestion_method")
-    if ingestion == "soilgrids_rest":
-        raise AnalysisError("SoilGrids hanya menyediakan statistik sampling; pilih AOI untuk memuat nilainya.", 422)
-
     tile_url = None
     if ingestion == "cog_rasterio":
         tile_url = f"/api/carbon/reference-tiles/{dataset_key}/{{z}}/{{x}}/{{y}}.png?year={source_year}"
+    elif ingestion == "soilgrids_rest":
+        # SoilGrids is sampled through REST and has no global tile endpoint.
+        # Still return a successful metadata-only direct-load response.
+        tile_url = None
     elif dataset_key in CARBON_ARCGIS_REGISTRY:
         tile_url = f"/api/arcgis/tiles/{dataset_key}/{{z}}/{{y}}/{{x}}?year={source_year}"
     else:
@@ -128,6 +129,11 @@ def get_direct_carbon_reference_layer(
         },
         "direct": True,
         "statistics_available": False,
+        "load_note": (
+            "SoilGrids tidak menyediakan tile global; pilih AOI dan jalankan mode "
+            "referensi untuk statistik sampling."
+            if ingestion == "soilgrids_rest" else None
+        ),
     }
 
 
@@ -378,6 +384,90 @@ def _local_aoi_areas_ha(data: dict, bbox: tuple[float, float, float, float], geo
     return original_area, original_area, calculation_area
 
 
+def _reference_load_only_response(
+    *,
+    dataset_info: dict,
+    dataset_year: int,
+    reference_tile_url: str | None,
+    ref_vis_params: dict,
+    calculation_mode: str = "load_only",
+    algorithm: str = "direct_raster",
+    scale: float | int | None = None,
+    provider_type: str = "external_raster",
+    description: str | None = None,
+) -> dict:
+    """Return a cheap layer response without raster statistics or AOI area calls.
+
+    ``load_only`` is deliberately a separate response mode. A map tile still
+    gets returned when the provider supports one, but no reduceRegion, raster
+    window read, geometry area, or model inference is performed. This keeps an
+    AOI useful for clipping while avoiding the operations that commonly hit
+    Earth Engine memory and request-time limits.
+    """
+    unit = dataset_info.get("unit", "Mg C/ha")
+    layer = {
+        "tile_url": reference_tile_url,
+        "statistics": None,
+        "unit": unit,
+        "vis_params": ref_vis_params,
+        "inference_mode": "reference_only_load_only",
+    }
+    ref = {
+        "tile_url": reference_tile_url,
+        "name": dataset_info.get("name"),
+        "full_name": dataset_info.get("full_name"),
+        "year": dataset_info.get("year"),
+        "resolution": dataset_info.get("resolution"),
+        "unit": unit,
+        "target_pool": dataset_info.get("target_pool"),
+        "gee_id": dataset_info.get("gee_id"),
+        "service_url": dataset_info.get("service_url"),
+        "provider_type": dataset_info.get("provider_type", provider_type),
+        "is_temporal": dataset_info.get("is_temporal", False),
+        "requested_year": dataset_info.get("requested_year", dataset_year),
+        "description": dataset_info.get("description"),
+        "vis_params": ref_vis_params,
+        "statistics": None,
+        "load_info": {"mode": "load_only", "statistics_available": False},
+    }
+    return {
+        "carbon_estimated": layer,
+        "carbon_reference": ref,
+        "area_info": {
+            "calculation_mode": calculation_mode,
+            "original_aoi_area_ha": None,
+            "filtering_area_ha": None,
+            "calculation_area_ha": None,
+            "total_carbon_tons": None,
+            "carbon_dioxide_equivalent_tons": None,
+            "description": description or (
+                "Mode load-only: layer referensi dimuat tanpa statistik, luas AOI, "
+                "atau estimasi model."
+            ),
+        },
+        "model_info": {
+            "model_name": "reference_only",
+            "algorithm": algorithm,
+            "calculation_mode": calculation_mode,
+            "display_mode": "reference_only",
+            "load_only": True,
+            "scale": scale if scale is not None else dataset_info.get("resolution"),
+            "reference_dataset": dataset_info.get("key"),
+            "reference_dataset_year": dataset_info.get("year", dataset_year),
+            "target_pool": dataset_info.get("target_pool"),
+            "analysis_year": dataset_info.get("year", dataset_year),
+        },
+        "data_quality": {
+            "valid_pixel_pct": None,
+            "gap_filled": None,
+            "images_used": None,
+            "coefficient_of_variation_pct": None,
+            "model_r2": None,
+            "model_rmse": None,
+        },
+    }
+
+
 def _analyze_local_reference_only(
     data: dict,
     dataset_info: dict,
@@ -391,6 +481,7 @@ def _analyze_local_reference_only(
     vis_max: int,
     vis_palette: list[str],
     db: Session,
+    load_only: bool = False,
 ) -> dict:
     """Calculate reference-only statistics from a tiled/global COG without GEE."""
     import numpy as np
@@ -400,6 +491,31 @@ def _analyze_local_reference_only(
 
     bbox, geometry = _aoi_bbox_and_geometry(data["aoi"])
     resolution = float(dataset_meta.get("resolution") or 100)
+    ref_vis_params = {
+        "min": dataset_info.get("vis_min", vis_min),
+        "max": dataset_info.get("vis_max", vis_max),
+        "palette": dataset_info.get("vis_palette", vis_palette),
+    }
+    label_year = dataset_info.get("year", dataset_year)
+    reference_tile_url = (
+        f"/api/carbon/reference-tiles/{dataset_info['key']}/{{z}}/{{x}}/{{y}}.png"
+        f"?year={label_year}&min={ref_vis_params['min']}&max={ref_vis_params['max']}"
+    )
+    if load_only:
+        return _reference_load_only_response(
+            dataset_info=dataset_info,
+            dataset_year=dataset_year,
+            reference_tile_url=reference_tile_url,
+            ref_vis_params=ref_vis_params,
+            calculation_mode="load_only",
+            algorithm="direct_cog_raster",
+            scale=resolution,
+            provider_type=dataset_info.get("provider_type", "external_raster"),
+            description=(
+                "Mode load-only: tile COG referensi tersedia; statistik raster dan "
+                "luas AOI belum dihitung."
+            ),
+        )
     grid = GridSpec(bbox, resolution_m=resolution)
     labels, load_info = load_carbon_reference_to_grid(dataset_info["key"], grid, year=dataset_year)
 
@@ -429,16 +545,7 @@ def _analyze_local_reference_only(
         "min": round(min_carbon, 2),
         "max": round(max_carbon, 2),
     }
-    ref_vis_params = {
-        "min": dataset_info.get("vis_min", vis_min),
-        "max": dataset_info.get("vis_max", vis_max),
-        "palette": dataset_info.get("vis_palette", vis_palette),
-    }
     label_year = load_info.get("label_year", dataset_info.get("year"))
-    reference_tile_url = (
-        f"/api/carbon/reference-tiles/{dataset_info['key']}/{{z}}/{{x}}/{{y}}.png"
-        f"?year={label_year}&min={ref_vis_params['min']}&max={ref_vis_params['max']}"
-    )
     return {
         "carbon_estimated": {
             "tile_url": reference_tile_url,
@@ -503,6 +610,27 @@ def _analyze_external_reference_only(
     SoilGrids returns SOC concentration and bulk density. We expose the SOC
     statistics and derive a 0-30 cm stock estimate in Mg C/ha from both layers.
     """
+    if bool(data.get("load_only")):
+        vis_params = {
+            "min": dataset_info.get("vis_min", 0),
+            "max": dataset_info.get("vis_max", 80),
+            "palette": dataset_info.get("vis_palette", []),
+        }
+        return _reference_load_only_response(
+            dataset_info=dataset_info,
+            dataset_year=dataset_year,
+            reference_tile_url=None,
+            ref_vis_params=vis_params,
+            calculation_mode="load_only",
+            algorithm="soilgrids_rest",
+            scale=dataset_info.get("resolution"),
+            provider_type=dataset_info.get("provider_type", "external_raster"),
+            description=(
+                "Mode load-only: SoilGrids REST tidak menyediakan tile; statistik "
+                "sampling dapat diminta setelah AOI dan mode hitung diaktifkan."
+            ),
+        )
+
     from app.providers.external_carbon_provider import _geojson_to_bbox
 
     aoi = data["aoi"]
@@ -650,7 +778,7 @@ def calculate_carbon_summary_for_year(
             scale=carbon_scale,
             maxPixels=config_service.get_analysis_defaults(db)["max_pixels"],
             bestEffort=True,
-            tileScale=4,
+            tileScale=8,
         ).getInfo()
         mean_carbon = stats.get("carbon_estimated_mean", 0) or 0
         std_dev = stats.get("carbon_estimated_stdDev", 0) or 0
@@ -710,11 +838,12 @@ def analyze_carbon(db: Session, data: dict) -> dict:
     if "aoi" not in data:
         raise AnalysisError("Missing required field: aoi", 400)
 
-    year = int(data.get("year"))
-    start_month = int(data.get("start_month"))
-    end_month = int(data.get("end_month"))
+    year = int(data.get("year", datetime.now(UTC).year))
+    start_month = int(data.get("start_month", 1))
+    end_month = int(data.get("end_month", 12))
     cloud_threshold = int(data.get("cloud_threshold", config_service.get_analysis_defaults(db)["cloud_threshold"]))
     clip_to_aoi = data.get("clip_to_aoi", True)
+    load_only = bool(data.get("load_only"))
     model_name = data.get("model_name")
     dataset_year = int(data.get("dataset_year", 2010))
     reference_dataset = data.get("reference_dataset", "WCMC")
@@ -733,6 +862,10 @@ def analyze_carbon(db: Session, data: dict) -> dict:
                 or reference_dataset in CARBON_DATASET_REGISTRY
         )
     )
+    # A load-only request is explicitly a layer operation. Even if an old
+    # client accidentally includes model_name, never enter model inference.
+    if load_only:
+        reference_only = True
     vis_min = int(data.get("vis_min", config_service.get_analysis_defaults(db)["carbon_vis_min"]))
     vis_max = int(data.get("vis_max", config_service.get_analysis_defaults(db)["carbon_vis_max"]))
     vis_palette = data.get("vis_palette", config_service.get_analysis_defaults(db)["carbon_vis_palette"])
@@ -770,6 +903,52 @@ def analyze_carbon(db: Session, data: dict) -> dict:
     _is_external_ref = is_external_carbon_dataset(reference_dataset)
     _external_ref_meta = get_external_carbon_meta(reference_dataset) if _is_external_ref else None
 
+    if reference_only and load_only and _is_arcgis_ref and _arcgis_ref_meta:
+        ref_vis_params = {
+            "min": _arcgis_ref_meta.get("vis_min", vis_min),
+            "max": _arcgis_ref_meta.get("vis_max", vis_max),
+            "palette": _arcgis_ref_meta.get("vis_palette", vis_palette),
+        }
+        return _reference_load_only_response(
+            dataset_info=dataset_info,
+            dataset_year=dataset_year,
+            reference_tile_url=f"/api/arcgis/tiles/{reference_dataset}/{{z}}/{{y}}/{{x}}",
+            ref_vis_params=ref_vis_params,
+            calculation_mode="load_only",
+            algorithm="arcgis_tile",
+            scale=_arcgis_ref_meta.get("resolution"),
+            provider_type=_arcgis_ref_meta.get("provider_type", "arcgis"),
+            description=(
+                "Mode load-only: tile ArcGIS dimuat tanpa histogram, luas AOI, "
+                "atau estimasi model."
+            ),
+        )
+
+    if (
+        reference_only
+        and load_only
+        and _is_external_ref
+        and _external_ref_meta is not None
+        and _external_ref_meta.get("ingestion_method") == "cog_rasterio"
+    ):
+        # COG load-only needs only the provider tile URL. Avoid creating an EE
+        # geometry so this path remains usable when EE credentials are absent.
+        return _analyze_local_reference_only(
+            data=data,
+            dataset_info=dataset_info,
+            dataset_meta=_external_ref_meta,
+            dataset_year=dataset_year,
+            roi_original=None,
+            roi_for_calculation=None,
+            roi_for_filtering=None,
+            calculation_mode="load_only",
+            vis_min=vis_min,
+            vis_max=vis_max,
+            vis_palette=vis_palette,
+            db=db,
+            load_only=True,
+        )
+
     if "geojson" in data["aoi"]:
         roi_original = geojson_to_ee_geometry(data["aoi"]["geojson"])
         has_geojson = True
@@ -784,8 +963,10 @@ def analyze_carbon(db: Session, data: dict) -> dict:
     if clip_to_aoi and has_geojson:
         roi_for_calculation = roi_original
     else:
-        _b = roi_original.bounds().getInfo()["coordinates"][0]
-        roi_for_calculation = ee.Geometry.Rectangle(_b[0] + _b[2])
+        # Keep the bounds server-side. The previous bounds().getInfo() call
+        # forced a synchronous geometry round trip before every analysis and
+        # became a timeout hotspot for complex FeatureCollections.
+        roi_for_calculation = roi_original.bounds(maxError=1)
     calculation_mode = "clipped_aoi" if (clip_to_aoi and has_geojson) else "full_tiles"
 
     _is_cloud_geotiff_ee_ref = (
@@ -812,6 +993,7 @@ def analyze_carbon(db: Session, data: dict) -> dict:
             vis_max=vis_max,
             vis_palette=vis_palette,
             db=db,
+            load_only=load_only,
         )
 
     if not _is_arcgis_ref and not _is_external_ref:
@@ -849,25 +1031,46 @@ def analyze_carbon(db: Session, data: dict) -> dict:
         except Exception as ref_tile_err:  # noqa: BLE001
             logger.warning(f"Reference-only tile failed for '{reference_dataset}': {ref_tile_err}")
 
+        if load_only:
+            return _reference_load_only_response(
+                dataset_info=dataset_info,
+                dataset_year=dataset_year,
+                reference_tile_url=reference_tile_url,
+                ref_vis_params=ref_vis_params,
+                calculation_mode="load_only",
+                algorithm="direct_raster",
+                scale=dataset_info.get("resolution") or carbon_scale,
+                provider_type=dataset_info.get("provider_type", "gee"),
+            )
+
         try:
+            reference_scale = max(
+                carbon_scale,
+                int(float(dataset_info.get("resolution") or carbon_scale)),
+            )
             reference_stats_raw = reference_display.reduceRegion(
                 reducer=ee.Reducer.mean()
                     .combine(ee.Reducer.stdDev(), "", True)
                     .combine(ee.Reducer.min(), "", True)
                     .combine(ee.Reducer.max(), "", True),
                 geometry=roi_for_calculation,
-                scale=carbon_scale,
+                scale=reference_scale,
                 maxPixels=config_service.get_analysis_defaults(db)["max_pixels"],
                 bestEffort=True,
-                tileScale=4,
+                tileScale=8,
             ).getInfo()
         except Exception as ref_stats_err:  # noqa: BLE001
             logger.warning(f"Reference-only stats failed for '{reference_dataset}': {ref_stats_err}")
             reference_stats_raw = {}
 
-        original_area = geometry_area_ha(roi_original)
-        calculation_area = geometry_area_ha(roi_for_calculation)
-        filtering_area = geometry_area_ha(roi_for_filtering)
+        # Reuse identical geometries so a reference-only request makes at
+        # most one EE area round trip (two only when a complex GeoJSON is
+        # intentionally expanded to its bounding box).
+        if clip_to_aoi or not has_geojson:
+            original_area = calculation_area = filtering_area = geometry_area_ha(roi_original)
+        else:
+            original_area = filtering_area = geometry_area_ha(roi_original)
+            calculation_area = geometry_area_ha(roi_for_calculation)
         mean_carbon = float(reference_stats_raw.get("agb_mean") or 0)
         std_carbon = float(reference_stats_raw.get("agb_stdDev") or 0)
         min_carbon = float(reference_stats_raw.get("agb_min") or 0)
@@ -944,7 +1147,12 @@ def analyze_carbon(db: Session, data: dict) -> dict:
 
     # Cari model dari DB
     model_path = get_active_model_path(db, "carbon", model_name)
-    inference_engine = CarbonInferenceEngine(model_name=model_name, model_path=model_path, cloud_mask_technique=cloud_mask_technique)
+    inference_engine = CarbonInferenceEngine(
+        model_name=model_name,
+        model_path=model_path,
+        cloud_mask_technique=cloud_mask_technique,
+        quality_checks=bool(data.get("include_quality", False)),
+    )
     model_info = inference_engine.get_model_info()
 
     # Validate model-dataset compatibility before any expensive GEE work.
@@ -1081,21 +1289,29 @@ def analyze_carbon(db: Session, data: dict) -> dict:
         # GEE reference (original code — unchanged)
         try:
             reference_display = carbon_reference.clip(roi_for_calculation)
-            ref_stats_raw = reference_display.reduceRegion(
-                reducer=ee.Reducer.percentile([2, 98]),
-                geometry=roi_for_calculation, scale=carbon_scale,
-                maxPixels=config_service.get_analysis_defaults(db)["max_pixels"], bestEffort=True
-            ).getInfo()
-            ref_min = ref_stats_raw.get("agb_p2", vis_min) or vis_min
-            ref_max = ref_stats_raw.get("agb_p98", vis_max) or vis_max
-            ref_vis_params = {"min": ref_min, "max": ref_max, "palette": vis_palette}
+            if data.get("auto_vis", False):
+                ref_stats_raw = reference_display.reduceRegion(
+                    reducer=ee.Reducer.percentile([2, 98]),
+                    geometry=roi_for_calculation, scale=max(
+                        carbon_scale,
+                        int(float(dataset_info.get("resolution") or carbon_scale)),
+                    ),
+                    maxPixels=config_service.get_analysis_defaults(db)["max_pixels"],
+                    bestEffort=True,
+                    tileScale=8,
+                ).getInfo()
+                ref_min = ref_stats_raw.get("agb_p2", vis_min) or vis_min
+                ref_max = ref_stats_raw.get("agb_p98", vis_max) or vis_max
+                ref_vis_params = {"min": ref_min, "max": ref_max, "palette": vis_palette}
             reference_tile_url = reference_display.visualize(**_gee_visualize_params(ref_vis_params)).getMapId()["tile_fetcher"].url_format
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Reference tile error: {e}")
 
-    original_area = geometry_area_ha(roi_original)
-    calculation_area = geometry_area_ha(roi_for_calculation)
-    filtering_area = geometry_area_ha(roi_for_filtering)
+    if clip_to_aoi or not has_geojson:
+        original_area = calculation_area = filtering_area = geometry_area_ha(roi_original)
+    else:
+        original_area = filtering_area = geometry_area_ha(roi_original)
+        calculation_area = geometry_area_ha(roi_for_calculation)
 
     if is_gee_deployable:
         # ── GEE tile-map inference (linear/ridge/lasso) ──────────────────
@@ -1115,17 +1331,29 @@ def analyze_carbon(db: Session, data: dict) -> dict:
         # estimated tile to this AOI's own robust 2nd/98th percentile
         # instead of the fixed default — same approach already used for the
         # reference-dataset tile below.
-        carbon_stats = carbon_estimated.clip(roi_for_calculation).reduceRegion(
-            reducer=ee.Reducer.mean()
-                .combine(ee.Reducer.stdDev(), "", True)
-                .combine(ee.Reducer.min(), "", True)
-                .combine(ee.Reducer.max(), "", True)
-                .combine(ee.Reducer.percentile([2, 98]), "", True),
-            geometry=roi_for_calculation,
-            scale=carbon_scale,
-            maxPixels=config_service.get_analysis_defaults(db)["max_pixels"],
-            bestEffort=True
-        ).getInfo()
+        carbon_reducer = (
+            ee.Reducer.mean()
+            .combine(ee.Reducer.stdDev(), "", True)
+            .combine(ee.Reducer.min(), "", True)
+            .combine(ee.Reducer.max(), "", True)
+        )
+        if data.get("include_percentiles", False):
+            carbon_reducer = carbon_reducer.combine(ee.Reducer.percentile([2, 98]), "", True)
+        try:
+            carbon_stats = carbon_estimated.clip(roi_for_calculation).reduceRegion(
+                reducer=carbon_reducer,
+                geometry=roi_for_calculation,
+                scale=carbon_scale,
+                maxPixels=config_service.get_analysis_defaults(db)["max_pixels"],
+                bestEffort=True,
+                tileScale=8,
+            ).getInfo()
+        except Exception as stats_err:  # noqa: BLE001
+            # A large AOI can still exceed EE's aggregation memory even with
+            # bestEffort/tileScale. Keep the map result usable and expose the
+            # missing summary as null instead of failing the whole request.
+            logger.warning("Carbon statistics reduceRegion failed: %s", type(stats_err).__name__)
+            carbon_stats = {}
 
         _user_pinned_vis = "vis_min" in data or "vis_max" in data
         _default_vis = vis_params
@@ -1142,17 +1370,25 @@ def analyze_carbon(db: Session, data: dict) -> dict:
             match_reference=match_reference_vis,
         )
 
-        mean_carbon = carbon_stats.get("carbon_estimated_mean", 0)
-        total_carbon_tons = mean_carbon * calculation_area
+        mean_carbon = carbon_stats.get("carbon_estimated_mean")
+        total_carbon_tons = mean_carbon * calculation_area if mean_carbon is not None else None
 
-        estimated_map_id = carbon_estimated_display.visualize(**_gee_visualize_params(estimated_vis_params)).getMapId()
-        estimated_tile_url = estimated_map_id["tile_fetcher"].url_format
+        try:
+            estimated_map_id = carbon_estimated_display.visualize(**_gee_visualize_params(estimated_vis_params)).getMapId()
+            estimated_tile_url = estimated_map_id["tile_fetcher"].url_format
+        except Exception as tile_err:  # noqa: BLE001
+            logger.warning("Carbon estimated tile failed: %s", type(tile_err).__name__)
+            estimated_tile_url = None
+
+        def _rounded_stat(key: str) -> float | None:
+            value = carbon_stats.get(key)
+            return round(float(value), 2) if value is not None else None
 
         stats_out = {
-            "mean": round(mean_carbon, 2),
-            "std_dev": round(carbon_stats.get("carbon_estimated_stdDev", 0), 2),
-            "min": round(carbon_stats.get("carbon_estimated_min", 0), 2),
-            "max": round(carbon_stats.get("carbon_estimated_max", 0), 2),
+            "mean": _rounded_stat("carbon_estimated_mean"),
+            "std_dev": _rounded_stat("carbon_estimated_stdDev"),
+            "min": _rounded_stat("carbon_estimated_min"),
+            "max": _rounded_stat("carbon_estimated_max"),
         }
     else:
         # ── Server-side sampled sklearn inference (RF, GB, etc.) ─────────
@@ -1184,6 +1420,9 @@ def analyze_carbon(db: Session, data: dict) -> dict:
     _stat_mean = stats_out.get("mean") or 0
     _stat_std = stats_out.get("std_dev") or 0
     _cv_pct = round((_stat_std / _stat_mean) * 100, 1) if _stat_mean else None
+    statistics_available = any(
+        stats_out.get(key) is not None for key in ("mean", "std_dev", "min", "max")
+    )
 
     return {
         "carbon_estimated": {
@@ -1216,8 +1455,8 @@ def analyze_carbon(db: Session, data: dict) -> dict:
             "original_aoi_area_ha": round(original_area, 2),
             "filtering_area_ha": round(filtering_area, 2),
             "calculation_area_ha": round(calculation_area, 2),
-            "total_carbon_tons": round(total_carbon_tons, 2),
-            "carbon_dioxide_equivalent_tons": round(total_carbon_tons * co2_factor, 2),
+            "total_carbon_tons": round(total_carbon_tons, 2) if total_carbon_tons is not None else None,
+            "carbon_dioxide_equivalent_tons": round(total_carbon_tons * co2_factor, 2) if total_carbon_tons is not None else None,
         },
         "model_info": {
             "model_name": inference_engine.model_name,
@@ -1239,6 +1478,7 @@ def analyze_carbon(db: Session, data: dict) -> dict:
             "reference_dataset": reference_dataset,
             "scale": carbon_scale,
             "images_used": inference_engine.last_s2_image_count,
+            "statistics_available": statistics_available,
             "co2_conversion_factor": co2_factor,
             "gee_deployable": is_gee_deployable,
         },
@@ -1410,7 +1650,12 @@ def analyze_carbon_delta(db: Session, data: dict) -> dict:
     roi = create_geometry_from_payload(data["aoi"])
 
     model_path = get_active_model_path(db, "carbon", model_name)
-    inference_engine = CarbonInferenceEngine(model_name=model_name, model_path=model_path, cloud_mask_technique=cloud_mask_technique)
+    inference_engine = CarbonInferenceEngine(
+        model_name=model_name,
+        model_path=model_path,
+        cloud_mask_technique=cloud_mask_technique,
+        quality_checks=bool(data.get("include_quality", False)),
+    )
     model_info = inference_engine.get_model_info()
 
     # Timelapse tiles are opt-in - each one costs a real getMapId() round trip
