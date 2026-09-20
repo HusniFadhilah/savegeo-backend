@@ -1976,6 +1976,78 @@ land use/land cover, carbon estimation, and change detection.
   tools.
 - Respond in Indonesian (the app's working language) unless the user writes in English.
 
+## UI control contract
+The current request includes `page_state` and `context`. Read the active module, AOI,
+selected values, available datasets, and already computed results before planning.
+For UI changes emit typed objects in actions[] with this exact shape:
+{"action":"set_parameter","target":"carbon.analysisYear","parameters":{"value":2024},"reason":"...","expected_state":{"analysisYear":2024}}
+The frontend executes only these supported commands:
+- open_module / navigation.module, value: carbon, lc-change, imagery, disaster,
+  crop-monitoring, guide, or about.
+- set_map_view / map.main, center: [latitude, longitude], zoom: number.
+- set_analysis_type / carbon.analysisType, value: carbon, landcover, vegetation, combined.
+- set_parameter / carbon.analysisYear, carbon.referenceDataset, carbon.datasetYear,
+  carbon.modelName, carbon.referenceOnly, carbon.directGlobal, carbon.showReference,
+  carbon.clipMode, carbon.startMonth, carbon.endMonth, carbon.cloudThreshold,
+  carbon.vegetationIndices, carbon.vegetationSensor, carbon.landcoverDatasets,
+  or carbon.includeImprobableClasses.
+- set_parameter / lc_change.dataset, lc_change.fromYear, lc_change.toYear,
+  lc_change.startMonth, or lc_change.endMonth.
+- run_analysis / carbon.analysis or lc_change.analysis. It is an expensive action;
+  set needs_confirmation=true. Do not issue it without an AOI. Select module and
+  set parameters first. The analysis result is not known until execution finishes.
+- toggle_layer / results.layer, value must be a key from page_state.ui.results.availableLayers;
+  visible is true or false. Do not claim a layer exists before it is returned.
+- set_provider / scenes.provider, value from page_state.ui.scenes.availableProviders.
+- set_date_range / scenes.dateRange, start and end as YYYY-MM-DD.
+- set_parameter / scenes.cloudMax, scenes.search, scenes.page, or scenes.pageSize.
+- search_scenes / scenes.searchRequest requires an AOI.
+- show_scene / scenes.scene, scene_id from page_state.ui.scenes.availableSceneIds,
+  visible true/false. The tile request is constrained to the current AOI.
+- clear_scenes / scenes.layers clears visible scene imagery.
+- accordion / scenes.results, open true/false.
+- set_parameter / crop.index or crop.periodMode; set_date_range / crop.dateRange;
+  run_analysis / crop.analysis requires a selected field. Crop output is an
+  indicator of condition, never a confirmed crop disease diagnosis.
+- load_disaster_sources / disaster.sources reads configured official-source status.
+- load_disaster_alerts / disaster.alerts reads BMKG warnings.
+- run_analysis / disaster.dem computes DEM/slope context for the disaster AOI.
+  DEM/slope is terrain context, not an observed landslide or damage map.
+  Other disaster analyses require their dedicated module and provider; do not
+  issue unsupported commands or use NASA FIRMS as an earthquake/flood source.
+Scene pagination applies only to scenes already returned by the provider. If
+page_state.ui.scenes.truncated is true, say the backend response was truncated;
+do not claim that all provider scenes are searchable or that pagination is unlimited.
+Wayback dates identify archival basemap releases, not guaranteed acquisition dates.
+Do not issue an action for an unavailable dataset, year, model, control, provider,
+or module. If the needed command is not listed, explain the missing integration
+and guide the user to the existing module. Never invent a UI target or DOM id.
+When the user asks for analysis, give a short plan and actions; do not present
+uncomputed metrics as results. Ask for AOI if missing. For land-cover change,
+both years must be available for the selected dataset and start < end.
+
+## Scientific interpretation
+- Keep analysis imagery year, reference dataset year, model training year, predicted
+  year, and effective dataset year distinct. A static dataset cannot become a
+  current-year measurement by changing the analysis year.
+- Direct reference data is not model inference. Name the actual source and vintage;
+  do not mention Sentinel-2 settings when they were not used. Hansen tree cover is
+  a proxy, never calibrated biomass. Keep AGB, BGB, SOC and ecosystem carbon apart.
+- For land-cover change, describe class transitions, not confirmed deforestation;
+  explain possible effects of different sensors, resolution, cloud and classes.
+- NASA FIRMS is a fire-hotspot source only. Distinguish hotspot, burned area,
+  flood extent, susceptibility, exposure, hazard and damage. A susceptibility
+  layer does not prove actual impact.
+- Vegetation-index anomalies can indicate stress; they do not diagnose disease.
+  Explain the index, bands, sensor, temporal comparability, cloud and resolution
+  only when source metadata supports it.
+- For every computed result include AOI, dataset/provider, applicable dates,
+  method, parameters, unit, quality/uncertainty, limitations and provenance when
+  available. Use "unavailable" for missing fields rather than guessing.
+- On errors name the failed operation and safe next step. For HTTP 504 suggest a
+  smaller AOI, shorter period, coarser resolution or async processing. Do not
+  disclose tokens, credentials, or stack traces.
+
 ## How to work
 1. If you're not sure what's already open/available, call get_current_context first.
 2. To answer a question about existing results ("berapa luas hutan yang hilang", "apa arti NDVI
@@ -2256,7 +2328,207 @@ def _call_gemini_tools(api_key: str, model: str, user_input: str,
     return _tool_round_limit_response()
 
 
-def geoai_with_ai(message: str, context: dict, db, history: list[dict] | None = None) -> dict:
+_GEOAI_UI_TARGETS = {
+    "open_module": {"navigation.module"},
+    "set_map_view": {"map.main"},
+    "set_analysis_type": {"carbon.analysisType"},
+    "set_parameter": {
+        "carbon.analysisYear", "carbon.referenceDataset", "carbon.datasetYear",
+        "carbon.modelName", "carbon.referenceOnly", "carbon.directGlobal", "carbon.showReference", "carbon.clipMode",
+        "carbon.startMonth", "carbon.endMonth", "carbon.cloudThreshold",
+        "carbon.vegetationIndices", "carbon.vegetationSensor", "carbon.landcoverDatasets",
+        "carbon.includeImprobableClasses",
+        "lc_change.dataset", "lc_change.fromYear", "lc_change.toYear",
+        "lc_change.startMonth", "lc_change.endMonth",
+        "scenes.cloudMax", "scenes.search", "scenes.page", "scenes.pageSize",
+        "crop.index", "crop.periodMode",
+    },
+    "run_analysis": {"carbon.analysis", "lc_change.analysis", "crop.analysis", "disaster.dem"},
+    "toggle_layer": {"results.layer"},
+    "set_provider": {"scenes.provider"},
+    "set_date_range": {"scenes.dateRange", "crop.dateRange"},
+    "search_scenes": {"scenes.searchRequest"},
+    "show_scene": {"scenes.scene"},
+    "clear_scenes": {"scenes.layers"},
+    "accordion": {"scenes.results"},
+    "load_disaster_sources": {"disaster.sources"},
+    "load_disaster_alerts": {"disaster.alerts"},
+}
+
+
+def validate_geoai_actions(actions: object, page_state: dict, context: dict) -> tuple[list[dict], list[str]]:
+    """Fail closed on AI-authored UI commands before they reach the browser."""
+    if not isinstance(actions, list):
+        return [], ["Format actions dari AI tidak valid."]
+    valid: list[dict] = []
+    warnings: list[str] = []
+    for action in actions[:12]:
+        if not isinstance(action, dict):
+            warnings.append("Satu action AI bukan objek JSON dan diabaikan.")
+            continue
+        name, target = action.get("action"), action.get("target")
+        if not isinstance(name, str) or not isinstance(target, str) or name not in _GEOAI_UI_TARGETS or target not in _GEOAI_UI_TARGETS[name]:
+            # Existing grounded map/result actions remain available, with their
+            # own fixed dispatch table on the client.
+            legacy_type = action.get("type") if isinstance(action.get("type"), str) else None
+            if legacy_type == "ask_user" and isinstance(action.get("question"), str):
+                valid.append({"type": "ask_user", "question": action["question"][:500]})
+            elif legacy_type == "open_analysis_result" and isinstance(action.get("kind"), str) and action["kind"] in {"carbon", "vegetation", "landcover", "landcover_transition"}:
+                valid.append({"type": legacy_type, "kind": action["kind"]})
+            elif legacy_type in {"highlight_hotspot", "show_before_after"} and isinstance(action.get("hotspot_id"), str):
+                valid.append({"type": legacy_type, "hotspot_id": action["hotspot_id"][:80]})
+            elif legacy_type == "zoom_to_location" and all(type(action.get(k)) in (int, float) for k in ("lat", "lng")) and -90 <= action["lat"] <= 90 and -180 <= action["lng"] <= 180 and type(action.get("zoom", 13)) in (int, float) and 0 <= action.get("zoom", 13) <= 24:
+                valid.append({"type": legacy_type, "lat": action["lat"], "lng": action["lng"], "zoom": action.get("zoom", 13)})
+            elif legacy_type in {"zoom_to_feature", "highlight_polygon"} and isinstance(action.get("geometry"), dict) and isinstance(action["geometry"].get("type"), str) and action["geometry"]["type"] in {"Polygon", "MultiPolygon", "Point", "MultiPoint", "LineString", "MultiLineString"}:
+                valid.append({"type": legacy_type, "geometry": action["geometry"]})
+            else:
+                warnings.append(f"Action AI tidak didukung: {name or action.get('type') or 'unknown'}.")
+            continue
+        params = action.get("parameters") or {}
+        if not isinstance(params, dict):
+            warnings.append(f"Parameter {name} tidak valid.")
+            continue
+        value = params.get("value")
+        ui_state = page_state.get("ui") if isinstance(page_state.get("ui"), dict) else {}
+        scene_state = ui_state.get("scenes") if isinstance(ui_state.get("scenes"), dict) else {}
+        crop_state = ui_state.get("crop") if isinstance(ui_state.get("crop"), dict) else {}
+        if name == "open_module" and (not isinstance(value, str) or value not in {
+            "carbon", "lc-change", "imagery", "disaster", "crop-monitoring", "guide", "about"
+        }):
+            warnings.append("Modul yang diminta tidak tersedia.")
+            continue
+        if name == "set_analysis_type" and (not isinstance(value, str) or value not in {"carbon", "landcover", "vegetation", "combined"}):
+            warnings.append("Jenis analisis tidak valid.")
+            continue
+        if name == "set_map_view":
+            center, zoom = params.get("center"), params.get("zoom")
+            if (not isinstance(center, list) or len(center) != 2 or
+                any(not isinstance(n, (int, float)) or isinstance(n, bool) for n in center) or
+                not (-90 <= center[0] <= 90 and -180 <= center[1] <= 180) or
+                not isinstance(zoom, (int, float)) or isinstance(zoom, bool) or not 0 <= zoom <= 24):
+                warnings.append("Koordinat atau zoom peta tidak valid.")
+                continue
+        if name == "set_provider" and (not isinstance(value, str) or value not in scene_state.get("availableProviders", [])):
+            warnings.append("Provider scene tidak tersedia pada aplikasi.")
+            continue
+        if name == "set_date_range":
+            from datetime import date as _date
+            try:
+                start_date = _date.fromisoformat(params["start"])
+                end_date = _date.fromisoformat(params["end"])
+                if start_date > end_date:
+                    raise ValueError("start > end")
+            except (KeyError, TypeError, ValueError):
+                warnings.append("Rentang tanggal scene tidak valid.")
+                continue
+        if name == "search_scenes" and not (context.get("aoi") or page_state.get("has_aoi")):
+            warnings.append("AOI diperlukan sebelum pencarian scene.")
+            continue
+        if name == "show_scene":
+            scene_id = params.get("scene_id")
+            visible = params.get("visible")
+            if type(visible) is not bool or (visible and (not isinstance(scene_id, str) or scene_id not in scene_state.get("availableSceneIds", []))):
+                warnings.append("Scene tidak ada pada hasil saat ini atau parameter visibilitas tidak valid.")
+                continue
+        if name == "accordion" and type(params.get("open")) is not bool:
+            warnings.append("Status panel scene harus boolean.")
+            continue
+        if name == "toggle_layer":
+            available_layers = ((page_state.get("ui") or {}).get("results") or {}).get("availableLayers") or []
+            if type(params.get("visible")) is not bool or (params["visible"] and (not isinstance(value, str) or value not in available_layers)):
+                warnings.append("Layer hasil belum tersedia atau parameter visibilitas tidak valid.")
+                continue
+        if name == "set_parameter":
+            if target == "crop.index" and (not isinstance(value, str) or value not in crop_state.get("availableIndices", [])):
+                warnings.append("Indeks tanaman tidak tersedia.")
+                continue
+            if target == "crop.periodMode" and (not isinstance(value, str) or value not in {"current_season", "30d", "90d", "custom"}):
+                warnings.append("Mode periode tanaman tidak valid.")
+                continue
+            if target == "scenes.cloudMax" and (type(value) is not int or not 0 <= value <= 100):
+                warnings.append("Ambang awan scene harus 0-100 persen.")
+                continue
+            if target == "scenes.search" and (not isinstance(value, str) or len(value) > 200):
+                warnings.append("Teks pencarian scene tidak valid.")
+                continue
+            if target == "scenes.pageSize" and (type(value) is not int or value not in (25, 50, 100)):
+                warnings.append("Ukuran halaman scene tidak valid.")
+                continue
+            if target == "scenes.page" and (type(value) is not int or type(scene_state.get("pageCount")) is not int or not 1 <= value <= scene_state["pageCount"]):
+                warnings.append("Halaman scene di luar hasil yang dimuat.")
+                continue
+            if target in {"carbon.referenceOnly", "carbon.directGlobal", "carbon.showReference", "carbon.includeImprobableClasses"} and type(value) is not bool:
+                warnings.append(f"Nilai {target} harus boolean.")
+                continue
+            if target == "carbon.modelName" and value is not None and not isinstance(value, str):
+                warnings.append("Nama model karbon tidak valid.")
+                continue
+            if target == "carbon.vegetationSensor" and (not isinstance(value, str) or not value.strip()):
+                warnings.append("Sensor vegetasi tidak valid.")
+                continue
+            if target in {"carbon.analysisYear", "carbon.datasetYear", "carbon.startMonth", "carbon.endMonth",
+                          "carbon.cloudThreshold", "lc_change.fromYear", "lc_change.toYear",
+                          "lc_change.startMonth", "lc_change.endMonth"} and type(value) is not int:
+                warnings.append(f"Nilai {target} harus tahun/bulan/ambang berupa integer.")
+                continue
+            if target in {"carbon.startMonth", "carbon.endMonth", "lc_change.startMonth", "lc_change.endMonth"} and not 1 <= value <= 12:
+                warnings.append(f"Bulan pada {target} di luar rentang 1-12.")
+                continue
+            if target == "carbon.cloudThreshold" and not 0 <= value <= 100:
+                warnings.append("Ambang awan di luar rentang 0-100.")
+                continue
+            if target in {"carbon.analysisYear", "carbon.datasetYear", "lc_change.fromYear", "lc_change.toYear"} and not 1900 <= value <= 2100:
+                warnings.append(f"Tahun pada {target} di luar rentang wajar.")
+                continue
+            if target == "carbon.clipMode" and (not isinstance(value, str) or value not in {"clipped", "full"}):
+                warnings.append("Mode clip tidak valid.")
+                continue
+            if target in {"carbon.referenceDataset", "lc_change.dataset"} and (not isinstance(value, str) or not value.strip()):
+                warnings.append("Dataset harus berupa kode katalog.")
+                continue
+            if target in {"carbon.vegetationIndices", "carbon.landcoverDatasets"} and (not isinstance(value, list) or not value or any(not isinstance(v, str) for v in value)):
+                warnings.append(f"Daftar {target} tidak valid.")
+                continue
+            if target == "carbon.referenceDataset" and page_state.get("available_carbon_datasets") and value not in page_state["available_carbon_datasets"]:
+                warnings.append("Dataset karbon tidak ada dalam state aplikasi.")
+                continue
+            if target == "carbon.landcoverDatasets" and page_state.get("available_landcover_datasets") and any(v not in page_state["available_landcover_datasets"] for v in value):
+                warnings.append("Dataset land cover tidak ada dalam state aplikasi.")
+                continue
+            if target == "lc_change.dataset" and page_state.get("available_landcover_datasets") and value not in page_state["available_landcover_datasets"]:
+                warnings.append("Dataset perubahan tutupan lahan tidak ada dalam state aplikasi.")
+                continue
+        if name == "run_analysis":
+            if target == "crop.analysis" and not crop_state.get("fieldId"):
+                warnings.append("Field tanaman belum dipilih; analisis tidak dijalankan.")
+                continue
+            disaster_state = ui_state.get("disaster") if isinstance(ui_state.get("disaster"), dict) else {}
+            if target == "disaster.dem" and not disaster_state.get("aoiExists"):
+                warnings.append("AOI bencana belum tersedia; analisis DEM tidak dijalankan.")
+                continue
+            carbon_state = ui_state.get("carbon") if isinstance(ui_state.get("carbon"), dict) else {}
+            direct_carbon = target == "carbon.analysis" and (
+                carbon_state.get("directGlobal") is True or any(
+                    accepted.get("target") == "carbon.directGlobal" and
+                    accepted.get("parameters", {}).get("value") is True
+                    for accepted in valid
+                )
+            )
+            if target not in {"crop.analysis", "disaster.dem"} and not direct_carbon and not (context.get("aoi") or page_state.get("has_aoi")):
+                warnings.append("AOI belum tersedia; analisis tidak dijalankan.")
+                continue
+        valid.append({
+            "action": name,
+            "target": target,
+            "parameters": params,
+            "reason": str(action.get("reason") or "")[:300],
+            "expected_state": action.get("expected_state") if isinstance(action.get("expected_state"), dict) else {},
+        })
+    return valid, warnings
+
+
+def geoai_with_ai(message: str, context: dict, db, history: list[dict] | None = None,
+                  page_state: dict | None = None) -> dict:
     """Tool-calling SaveGeo Assistant loop (P0). See GEOAI_SYSTEM_PROMPT and
     app/agentic/geoai_tools.py for the grounding/whitelist contract.
 
@@ -2272,8 +2544,9 @@ def geoai_with_ai(message: str, context: dict, db, history: list[dict] | None = 
     provider = (cfg["provider"] or "anthropic").lower()
     model = cfg["model"] or _PROVIDER_DEFAULT_MODELS.get(provider, "")
 
-    tool_ctx: dict = {"context": context or {}, "db": db, "last_hotspots": {}}
-    user_input = _json.dumps({"message": message, "context": context or {}}, ensure_ascii=False, default=str)
+    tool_ctx: dict = {"context": context or {}, "page_state": page_state or {}, "db": db, "last_hotspots": {}}
+    user_input = _json.dumps({"message": message, "context": context or {},
+                              "page_state": page_state or {}}, ensure_ascii=False, default=str)
 
     def _call_with_key(key: str) -> str:
         if provider == "anthropic":
@@ -2324,10 +2597,19 @@ def geoai_with_ai(message: str, context: dict, db, history: list[dict] | None = 
             return _geoai_fallback("Model mengembalikan respons kosong.")
 
         result = _extract_json_object(raw)
+        if not isinstance(result, dict):
+            return _geoai_fallback("Respons model tidak berbentuk objek JSON.")
         result.setdefault("message", "")
         result.setdefault("warnings", [])
         result.setdefault("actions", [])
         result.setdefault("cards", [])
+        result["actions"], action_warnings = validate_geoai_actions(
+            result.get("actions"), page_state or {}, context or {}
+        )
+        warnings = result.get("warnings")
+        result["warnings"] = (warnings if isinstance(warnings, list) else []) + action_warnings
+        if any(action.get("action") == "run_analysis" for action in result["actions"]):
+            result["needs_confirmation"] = True
         return result
     except Exception as exc:
         raise RuntimeError(f"{provider} API error: {exc}") from exc

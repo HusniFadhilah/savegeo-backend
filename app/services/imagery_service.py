@@ -228,10 +228,18 @@ def _abs_stac_href(base_url: str, href: str) -> str:
 
 
 def _fetch_json(client: httpx.Client, url: str) -> dict[str, Any]:
-    _validate_public_http_url(url)
-    response = client.get(url)
-    response.raise_for_status()
-    return response.json()
+    for _ in range(6):
+        _validate_public_http_url(url)
+        response = client.get(url, follow_redirects=False)
+        if response.status_code in {301, 302, 303, 307, 308}:
+            location = response.headers.get("location")
+            if not location:
+                raise AnalysisError("Redirect STAC tidak memiliki tujuan", 502)
+            url = urljoin(url, location)
+            continue
+        response.raise_for_status()
+        return response.json()
+    raise AnalysisError("Terlalu banyak redirect STAC", 502)
 
 
 def _validate_public_http_url(url: str, label: str = "URL") -> None:

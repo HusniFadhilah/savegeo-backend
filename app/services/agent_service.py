@@ -188,7 +188,7 @@ def run_agent_control(db: Session, request: Request, payload: dict) -> tuple[dic
             # SaveGeo Assistant: grounded tool-calling loop over already-computed
             # results + live hotspot search (see agentic_ai.geoai_with_ai). Screenshot/
             # attachment inputs are UI-automation-mode-only and not passed through here.
-            result = geoai_with_ai(message, geoai_context, db, history)
+            result = geoai_with_ai(message, geoai_context, db, history, page_state=page_state)
         else:
             result = plan_with_ai(message, page_state, image_b64, attachment, history)
     except Exception as e:  # noqa: BLE001

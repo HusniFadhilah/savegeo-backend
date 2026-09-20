@@ -42,7 +42,7 @@ GEOAI_TOOLS: list[dict[str, Any]] = [
         "name": "get_current_context",
         "description": (
             "Get the AOI, active period/year, active map layer, and which analysis "
-            "kinds (carbon/vegetation/landcover/landcover_transition) are currently "
+                    "kinds (carbon/vegetation/landcover/landcover_transition/crop/disaster/direct) are currently "
             "available for this session. Call this first when unsure what the user "
             "already has open."
         ),
@@ -60,7 +60,7 @@ GEOAI_TOOLS: list[dict[str, Any]] = [
             "properties": {
                 "kind": {
                     "type": "string",
-                    "enum": ["carbon", "vegetation", "landcover", "landcover_transition", "all"],
+                    "enum": ["carbon", "vegetation", "landcover", "landcover_transition", "crop", "disaster", "direct", "all"],
                     "description": "Which computed result to read. 'all' returns every kind that is available.",
                 }
             },
@@ -176,6 +176,9 @@ def _not_available(kind: str, hint: str) -> dict[str, Any]:
 
 def get_current_context(tool_ctx: dict) -> dict[str, Any]:
     ctx = tool_ctx.get("context") or {}
+    page_state = tool_ctx.get("page_state") or {}
+    ui = page_state.get("ui") or {}
+    scenes = ui.get("scenes") or {}
     results = ctx.get("results") or {}
     return {
         "aoi_present": bool(ctx.get("aoi")),
@@ -186,12 +189,25 @@ def get_current_context(tool_ctx: dict) -> dict[str, Any]:
         "selected_year": ctx.get("selected_year"),
         "active_module": ctx.get("current_module"),
         "active_layer": ctx.get("active_layer"),
+        "route": page_state.get("route"),
+        "scene_search": {
+            "provider": scenes.get("provider"),
+            "scene_count": scenes.get("sceneCount"),
+            "truncated": scenes.get("truncated"),
+            "page": scenes.get("page"),
+            "page_count": scenes.get("pageCount"),
+            "selected_scene_id": scenes.get("selectedSceneId"),
+            "scene_visible": scenes.get("sceneVisible"),
+        },
         "selected_feature_present": bool(ctx.get("selected_feature")),
         "available_results": {
             "carbon": bool(results.get("carbon")),
             "vegetation": bool(results.get("vegetation")),
             "landcover": bool(results.get("landcover")),
             "landcover_transition": bool(results.get("landcover_transition")),
+            "crop": bool(results.get("crop")),
+            "disaster": bool(results.get("disaster")),
+            "direct": bool(results.get("direct")),
         },
     }
 
@@ -204,29 +220,44 @@ def get_analysis_results(tool_ctx: dict, kind: str = "all") -> dict[str, Any]:
         val = results.get(k)
         if not val:
             return _not_available(k, f"Jalankan analisis {k} terlebih dahulu di modul terkait.")
+        reference_only = k == "carbon" and isinstance(val, dict) and (
+            (val.get("carbon_estimated") or {}).get("inference_mode") == "reference_only"
+        )
+        period = (
+            (val.get("carbon_reference") or {}).get("year") or
+            (val.get("model_info") or {}).get("reference_dataset_year")
+        ) if reference_only else ctx.get("period") or ctx.get("selected_year")
+        if k == "direct" and isinstance(val, list) and val:
+            period = val[0].get("effective_year") if isinstance(val[0], dict) else None
         return {
             "available": True,
             "data": val,
             "source": {
-                "source": k,
+                "source": "carbon_reference" if reference_only else "direct_reference" if k == "direct" else k,
                 "dataset": _dataset_label(k, val),
-                "period": ctx.get("period") or ctx.get("selected_year"),
+                "period": period,
                 "generated_at": None,  # client-held result, exact compute time not tracked
             },
         }
 
     if kind == "all":
-        return {k: _one(k) for k in ("carbon", "vegetation", "landcover", "landcover_transition")}
-    if kind not in ("carbon", "vegetation", "landcover", "landcover_transition"):
+        return {k: _one(k) for k in ("carbon", "vegetation", "landcover", "landcover_transition", "crop", "disaster", "direct")}
+    if kind not in ("carbon", "vegetation", "landcover", "landcover_transition", "crop", "disaster", "direct"):
         return {"error": f"Unknown kind '{kind}'."}
     return _one(kind)
 
 
 def _dataset_label(kind: str, val: Any) -> str | None:
+    if kind == "direct" and isinstance(val, list):
+        return ", ".join(
+            item.get("dataset_name") or item.get("dataset") or ""
+            for item in val if isinstance(item, dict)
+        ) or None
     if not isinstance(val, dict):
         return None
     if kind == "carbon":
-        return (val.get("model_info") or {}).get("reference_dataset")
+        reference = val.get("carbon_reference") or {}
+        return reference.get("full_name") or reference.get("name") or (val.get("model_info") or {}).get("reference_dataset")
     if kind == "landcover_transition":
         return val.get("dataset") or val.get("dataset_name")
     return None
@@ -308,9 +339,11 @@ def query_carbon(tool_ctx: dict) -> dict[str, Any]:
     model_info = carbon.get("model_info") or {}
     cv_metrics = model_info.get("cv_metrics") or {}
     reference = carbon.get("carbon_reference") or {}
+    reference_only = (carbon.get("carbon_estimated") or {}).get("inference_mode") == "reference_only" or model_info.get("display_mode") == "reference_only"
+    dataset_label = reference.get("full_name") or reference.get("name") or model_info.get("reference_dataset")
     return {
         "available": True,
-        "value_type": "estimated",  # carbon is always a model estimate, never a direct measurement
+        "value_type": "reference_dataset" if reference_only else "model_estimate",
         "mean_density_mg_ha": stats.get("mean"),
         "min_density_mg_ha": stats.get("min"),
         "max_density_mg_ha": stats.get("max"),
@@ -318,12 +351,17 @@ def query_carbon(tool_ctx: dict) -> dict[str, Any]:
         "total_carbon_tons": area_info.get("total_carbon_tons"),
         "carbon_dioxide_equivalent_tons": area_info.get("carbon_dioxide_equivalent_tons"),
         "calculation_area_ha": area_info.get("calculation_area_ha"),
-        "target_pool": model_info.get("target_pool"),
-        "reference_dataset": model_info.get("reference_dataset") or reference.get("full_name") or reference.get("name"),
-        "model_name": model_info.get("model_name"),
-        "model_r2": cv_metrics.get("r2_mean"),
-        "model_rmse": cv_metrics.get("rmse_mean"),
-        "source": {"source": "carbon_analysis", "dataset": model_info.get("reference_dataset"), "generated_at": None},
+        "target_pool": model_info.get("target_pool") or reference.get("target_pool"),
+        "reference_dataset": dataset_label,
+        "reference_dataset_year": model_info.get("reference_dataset_year") or reference.get("year"),
+        "reference_provider": reference.get("provider_type"),
+        "reference_resolution": reference.get("resolution"),
+        "model_name": None if reference_only else model_info.get("model_name"),
+        "model_r2": None if reference_only else cv_metrics.get("r2_mean"),
+        "model_rmse": None if reference_only else cv_metrics.get("rmse_mean"),
+        "source": {"source": "carbon_reference" if reference_only else "carbon_analysis", "dataset": dataset_label,
+                   "period": model_info.get("reference_dataset_year") or reference.get("year") if reference_only else model_info.get("analysis_year"),
+                   "generated_at": None},
     }
 
 

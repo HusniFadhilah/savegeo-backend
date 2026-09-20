@@ -52,6 +52,7 @@ def download_geotiff(db: Session, data: dict) -> dict:
     scale = int(data.get("scale", 30))
     model_name = data.get("model_name")
     filename = str(data.get("filename", f"savegeo_{layer_type}_{year}")).strip()
+    effective_year = year
 
     # ── Validasi dasar ───────────────────────────────────
     if start_month < 1 or start_month > 12:
@@ -119,7 +120,8 @@ def download_geotiff(db: Session, data: dict) -> dict:
         if dataset not in LAND_COVER_LEGENDS:
             raise AnalysisError(f"Unknown dataset: {dataset}", 400)
         image, lc_meta = get_landcover_image(dataset, year, aoi, start_month, end_month)
-        logger.info(f"Land cover export effective year for {dataset}: {lc_meta.get('year')}")
+        effective_year = lc_meta.get("year", year)
+        logger.info("Land cover export effective year for %s: %s", dataset, effective_year)
         filename = f"{filename}_{dataset}"
 
     # ── Carbon ──────────────────────────────────────────
@@ -147,7 +149,7 @@ def download_geotiff(db: Session, data: dict) -> dict:
 
         except Exception as e:
             logger.exception("Carbon inference failed")
-            raise AnalysisError(f"Carbon inference failed: {e!s}", 400)
+            raise AnalysisError("Model karbon tidak dapat diproses untuk AOI atau parameter ini.", 422) from e
 
     else:
         raise AnalysisError(f"Unknown layer_type: {layer_type}", 400)
@@ -177,7 +179,9 @@ def download_geotiff(db: Session, data: dict) -> dict:
             "filename": f"{filename}.tif",
             "layer_type": layer_type,
             "scale": scale,
-            "year": year,
+            "year": effective_year,
+            "requested_year": year,
+            "effective_year": effective_year,
             "date_range": {
                 "start": start_date,
                 "end": end_date
@@ -192,7 +196,7 @@ def download_geotiff(db: Session, data: dict) -> dict:
             raise AnalysisError(
                 "Area terlalu besar untuk download langsung.",
                 413,
-                extra={"suggestion": f"Coba perbesar scale dari {scale}m atau perkecil AOI.", "detail": err},
+                extra={"suggestion": f"Coba perbesar scale dari {scale}m atau perkecil AOI."},
             )
 
-        raise AnalysisError(f"Failed to generate download URL: {err}", 500)
+        raise AnalysisError("Gagal membuat URL unduhan GeoTIFF. Coba lagi atau hubungi administrator.", 500) from e

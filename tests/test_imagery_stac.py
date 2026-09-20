@@ -14,6 +14,23 @@ from app.services import samgeo_service
 
 
 class StacTests(unittest.TestCase):
+    def test_stac_json_redirect_revalidates_destination(self):
+        requests_seen = []
+
+        def handler(request):
+            requests_seen.append(str(request.url))
+            return httpx.Response(302, headers={"Location": "http://127.0.0.1/private"})
+
+        def validate(url, _label="URL"):
+            if "127.0.0.1" in url:
+                raise AnalysisError("Private redirect blocked", 400)
+
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client, \
+             patch.object(service, "_validate_public_http_url", side_effect=validate):
+            with self.assertRaises(AnalysisError):
+                service._fetch_json(client, "https://catalog.example/item")
+        self.assertEqual(requests_seen, ["https://catalog.example/item"])
+
     def test_stac_providers_do_not_require_earth_engine(self):
         with patch("app.api.routes.imagery._is_copernicus_request", return_value=False):
             for provider_key in (

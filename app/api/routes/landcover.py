@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from app.api.deps import require_ee
 from app.core.security import get_current_app_viewer
 from app.services import landcover_service
-from app.services.gee_common import AnalysisError
+from app.services.gee_common import AnalysisError, public_analysis_error
 
 router = APIRouter(tags=["landcover"])
 logger = logging.getLogger(__name__)
@@ -36,14 +36,15 @@ async def direct_landcover_reference_layer(
             dataset, year, start_month, end_month, start_date, end_date
         )
     except AnalysisError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise HTTPException(status_code=exc.status_code, detail=public_analysis_error(exc)) from exc
     except HTTPException:
         raise
     except ee.EEException as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        logger.warning("Direct land cover Earth Engine error: %s", type(exc).__name__)
+        raise HTTPException(status_code=502, detail="Earth Engine temporarily unavailable") from exc
     except Exception as exc:  # noqa: BLE001
-        logger.error("Direct land cover layer error: %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        logger.error("Direct land cover layer error")
+        raise HTTPException(status_code=500, detail="Unable to load land cover layer") from exc
 
 
 @router.post("/analyze/landcover", dependencies=[Depends(get_current_app_viewer), Depends(require_ee)])
@@ -52,16 +53,18 @@ async def analyze_landcover(request: Request):
     try:
         return landcover_service.analyze_landcover(data)
     except AnalysisError as e:
-        raise HTTPException(status_code=e.status_code, detail=str(e))
-    except ee.EEException as e:
+        raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
+    except ee.EEException:
         # Malformed AOI / geometry input reaching Earth Engine (e.g. a bad
         # GeoJSON shape from the client) is a client error, not a server fault -
         # EEException is not a ValueError subclass so it needs its own branch,
         # otherwise it falls through to the generic 500 handler below.
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail="Earth Engine rejected the analysis parameters")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="Invalid analysis parameters") from e
     except Exception as e:  # noqa: BLE001
-        logger.error(f"Land cover error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("Land cover error (%s)", type(e).__name__)
+        raise HTTPException(status_code=500, detail="Analysis failed. Please try again")
 
 
 @router.post("/analyze/landcover-transition", dependencies=[Depends(get_current_app_viewer), Depends(require_ee)])
@@ -70,16 +73,18 @@ async def analyze_landcover_transition(request: Request):
     try:
         return landcover_service.analyze_landcover_transition(data)
     except AnalysisError as e:
-        raise HTTPException(status_code=e.status_code, detail=str(e))
-    except ee.EEException as e:
+        raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
+    except ee.EEException:
         # Malformed AOI / geometry input reaching Earth Engine (e.g. a bad
         # GeoJSON shape from the client) is a client error, not a server fault -
         # EEException is not a ValueError subclass so it needs its own branch,
         # otherwise it falls through to the generic 500 handler below.
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail="Earth Engine rejected the analysis parameters")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="Invalid analysis parameters") from e
     except Exception as e:  # noqa: BLE001
-        logger.error(f"Land cover transition error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("Land cover transition error (%s)", type(e).__name__)
+        raise HTTPException(status_code=500, detail="Analysis failed. Please try again")
 
 
 @router.post("/analyze/landcover-change-map", dependencies=[Depends(get_current_app_viewer), Depends(require_ee)])
@@ -88,16 +93,18 @@ async def analyze_landcover_change_map(request: Request):
     try:
         return landcover_service.analyze_landcover_change_map(data)
     except AnalysisError as e:
-        raise HTTPException(status_code=e.status_code, detail=str(e))
-    except ee.EEException as e:
+        raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
+    except ee.EEException:
         # Malformed AOI / geometry input reaching Earth Engine (e.g. a bad
         # GeoJSON shape from the client) is a client error, not a server fault -
         # EEException is not a ValueError subclass so it needs its own branch,
         # otherwise it falls through to the generic 500 handler below.
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail="Earth Engine rejected the analysis parameters")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="Invalid analysis parameters") from e
     except Exception as e:  # noqa: BLE001
-        logger.error(f"Land cover change map error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("Land cover change map error (%s)", type(e).__name__)
+        raise HTTPException(status_code=500, detail="Analysis failed. Please try again")
 
 
 @router.post("/analyze/landcover-identify", dependencies=[Depends(get_current_app_viewer), Depends(require_ee)])
@@ -106,12 +113,14 @@ async def identify_landcover(request: Request):
     try:
         return landcover_service.identify_landcover_point(data)
     except AnalysisError as e:
-        raise HTTPException(status_code=e.status_code, detail=str(e))
-    except ee.EEException as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
+    except ee.EEException:
+        raise HTTPException(status_code=400, detail="Earth Engine rejected the analysis parameters")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="Invalid analysis parameters") from e
     except Exception as e:  # noqa: BLE001
-        logger.error(f"Land cover identify error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("Land cover identify error (%s)", type(e).__name__)
+        raise HTTPException(status_code=500, detail="Analysis failed. Please try again")
 
 
 @router.post("/analyze/landcover-hotspots", dependencies=[Depends(get_current_app_viewer), Depends(require_ee)])
@@ -122,9 +131,11 @@ async def analyze_landcover_hotspots(request: Request):
     try:
         return landcover_service.analyze_landcover_hotspots(data)
     except AnalysisError as e:
-        raise HTTPException(status_code=e.status_code, detail=str(e))
-    except ee.EEException as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
+    except ee.EEException:
+        raise HTTPException(status_code=400, detail="Earth Engine rejected the analysis parameters")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="Invalid analysis parameters") from e
     except Exception as e:  # noqa: BLE001
-        logger.error(f"Land cover hotspot error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("Land cover hotspot error (%s)", type(e).__name__)
+        raise HTTPException(status_code=500, detail="Analysis failed. Please try again")

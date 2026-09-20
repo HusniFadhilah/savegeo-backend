@@ -49,7 +49,7 @@ from app.services import (
     local_imagery_tile_service,
     wildfire_hotspot_service,
 )
-from app.services.gee_common import AnalysisError
+from app.services.gee_common import AnalysisError, public_analysis_error
 from app.services.geo_utils import bbox_and_centroid, estimate_area_ha
 
 router = APIRouter(prefix="/admin", tags=["admin-disaster"])
@@ -559,7 +559,7 @@ def admin_set_primary_imagery(
     try:
         img = disaster_repo.set_primary_imagery(db, id, imagery_id)
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
+        raise HTTPException(status_code=404, detail=public_analysis_error(exc))
     audit_service.log_audit(
         db, admin.id, "disaster_imagery.set_primary", "disaster_event", str(id),
         detail={"imagery_id": img.id, "phase": img.phase},
@@ -625,7 +625,7 @@ def admin_create_analysis(
         model, _, _, _ = disaster_analysis_service.validate_inputs(db, id, payload.aoi_id,
             payload.pre_imagery_id, payload.post_imagery_id, model_id)
     except AnalysisError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc))
+        raise HTTPException(status_code=exc.status_code, detail=public_analysis_error(exc))
     run = disaster_repo.create_run(db, id, {**payload.model_dump(), "model_id": model_id, "model_version": model["version"]}, admin.id)
     audit_service.log_audit(
         db, admin.id, "disaster_analysis.create", "disaster_event", str(id),
@@ -656,7 +656,7 @@ def admin_run_analysis(
     try:
         outcome = disaster_analysis_service.run_analysis(db, run_id, force=force)
     except AnalysisError as e:
-        raise HTTPException(status_code=e.status_code, detail=str(e))
+        raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
 
     audit_service.log_audit(
         db, admin.id, "disaster_analysis.run", "disaster_event", str(outcome["run"]["event_id"]),
@@ -833,7 +833,7 @@ def admin_sync_wildfire_hotspots(
             to_date=payload.to_date if payload else None,
         )
     except firms_service.FirmsRequestError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise HTTPException(status_code=exc.status_code, detail=public_analysis_error(exc)) from exc
     audit_service.log_audit(
         db,
         admin.id,

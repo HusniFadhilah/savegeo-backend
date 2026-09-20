@@ -20,7 +20,7 @@ from starlette.concurrency import run_in_threadpool
 from app.api.deps import require_ee
 from app.core.security import get_current_disaster_viewer
 from app.services import disaster_service, fire_multi_source_service, firms_service, wind_service
-from app.services.gee_common import AnalysisError
+from app.services.gee_common import AnalysisError, public_analysis_error
 
 router = APIRouter(prefix="/disaster", tags=["disaster"])
 logger = logging.getLogger(__name__)
@@ -56,7 +56,7 @@ def get_firms_fires(
             limit=limit,
         )
     except firms_service.FirmsRequestError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise HTTPException(status_code=exc.status_code, detail=public_analysis_error(exc)) from exc
 
 
 @router.get("/firms/wms")
@@ -83,7 +83,7 @@ def get_firms_wms(
         )
         return Response(content=payload["content"], media_type=payload["content_type"], headers={"X-Attribution": payload["attribution"]})
     except firms_service.FirmsRequestError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise HTTPException(status_code=exc.status_code, detail=public_analysis_error(exc)) from exc
 
 
 @router.get("/wind")
@@ -99,7 +99,7 @@ def get_wind(
         return wind_service.get_wind((west, south, east, north), requested_date=date)
     except (wind_service.WindRequestError, ValueError) as exc:
         status_code = exc.status_code if isinstance(exc, wind_service.WindRequestError) else 400
-        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+        raise HTTPException(status_code=status_code, detail=public_analysis_error(exc)) from exc
 
 
 @router.post("/fire-multi-source", dependencies=[Depends(get_current_disaster_viewer)])
@@ -112,7 +112,7 @@ async def load_fire_multi_source(request: Request):
         )
     except (AnalysisError, ValueError) as exc:
         raise HTTPException(
-            status_code=exc.status_code if isinstance(exc, AnalysisError) else 400, detail=str(exc)
+            status_code=exc.status_code if isinstance(exc, AnalysisError) else 400, detail=public_analysis_error(exc)
         )
 
 
@@ -122,7 +122,7 @@ async def load_fire_big_boundaries(request: Request):
         return await run_in_threadpool(fire_multi_source_service.load_big_boundaries, await request.json())
     except (AnalysisError, ValueError) as exc:
         raise HTTPException(
-            status_code=exc.status_code if isinstance(exc, AnalysisError) else 400, detail=str(exc)
+            status_code=exc.status_code if isinstance(exc, AnalysisError) else 400, detail=public_analysis_error(exc)
         )
     except requests.RequestException:
         raise HTTPException(status_code=502, detail="Layanan batas BIG belum dapat diakses")
@@ -134,7 +134,7 @@ async def import_fire_observations(request: Request):
         return fire_multi_source_service.import_observations(await request.json())
     except (AnalysisError, ValueError) as exc:
         raise HTTPException(
-            status_code=exc.status_code if isinstance(exc, AnalysisError) else 400, detail=str(exc)
+            status_code=exc.status_code if isinstance(exc, AnalysisError) else 400, detail=public_analysis_error(exc)
         )
 
 
@@ -148,7 +148,7 @@ def get_bmkg_alerts(limit: int = 30, viewer=Depends(get_current_disaster_viewer)
     try:
         return disaster_service.get_bmkg_alerts(limit=limit)
     except AnalysisError as e:
-        raise HTTPException(status_code=e.status_code, detail=str(e))
+        raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
 
 
 @router.post("/dem-slope", dependencies=[Depends(get_current_disaster_viewer), Depends(require_ee)])
@@ -157,7 +157,7 @@ async def get_disaster_dem_slope(request: Request):
     try:
         return disaster_service.get_disaster_dem_slope(data)
     except AnalysisError as e:
-        raise HTTPException(status_code=e.status_code, detail=str(e))
+        raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
 
 
 @router.post("/event-map", dependencies=[Depends(get_current_disaster_viewer), Depends(require_ee)])
@@ -171,7 +171,7 @@ async def get_disaster_event_map(request: Request):
     try:
         return disaster_service.get_disaster_event_map(data)
     except AnalysisError as e:
-        raise HTTPException(status_code=e.status_code, detail=str(e))
+        raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
 
 
 @router.post(
@@ -184,7 +184,7 @@ async def start_fire_sam_job(request: Request):
     try:
         return disaster_service.start_fire_sam_job(await request.json())
     except AnalysisError as e:
-        raise HTTPException(status_code=e.status_code, detail=str(e))
+        raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
 
 
 @router.get("/fire-sam/jobs/{job_id}", dependencies=[Depends(get_current_disaster_viewer)])
@@ -192,4 +192,4 @@ def get_fire_sam_job(job_id: str):
     try:
         return disaster_service.get_fire_sam_job(job_id)
     except AnalysisError as e:
-        raise HTTPException(status_code=e.status_code, detail=str(e))
+        raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))

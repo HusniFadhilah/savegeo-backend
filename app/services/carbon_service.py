@@ -71,20 +71,33 @@ def get_direct_carbon_reference_layer(
     from app.services.arcgis_helpers import _gee_visualize_params
 
     meta = get_dataset_meta(dataset_key, dataset_year)
+    available_years = meta.get("available_years")
+    if available_years and dataset_year not in available_years:
+        raise AnalysisError(
+            f"Tahun {dataset_year} tidak tersedia untuk {dataset_key}. Pilih salah satu: {', '.join(map(str, available_years))}.",
+            422,
+        )
+    selectable_year = bool(meta.get("is_temporal") or meta.get("mask_lossyear"))
+    if selectable_year and not available_years:
+        year_range = meta.get("year_range")
+        if year_range and not year_range[0] <= dataset_year <= year_range[1]:
+            raise AnalysisError(f"Tahun {dataset_year} di luar cakupan {dataset_key}.", 422)
+    effective_year = dataset_year if available_years or selectable_year else meta.get("year")
+    source_year = effective_year if isinstance(effective_year, int) else dataset_year
     ingestion = meta.get("ingestion_method")
     if ingestion == "soilgrids_rest":
         raise AnalysisError("SoilGrids hanya menyediakan statistik sampling; pilih AOI untuk memuat nilainya.", 422)
 
     tile_url = None
     if ingestion == "cog_rasterio":
-        tile_url = f"/api/carbon/reference-tiles/{dataset_key}/{{z}}/{{x}}/{{y}}.png?year={dataset_year}"
+        tile_url = f"/api/carbon/reference-tiles/{dataset_key}/{{z}}/{{x}}/{{y}}.png?year={source_year}"
     elif dataset_key in CARBON_ARCGIS_REGISTRY:
-        tile_url = f"/api/arcgis/tiles/{dataset_key}/{{z}}/{{y}}/{{x}}?year={dataset_year}"
+        tile_url = f"/api/arcgis/tiles/{dataset_key}/{{z}}/{{y}}/{{x}}?year={source_year}"
     else:
         if ingestion in {"cloud_geotiff_ee", "chloris_downloads_index"}:
-            image = load_external_carbon_reference_ee(dataset_key, dataset_year, roi=None)
+            image = load_external_carbon_reference_ee(dataset_key, source_year, roi=None)
         elif dataset_key in CARBON_DATASET_REGISTRY:
-            image = load_carbon_reference_ee(dataset_key, dataset_year, roi=None)
+            image = load_carbon_reference_ee(dataset_key, source_year, roi=None)
         else:
             raise AnalysisError(f"Dataset '{dataset_key}' tidak mendukung pemuatan langsung.", 422)
         vis = {
@@ -100,8 +113,10 @@ def get_direct_carbon_reference_layer(
         "dataset_name": meta.get("name") or meta.get("full_name") or dataset_key,
         "full_name": meta.get("full_name"),
         "tile_url": tile_url,
-        "year": meta.get("year", dataset_year),
+        "year": effective_year,
         "requested_year": dataset_year,
+        "effective_year": effective_year,
+        "available_years": available_years,
         "resolution": meta.get("resolution"),
         "unit": meta.get("unit"),
         "target_pool": meta.get("target_pool"),
@@ -185,6 +200,13 @@ def get_carbon_dataset_list(
             "year": meta.get("year"),
             "year_range": meta.get("year_range"),
             "available_years": meta.get("available_years"),
+            "selection_year": meta.get("year") if isinstance(meta.get("year"), int) else (
+                CARBON_DATASET_REGISTRY.get(key)
+                or CARBON_ARCGIS_REGISTRY.get(key)
+                or CARBON_EXTERNAL_REGISTRY.get(key)
+                or {}
+            ).get("year"),
+            "year_selectable": bool(meta.get("available_years") or meta.get("is_temporal") or meta.get("mask_lossyear")),
             "deprecated": bool(meta.get("deprecated", False)),
             "replacement_key": meta.get("replacement_key"),
             "description": meta.get("description"),
@@ -226,13 +248,25 @@ def _dataset_runtime_status(key: str, meta: dict) -> dict:
     return {"is_configured": True, "requires_configuration": False, "availability_error": None}
 
 
+def get_cached_external_dataset_health(key: str) -> dict:
+    from app.core.config import get_settings
+
+    cached = _DATASET_HEALTH_CACHE.get(key)
+    if cached:
+        ttl = max(60, int(getattr(get_settings(), "carbon_dataset_health_ttl_seconds", 900)))
+        if time.time() - cached[0] > ttl:
+            return {**cached[1], "status": "unknown", "stale": True}
+        return cached[1]
+    return {"key": key, "status": "unknown", "check_scope": "reachability_only", "error": None, "checked_at": None}
+
+
 def check_external_dataset_health(key: str, refresh: bool = False) -> dict:
     """Check a public reference endpoint with a short, cached request."""
     from app.core.config import get_settings
 
     meta = CARBON_EXTERNAL_REGISTRY.get(key)
     if not meta:
-        return {"key": key, "status": "unknown", "error": "Dataset bukan external raster"}
+        return {"key": key, "status": "unknown", "check_scope": "reachability_only", "error": "Dataset bukan external raster"}
     now = time.time()
     ttl = max(60, int(getattr(get_settings(), "carbon_dataset_health_ttl_seconds", 900)))
     cached = _DATASET_HEALTH_CACHE.get(key)
@@ -250,7 +284,7 @@ def check_external_dataset_health(key: str, refresh: bool = False) -> dict:
         else:
             url = template.format(lat_tile="00N", lon_tile="100E")
     if not url:
-        result = {"key": key, "status": "unknown", "error": "Tidak ada URL health check"}
+        result = {"key": key, "status": "unknown", "check_scope": "reachability_only", "error": "Tidak ada URL health check"}
         _DATASET_HEALTH_CACHE[key] = (now, result)
         return result
 
@@ -258,25 +292,29 @@ def check_external_dataset_health(key: str, refresh: bool = False) -> dict:
     try:
         response = requests.head(url, timeout=5, allow_redirects=True)
         if response.status_code in {405, 501}:
+            response.close()
             response = requests.get(url, headers={"Range": "bytes=0-1023"}, timeout=5, stream=True)
-        ok = 200 <= response.status_code < 400
+        try:
+            ok = 200 <= response.status_code < 400
+            result = {
+                "key": key,
+                "check_scope": "reachability_only",
+                "status": "healthy" if ok else "unavailable",
+                "http_status": response.status_code,
+                "latency_ms": round((time.perf_counter() - started) * 1000, 1),
+                "checked_at": datetime.now(UTC).isoformat(),
+                "error": None if ok else f"HTTP {response.status_code}",
+            }
+        finally:
+            response.close()
+    except requests.RequestException:
         result = {
             "key": key,
-            "status": "healthy" if ok else "unavailable",
-            "http_status": response.status_code,
-            "latency_ms": round((time.perf_counter() - started) * 1000, 1),
-            "checked_at": datetime.now(UTC).isoformat(),
-            "url": url,
-            "error": None if ok else f"HTTP {response.status_code}",
-        }
-    except requests.RequestException as exc:
-        result = {
-            "key": key,
+            "check_scope": "reachability_only",
             "status": "unavailable",
             "latency_ms": round((time.perf_counter() - started) * 1000, 1),
             "checked_at": datetime.now(UTC).isoformat(),
-            "url": url,
-            "error": str(exc),
+            "error": "Health check request failed",
         }
     _DATASET_HEALTH_CACHE[key] = (now, result)
     return result

@@ -15,6 +15,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import BoundedSemaphore
 from typing import Any
 
 import ee
@@ -37,12 +38,14 @@ from app.services import (
     output_registry_service,
     vegetation_service,
 )
-from app.services.gee_common import AnalysisError
+from app.services.gee_common import AnalysisError, public_analysis_error
 
 router = APIRouter(tags=["analysis-jobs"])
 logger = logging.getLogger(__name__)
 
-_executor = ThreadPoolExecutor(max_workers=int(os.getenv("ANALYSIS_JOB_WORKERS", "2")))
+_worker_count = max(1, int(os.getenv("ANALYSIS_JOB_WORKERS", "2")))
+_executor = ThreadPoolExecutor(max_workers=_worker_count)
+_job_slots = BoundedSemaphore(max(_worker_count, int(os.getenv("ANALYSIS_JOB_MAX_INFLIGHT", "12"))))
 _ALLOWED_JOB_TYPES = {
     "carbon",
     "carbon_local",
@@ -80,6 +83,11 @@ def _now() -> str:
 
 def _write_job(job_id: str, data: dict[str, Any]) -> None:
     path = _job_path(job_id)
+    if path.exists() and "owner" not in data:
+        with path.open("r", encoding="utf-8") as previous_file:
+            previous_owner = json.load(previous_file).get("owner")
+        if previous_owner:
+            data = {**data, "owner": previous_owner}
     data = {**data, "updated_at": _now()}
     fd, tmp_name = tempfile.mkstemp(prefix=f"{job_id}.", suffix=".tmp", dir=str(path.parent))
     try:
@@ -157,7 +165,7 @@ def _run_job(job_id: str, job_type: str, payload: dict[str, Any]) -> None:
                 "type": job_type,
                 "status": "failed",
                 "finished_at": _now(),
-                "error": str(exc),
+                "error": public_analysis_error(exc),
                 "status_code": exc.status_code,
             },
         )
@@ -168,7 +176,7 @@ def _run_job(job_id: str, job_type: str, payload: dict[str, Any]) -> None:
             error_code=f"analysis_{exc.status_code}",
             completed_at=datetime.now(UTC),
         )
-    except ee.EEException as exc:
+    except ee.EEException:
         _write_job(
             job_id,
             {
@@ -176,7 +184,7 @@ def _run_job(job_id: str, job_type: str, payload: dict[str, Any]) -> None:
                 "type": job_type,
                 "status": "failed",
                 "finished_at": _now(),
-                "error": str(exc),
+                "error": "Earth Engine tidak dapat memproses analisis. Periksa AOI dan parameter lalu coba lagi.",
                 "status_code": 400,
             },
         )
@@ -184,7 +192,7 @@ def _run_job(job_id: str, job_type: str, payload: dict[str, Any]) -> None:
             db, job_id, status="failed", error_code="earth_engine_error", completed_at=datetime.now(UTC)
         )
     except requests.RequestException as exc:
-        logger.warning("Analysis job %s upstream connection failed: %s", job_id, exc)
+        logger.warning("Analysis job %s upstream connection failed: %s", job_id, type(exc).__name__)
         _write_job(
             job_id,
             {
@@ -192,15 +200,15 @@ def _run_job(job_id: str, job_type: str, payload: dict[str, Any]) -> None:
                 "type": job_type,
                 "status": "failed",
                 "finished_at": _now(),
-                "error": f"{_UPSTREAM_CONNECTION_ERROR} Detail teknis: {exc}",
+                "error": _UPSTREAM_CONNECTION_ERROR,
                 "status_code": 503,
             },
         )
         provenance_service.update_analysis_provenance(
             db, job_id, status="failed", error_code="upstream_unavailable", completed_at=datetime.now(UTC)
         )
-    except Exception as exc:
-        logger.exception("Analysis job %s failed", job_id)
+    except Exception:
+        logger.error("Analysis job %s failed", job_id)
         _write_job(
             job_id,
             {
@@ -208,7 +216,7 @@ def _run_job(job_id: str, job_type: str, payload: dict[str, Any]) -> None:
                 "type": job_type,
                 "status": "failed",
                 "finished_at": _now(),
-                "error": str(exc),
+                "error": "Analisis gagal. Coba lagi atau hubungi administrator.",
                 "status_code": 500,
             },
         )
@@ -246,6 +254,13 @@ def create_analysis_job(
     if needs_ee and not getattr(request.app.state, "ee_initialized", False):
         raise HTTPException(status_code=503, detail="Google Earth Engine belum diinisialisasi. Cek kredensial di Admin Panel.")
 
+    if not _job_slots.acquire(blocking=False):
+        raise HTTPException(
+            status_code=429,
+            detail="Terlalu banyak analisis sedang diproses. Coba lagi sebentar.",
+            headers={"Retry-After": "30"},
+        )
+
     job_id = str(uuid.uuid4())
     try:
         provenance_service.create_analysis_provenance(
@@ -257,16 +272,30 @@ def create_analysis_job(
         )
     except ValueError as exc:
         db.rollback()
+        _job_slots.release()
         raise HTTPException(status_code=422, detail={"code": "INVALID_DATETIME", "message": str(exc)}) from exc
-    output_registry_service.register_action_outputs(db, job_id)
-    _write_job(job_id, {"job_id": job_id, "type": job_type, "status": "queued", "created_at": _now()})
-    _executor.submit(_run_job, job_id, job_type, payload)
+    except Exception:
+        _job_slots.release()
+        raise
+    try:
+        output_registry_service.register_action_outputs(db, job_id)
+        owner = f"user:{viewer.id}" if isinstance(viewer, User) else f"admin:{viewer.id}"
+        _write_job(job_id, {"job_id": job_id, "type": job_type, "status": "queued", "created_at": _now(), "owner": owner})
+        future = _executor.submit(_run_job, job_id, job_type, payload)
+        future.add_done_callback(lambda _future: _job_slots.release())
+    except Exception:
+        _job_slots.release()
+        raise
     return {"job_id": job_id, "status": "queued", "status_url": f"/analysis-jobs/{job_id}"}
 
 
-@router.get("/analysis-jobs/{job_id}", dependencies=[Depends(get_current_app_viewer)])
-def get_analysis_job(job_id: str):
+@router.get("/analysis-jobs/{job_id}")
+def get_analysis_job(job_id: str, viewer: object = Depends(get_current_app_viewer)):
     job = _read_job(job_id)
+    owner = f"user:{viewer.id}" if isinstance(viewer, User) else f"admin:{viewer.id}"
+    if job.get("owner") != owner:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job = {key: value for key, value in job.items() if key != "owner"}
     if job.get("status") == "failed":
         status_code = int(job.get("status_code") or 500)
         return {k: v for k, v in job.items() if k != "status_code"} | {"http_status": status_code}

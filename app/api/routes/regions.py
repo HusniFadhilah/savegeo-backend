@@ -10,6 +10,7 @@ Ported from app.py.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -21,6 +22,7 @@ from app.core.config import get_settings
 from app.services.boundary_provider import CachedBoundaryProvider, Sp3StabBoundaryProvider
 
 router = APIRouter(prefix="/regions", tags=["regions"])
+logger = logging.getLogger(__name__)
 
 GEO_STATIC_DIR = Path(__file__).resolve().parents[2] / "static" / "geo"
 ISLANDS_GEO_DIR = GEO_STATIC_DIR / "islands"
@@ -116,7 +118,8 @@ def get_provinces(island: str | None = None):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        logger.error("Region provider request failed")
+        raise HTTPException(status_code=502, detail="Region provider temporarily unavailable") from e
 
 
 @router.get("/cities")
@@ -128,7 +131,8 @@ def get_cities(province_code: str = ""):
         r.raise_for_status()
         return r.json()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        logger.error("Region provider request failed")
+        raise HTTPException(status_code=502, detail="Region provider temporarily unavailable") from e
 
 
 @router.get("/provinces/{code}/geometry")
@@ -157,7 +161,7 @@ def _get_validated_geometry(endpoint: str, code: str):
     except HTTPException:
         raise
     except ValueError as exc:
-        raise HTTPException(status_code=502, detail=f"Boundary geometry validation failed: {exc}") from exc
+        raise HTTPException(status_code=502, detail="Boundary geometry validation failed") from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail="Boundary provider temporarily unavailable") from exc
 
@@ -171,7 +175,8 @@ def get_districts(city_code: str = ""):
         r.raise_for_status()
         return r.json()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        logger.error("Region provider request failed")
+        raise HTTPException(status_code=502, detail="Region provider temporarily unavailable") from e
 
 
 @router.get("/villages")
@@ -183,13 +188,16 @@ def get_villages(district_code: str = ""):
         r.raise_for_status()
         return r.json()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        logger.error("Region provider request failed")
+        raise HTTPException(status_code=502, detail="Region provider temporarily unavailable") from e
 
 
 @router.get("/geometry")
 def get_region_geometry(endpoint: str = "", code: str = ""):
     if not endpoint or not code:
         raise HTTPException(status_code=400, detail="endpoint and code are required")
+    if endpoint not in {"province", "city", "district", "village"}:
+        raise HTTPException(status_code=400, detail="Invalid region endpoint")
     try:
         r = requests.get(f"{_base_url()}/{endpoint}", params={"code": code}, timeout=20)
         r.raise_for_status()
@@ -201,7 +209,8 @@ def get_region_geometry(endpoint: str = "", code: str = ""):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        logger.error("Region provider request failed")
+        raise HTTPException(status_code=502, detail="Region provider temporarily unavailable") from e
 
 
 def _extract_region_dropdown_items(payload):
@@ -370,7 +379,8 @@ def get_region_children_geometries(
                     if child_failed:
                         failed.append(child_failed)
                 except Exception as child_error:  # noqa: BLE001 - one child failing shouldn't abort the batch; collected in `failed`
-                    failed.append({"name": "unknown", "code": "unknown", "reason": str(child_error)})
+                    logger.warning("Region child geometry request failed: %s", type(child_error).__name__)
+                    failed.append({"name": "unknown", "code": "unknown", "reason": "Boundary provider temporarily unavailable"})
 
         response_payload = {
             "type": "FeatureCollection",
@@ -390,7 +400,8 @@ def get_region_children_geometries(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        logger.error("Region provider request failed")
+        raise HTTPException(status_code=502, detail="Region provider temporarily unavailable") from e
 
 
 @router.get("/islands")

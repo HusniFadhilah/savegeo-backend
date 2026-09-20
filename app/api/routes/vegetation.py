@@ -19,7 +19,7 @@ from app.registries.satellite_provider_registry import DEFAULT_SATELLITE
 from app.registries.vegetation_index_registry import get_catalog_payload
 from app.repositories.satellite_provider_repo import list_satellites
 from app.services import vegetation_service
-from app.services.gee_common import CLOUD_MASK_TECHNIQUE_INFO, DEFAULT_CLOUD_MASK_TECHNIQUE, AnalysisError
+from app.services.gee_common import CLOUD_MASK_TECHNIQUE_INFO, DEFAULT_CLOUD_MASK_TECHNIQUE, AnalysisError, public_analysis_error
 
 router = APIRouter(tags=["vegetation"])
 logger = logging.getLogger(__name__)
@@ -53,16 +53,18 @@ async def analyze_vegetation(request: Request, db: Session = Depends(get_db)):
     try:
         return vegetation_service.analyze_vegetation(db, data)
     except AnalysisError as e:
-        raise HTTPException(status_code=e.status_code, detail=str(e))
-    except ee.EEException as e:
+        raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
+    except ee.EEException:
         # Malformed AOI / geometry input reaching Earth Engine (e.g. a bad
         # GeoJSON shape from the client) is a client error, not a server fault -
         # EEException is not a ValueError subclass so it needs its own branch,
         # otherwise it falls through to the generic 500 handler below.
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail="Earth Engine rejected the analysis parameters")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="Invalid analysis parameters") from e
     except Exception as e:  # noqa: BLE001
-        logger.error(f"Vegetation analysis error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("Vegetation analysis error (%s)", type(e).__name__)
+        raise HTTPException(status_code=500, detail="Analysis failed. Please try again")
 
 
 @router.post("/analyze/vegetation/compare", dependencies=[Depends(get_current_app_viewer), Depends(require_ee)])
@@ -71,16 +73,18 @@ async def analyze_vegetation_compare(request: Request, db: Session = Depends(get
     try:
         return vegetation_service.analyze_vegetation_compare(db, data)
     except AnalysisError as e:
-        raise HTTPException(status_code=e.status_code, detail=str(e))
-    except ee.EEException as e:
+        raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
+    except ee.EEException:
         # Malformed AOI / geometry input reaching Earth Engine (e.g. a bad
         # GeoJSON shape from the client) is a client error, not a server fault -
         # EEException is not a ValueError subclass so it needs its own branch,
         # otherwise it falls through to the generic 500 handler below.
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail="Earth Engine rejected the analysis parameters")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="Invalid analysis parameters") from e
     except Exception as e:  # noqa: BLE001
-        logger.error(f"Vegetation compare error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("Vegetation compare error (%s)", type(e).__name__)
+        raise HTTPException(status_code=500, detail="Analysis failed. Please try again")
 
 
 @router.post("/analyze/vegetation/change-hotspots", dependencies=[Depends(get_current_app_viewer), Depends(require_ee)])
@@ -92,9 +96,11 @@ async def analyze_vegetation_change_hotspots(request: Request, db: Session = Dep
     try:
         return vegetation_service.analyze_vegetation_change_hotspots(db, data)
     except AnalysisError as e:
-        raise HTTPException(status_code=e.status_code, detail=str(e))
-    except ee.EEException as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
+    except ee.EEException:
+        raise HTTPException(status_code=400, detail="Earth Engine rejected the analysis parameters")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="Invalid analysis parameters") from e
     except Exception as e:  # noqa: BLE001
-        logger.error(f"Vegetation change hotspot error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("Vegetation change hotspot error (%s)", type(e).__name__)
+        raise HTTPException(status_code=500, detail="Analysis failed. Please try again")

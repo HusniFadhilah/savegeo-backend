@@ -256,7 +256,7 @@ def delete_gee_credential(cred_id: int, admin: AdminUser = Depends(require_permi
     try:
         storage_service.delete_credential(cred.bucket_path)
     except Exception as exc:  # noqa: BLE001 - best-effort cleanup; the DB row is still deleted below regardless
-        logger.warning("Failed to delete GEE credential file %s from storage: %s", cred.bucket_path, exc)
+        logger.warning("Failed to delete GEE credential file %s from storage: %s", cred.bucket_path, type(exc).__name__)
     cred_id_val = cred.id
     db.delete(cred)
     db.commit()
@@ -499,7 +499,7 @@ def admin_model_delete(model_id: int, admin: AdminUser = Depends(require_permiss
         try:
             Path(model.filepath).unlink(missing_ok=True)
         except Exception as exc:  # noqa: BLE001 - best-effort cleanup; the DB row is still deleted below regardless
-            logger.warning("Failed to delete model file %s: %s", model.filepath, exc)
+            logger.warning("Failed to delete model file %s: %s", model.filepath, type(exc).__name__)
     model_id_val, model_name = model.id, model.name
     db.delete(model)
     db.commit()
@@ -1035,7 +1035,8 @@ async def admin_companies_import_osm(
 
     osm_data, last_error = await run_in_threadpool(_fetch_osm_overpass, overpass_query)
     if osm_data is None:
-        raise HTTPException(status_code=502, detail=f"Semua server Overpass gagal. Error terakhir: {last_error}")
+        logger.warning("Overpass import failed")
+        raise HTTPException(status_code=502, detail="Semua server Overpass gagal. Coba lagi nanti.")
 
     imported, skipped, errors = 0, 0, []
     for element in osm_data.get("elements", []):
@@ -1114,7 +1115,7 @@ async def admin_companies_import_gfw(
     except HTTPException:
         raise
     except Exception as e:  # noqa: BLE001 - surfaced to the client as a 502 either way
-        raise HTTPException(status_code=502, detail=f"GFW/CARTO API error: {e}")
+        raise HTTPException(status_code=502, detail="GFW/CARTO API sementara tidak tersedia") from e
 
     if result["mode"] == "rows":
         return _import_gfw_rows(db, admin, result["rows"], ds, dataset_key)
@@ -1274,7 +1275,7 @@ def openrouter_models(free: str | None = None, q: str | None = None):
             _OR_MODEL_CACHE["ts"] = now
         except Exception as e:  # noqa: BLE001
             if not _OR_MODEL_CACHE["data"]:
-                raise HTTPException(status_code=502, detail=str(e))
+                raise HTTPException(status_code=502, detail="Model provider temporarily unavailable") from e
             # else: serve stale cache below
 
     models = _OR_MODEL_CACHE["data"] or []

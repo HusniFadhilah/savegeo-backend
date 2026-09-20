@@ -11,7 +11,7 @@ from app.api.deps import require_ee
 from app.core.security import get_current_app_viewer
 from app.db.session import get_db
 from app.services import download_service
-from app.services.gee_common import AnalysisError
+from app.services.gee_common import AnalysisError, public_analysis_error
 
 router = APIRouter(prefix="/download", tags=["download"])
 logger = logging.getLogger(__name__)
@@ -23,13 +23,10 @@ async def download_geotiff(request: Request, db: Session = Depends(get_db)):
     try:
         return download_service.download_geotiff(db, data)
     except AnalysisError as e:
-        raise HTTPException(status_code=e.status_code, detail=str(e))
+        raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
     except ee.EEException as e:
-        # Malformed AOI / geometry input reaching Earth Engine (e.g. a bad
-        # GeoJSON shape from the client) is a client error, not a server fault -
-        # EEException is not a ValueError subclass so it needs its own branch,
-        # otherwise it falls through to the generic 500 handler below.
-        raise HTTPException(status_code=400, detail=str(e))
+        logger.warning("GeoTIFF Earth Engine error: %s", e)
+        raise HTTPException(status_code=422, detail="Earth Engine tidak dapat memproses AOI atau parameter ekspor.") from e
     except Exception as e:
         logger.exception("Download GeoTIFF error")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Ekspor GeoTIFF gagal. Coba lagi atau hubungi administrator.") from e

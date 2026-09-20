@@ -54,12 +54,16 @@ def capabilities() -> dict:
 
 
 def _write_json(path: Path, value: dict) -> None:
+    if path.exists() and "owner" not in value:
+        previous_owner = json.loads(path.read_text(encoding="utf-8")).get("owner")
+        if previous_owner:
+            value = {**value, "owner": previous_owner}
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(value), encoding="utf-8")
     temporary.replace(path)
 
 
-def get_job(job_id: str) -> dict:
+def get_job(job_id: str, owner: str | None = None) -> dict:
     try:
         job_id = str(UUID(job_id))
     except ValueError as exc:
@@ -68,12 +72,15 @@ def get_job(job_id: str) -> dict:
     if not path.exists():
         raise AnalysisError("Hasil segmentasi tidak ditemukan atau sudah kedaluwarsa", 404)
     status = json.loads(path.read_text(encoding="utf-8"))
+    if owner is not None and status.get("owner") != owner:
+        raise AnalysisError("Hasil segmentasi tidak ditemukan atau sudah kedaluwarsa", 404)
+    status.pop("owner", None)
     if status["status"] == "running" and time.time() - path.stat().st_mtime > 1800:
         return {"job_id": job_id, "status": "failed", "message": "Pekerjaan terhenti atau melewati batas waktu server."}
     return status
 
 
-def start_job(data: dict) -> dict:
+def start_job(data: dict, owner: str) -> dict:
     if not data.get("item_url") or not data.get("aoi"):
         raise AnalysisError("Scene COG dan AOI diperlukan untuk segmentasi", 400)
     provider_key = str(data.get("provider_key") or "")
@@ -101,22 +108,22 @@ def start_job(data: dict) -> dict:
     folder = JOB_ROOT / job_id
     try:
         folder.mkdir()
-        status = {"job_id": job_id, "status": "running", "message": "Membaca COG dan menyiapkan model SAM ViT-B"}
+        status = {"job_id": job_id, "status": "running", "message": "Membaca COG dan menyiapkan model SAM ViT-B", "owner": owner}
         _write_json(folder / "status.json", status)
         threading.Thread(target=_run_job, args=(folder, data), daemon=True).start()
     except Exception:
         lock.unlink(missing_ok=True)
         raise
-    return status
+    return {key: value for key, value in status.items() if key != "owner"}
 
 
 def _run_job(folder: Path, data: dict) -> None:
     try:
         result = segment(data, folder)
         _write_json(folder / "status.json", {"job_id": folder.name, "status": "complete", "result": result})
-    except Exception as exc:
+    except Exception:
         logger.exception("SamGeo job failed")
-        _write_json(folder / "status.json", {"job_id": folder.name, "status": "failed", "message": str(exc)})
+        _write_json(folder / "status.json", {"job_id": folder.name, "status": "failed", "message": "Segmentasi gagal. Coba lagi atau hubungi administrator."})
     finally:
         for filename in ("input.tif", "mask.tif"):
             (folder / filename).unlink(missing_ok=True)

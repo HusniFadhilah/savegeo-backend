@@ -7,7 +7,7 @@ See: backend/docs/model-registry-strategy.md
 # Conservative fallback for legacy models whose name clearly indicates WCMC training.
 WCMC_FALLBACK_METADATA = {
     "target_dataset_key": "WCMC",
-    "target_pool": "aboveground_biomass_carbon",
+    "target_pool": "aboveground_belowground_biomass_carbon",
     "target_unit": "Mg C/ha",
     "feature_stack": "standard_s2",
     "compatible_reference_datasets": ["WCMC"],

@@ -7,6 +7,7 @@ Ported verbatim (business logic unchanged) from legacy `backend/app.py` lines
 from __future__ import annotations
 
 from datetime import date
+from math import isfinite
 
 import ee
 
@@ -26,6 +27,13 @@ class AnalysisError(Exception):
         super().__init__(message)
         self.status_code = status_code
         self.extra = extra or {}
+
+
+def public_analysis_error(error: Exception) -> str:
+    """Keep upstream and internal exception text out of client responses."""
+    if getattr(error, "status_code", 400) >= 500:
+        return "Layanan analisis sementara tidak tersedia. Coba lagi."
+    return str(error)
 
 
 def mask_s2_clouds(image):
@@ -211,19 +219,80 @@ def create_geometry_from_payload(aoi_payload: dict) -> ee.Geometry:
     required = {"west", "south", "east", "north"}
     if not required.issubset(aoi_payload.keys()):
         raise ValueError("AOI bounds missing west/south/east/north")
-    return ee.Geometry.Rectangle([
-        float(aoi_payload["west"]), float(aoi_payload["south"]),
-        float(aoi_payload["east"]), float(aoi_payload["north"]),
-    ])
+    try:
+        west, south, east, north = (
+            float(aoi_payload[key]) for key in ("west", "south", "east", "north")
+        )
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("AOI bounds must be numeric") from exc
+    if not all(isfinite(value) for value in (west, south, east, north)):
+        raise ValueError("AOI bounds must be finite")
+    if not (-180 <= west <= 180 and -180 <= east <= 180 and -90 <= south <= 90 and -90 <= north <= 90):
+        raise ValueError("AOI bounds must use valid longitude and latitude")
+    if west >= east or south >= north:
+        raise ValueError("AOI bounds must satisfy west < east and south < north")
+    return ee.Geometry.Rectangle([west, south, east, north])
 
 
 def geojson_to_ee_geometry(geojson):
+    _validate_geojson(geojson)
     if geojson["type"] == "FeatureCollection":
         features = [ee.Feature(ee.Geometry(f["geometry"])) for f in geojson["features"]]
         return ee.FeatureCollection(features).geometry().dissolve()
     if geojson["type"] == "Feature":
         return ee.Geometry(geojson["geometry"])
     return ee.Geometry(geojson)
+
+
+def _validate_geojson(node: object, depth: int = 0) -> None:
+    if depth > 8 or not isinstance(node, dict):
+        raise ValueError("AOI GeoJSON must be a valid geometry or feature")
+    kind = node.get("type")
+    if kind == "FeatureCollection":
+        features = node.get("features")
+        if not isinstance(features, list) or not features:
+            raise ValueError("AOI FeatureCollection must contain features")
+        for feature in features:
+            _validate_geojson(feature, depth + 1)
+        return
+    if kind == "Feature":
+        _validate_geojson(node.get("geometry"), depth + 1)
+        return
+    if kind == "GeometryCollection":
+        geometries = node.get("geometries")
+        if not isinstance(geometries, list) or not geometries:
+            raise ValueError("AOI GeometryCollection must contain geometries")
+        for geometry in geometries:
+            _validate_geojson(geometry, depth + 1)
+        return
+    levels = {"Point": 0, "MultiPoint": 1, "LineString": 1,
+              "MultiLineString": 2, "Polygon": 2, "MultiPolygon": 3}
+    if kind not in levels:
+        raise ValueError("Unsupported AOI GeoJSON geometry type")
+
+    def validate_coords(coords: object, level: int) -> None:
+        if level == 0:
+            if not isinstance(coords, (list, tuple)) or len(coords) < 2:
+                raise ValueError("AOI coordinates must contain longitude and latitude")
+            lon, lat = coords[:2]
+            if any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in (lon, lat)):
+                raise ValueError("AOI coordinates must be finite numbers")
+            if not (-180 <= lon <= 180 and -90 <= lat <= 90):
+                raise ValueError("AOI coordinates exceed longitude or latitude limits")
+            if not isfinite(float(lon)) or not isfinite(float(lat)):
+                raise ValueError("AOI coordinates must be finite numbers")
+            return
+        if not isinstance(coords, (list, tuple)) or not coords:
+            raise ValueError("AOI coordinate arrays must not be empty")
+        if kind in {"LineString", "MultiLineString"} and level == 1 and len(coords) < 2:
+            raise ValueError("AOI line must contain at least two positions")
+        if kind in {"Polygon", "MultiPolygon"} and level == 1:
+            if len(coords) < 4 or coords[0] != coords[-1]:
+                raise ValueError("AOI polygon rings must be closed with at least four positions")
+        for part in coords:
+            validate_coords(part, level - 1)
+
+    validate_coords(node.get("coordinates"), levels[kind])
 
 
 def geometry_area_ha(geometry) -> float:

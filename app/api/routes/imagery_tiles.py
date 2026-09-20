@@ -50,8 +50,8 @@ def imagery_tile(
     try:
         png_bytes = local_imagery_tile_service.render_tile(img.local_file_path, z, x, y)
     except Exception as e:  # noqa: BLE001
-        logger.error(f"imagery_tile error (imagery_id={imagery_id} {z}/{x}/{y}): {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("imagery_tile error (imagery_id=%s %s/%s/%s)", imagery_id, z, x, y)
+        raise HTTPException(status_code=500, detail="Unable to render imagery tile") from e
 
     if png_bytes is None:
         raise HTTPException(status_code=404, detail="Tile di luar cakupan raster")
