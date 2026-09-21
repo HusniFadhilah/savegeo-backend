@@ -58,7 +58,6 @@ def _event_period(
     end = _date(
         to_date,
         event.monitoring_to
-        or (event.last_data_at.date() if event.last_data_at else None)
         or event.end_date
         or today,
     )

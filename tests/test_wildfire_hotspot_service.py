@@ -1,3 +1,4 @@
+import datetime as dt
 from datetime import date
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -71,6 +72,21 @@ def test_sync_fetches_each_firms_source_and_deduplicates_in_db():
     assert result["to"] == "2026-08-27"
     assert db.add.call_count == result["stored"]
     assert event.hotspot_last_synced_at is not None
+
+
+def test_active_event_period_defaults_to_today_instead_of_stale_last_data():
+    event = SimpleNamespace(
+        monitoring_from=date(2026, 8, 20),
+        monitoring_to=None,
+        start_date=date(2026, 1, 1),
+        end_date=None,
+        last_data_at=dt.datetime(2026, 8, 27, tzinfo=dt.UTC),
+    )
+
+    start, end = wildfire._event_period(event, None, None)
+
+    assert start == date(2026, 8, 20)
+    assert end == dt.datetime.now(dt.UTC).date()
 
 
 def test_external_id_is_scoped_by_source():
