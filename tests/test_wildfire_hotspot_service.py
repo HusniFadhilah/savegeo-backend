@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from app.services import wildfire_hotspot_service as wildfire
+from app.services.wildfire_geometry import is_kalimantan_geometry
 
 
 def _db_for_sync() -> MagicMock:
@@ -93,3 +94,8 @@ def test_external_id_is_scoped_by_source():
     feature = {"id": "firms-abc", "properties": {"source": "VIIRS_NOAA20_NRT"}}
 
     assert wildfire._external_id(feature) == "VIIRS_NOAA20_NRT:firms-abc"
+
+
+def test_kalimantan_mask_excludes_western_sulawesi():
+    assert is_kalimantan_geometry({"type": "Point", "coordinates": [113.0, -1.0]})
+    assert not is_kalimantan_geometry({"type": "Point", "coordinates": [119.0, -1.0]})

@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.db.models.disaster_event import DisasterEvent
 from app.db.models.wildfire_hotspot import WildfireHotspot
 from app.services import firms_service
+from app.services.wildfire_geometry import is_feature_in_event_scope
 
 _INITIAL_SYNC_LOCK = threading.RLock()
 # FIRMS area queries return at most ``limit`` rows after all requested date
@@ -139,7 +140,8 @@ def sync_event_hotspots(
             fetched.extend(result.get("features", []))
             errors.extend(result.get("metadata", {}).get("errors", []))
 
-    features = _feature_map(fetched)
+    scoped_features = [feature for feature in fetched if is_feature_in_event_scope(event, feature)]
+    features = _feature_map(scoped_features)
     external_ids = list(features)
     existing = {
         row.external_id: row
@@ -197,6 +199,7 @@ def sync_event_hotspots(
         "from": start.isoformat(),
         "to": end.isoformat(),
         "fetched": len(fetched),
+        "filtered_out_of_scope": len(fetched) - len(scoped_features),
         "stored": len(features),
         "updated_at": now.isoformat(),
         "errors": errors,
