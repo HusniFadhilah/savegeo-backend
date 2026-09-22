@@ -1,4 +1,4 @@
-"""Remove persisted observations outside the Kalimantan land mask."""
+"""Hide persisted observations outside the Kalimantan land mask."""
 
 from collections.abc import Sequence
 
@@ -25,6 +25,7 @@ def upgrade() -> None:
         sa.column("id", sa.Integer()),
         sa.column("event_id", sa.Integer()),
         sa.column("geojson", sa.JSON()),
+        sa.column("is_published", sa.Boolean()),
     )
     event_id = connection.execute(
         sa.select(events.c.id).where(events.c.slug == "kalimantan-2026")
@@ -41,9 +42,14 @@ def upgrade() -> None:
         if not isinstance(row["geojson"], dict) or not is_kalimantan_geometry(row["geojson"])
     ]
     if out_of_scope:
-        connection.execute(sa.delete(hotspots).where(hotspots.c.id.in_(out_of_scope)))
+        connection.execute(
+            sa.update(hotspots)
+            .where(hotspots.c.id.in_(out_of_scope))
+            .values(is_published=False)
+        )
 
 
 def downgrade() -> None:
-    # Deleted observations cannot be reconstructed without re-syncing NASA FIRMS.
+    # Keep the cleanup migration one-way; records remain available for manual
+    # recovery if the boundary source is revised later.
     pass

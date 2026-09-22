@@ -1,7 +1,7 @@
 """Compatibility marker for an older renamed Kalimantan seed revision.
 
 Some installations recorded this revision before the canonical
-``0017_seed_kalimantan_wildfire_event`` name was introduced. Keeping a no-op
+``0017_seed_kalimantan_event`` name was introduced. Keeping a no-op
 marker lets Alembic resolve and merge those existing version rows safely.
 """
 
