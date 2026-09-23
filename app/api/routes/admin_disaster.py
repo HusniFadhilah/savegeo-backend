@@ -162,6 +162,7 @@ class AnalysisCreateRequest(BaseModel):
     aoi_id: int
     pre_imagery_id: int | None = None
     post_imagery_id: int | None = None
+    parameters: dict | None = None
 
 
 class RunStatusUpdateRequest(BaseModel):
@@ -286,11 +287,11 @@ def admin_list_disaster_models(event_id: int | None = None, admin: AdminUser = D
     models = list_models(enabled_only=False, disaster_type=event.disaster_type if event else None)
     settings = get_settings()
     configured = bool(settings.gee_service_account and settings.gee_key_file and Path(settings.gee_key_file).is_file())
-    models = [{**m, "configured": configured and m["enabled"],
+    models = [{**m, "configured": (not m.get("requires_earth_engine", True) or configured) and m["enabled"],
         "capability_status": disaster_capability_service.model_state(m),
         "availability_reason": (
             "Citra pada tanggal/AOI akan diperiksa saat analisis"
-            if configured and m["enabled"]
+            if (not m.get("requires_earth_engine", True) or configured) and m["enabled"]
             else m.get("availability_reason") or "Kredensial GEE atau implementasi model belum tersedia"
         ),
         "recommended": bool(m.get("multiclass") and configured and m["enabled"])} for m in models]
@@ -304,18 +305,26 @@ def admin_list_disaster_models(event_id: int | None = None, admin: AdminUser = D
             model["inputs_ready"] = False
             reason = "AOI dan imagery pre/post yang kompatibel belum tersedia"
             if aoi:
-                for before in pre:
-                    for after in post:
-                        try:
-                            disaster_analysis_service.validate_inputs(db, event_id, aoi.id, before.id, after.id, model["model_id"])
-                            model["inputs_ready"] = True
-                            model["default_pre_imagery_id"] = before.id
-                            model["default_post_imagery_id"] = after.id
+                if not model.get("requires_pre") and not model.get("requires_post"):
+                    try:
+                        disaster_analysis_service.validate_inputs(db, event_id, aoi.id, None, None, model["model_id"])
+                        model["inputs_ready"] = True
+                        reason = "AOI tersedia; periode/sumber produk diisi pada parameter run"
+                    except AnalysisError as exc:
+                        reason = str(exc)
+                else:
+                    for before in pre:
+                        for after in post:
+                            try:
+                                disaster_analysis_service.validate_inputs(db, event_id, aoi.id, before.id, after.id, model["model_id"])
+                                model["inputs_ready"] = True
+                                model["default_pre_imagery_id"] = before.id
+                                model["default_post_imagery_id"] = after.id
+                                break
+                            except AnalysisError as exc:
+                                reason = str(exc)
+                        if model["inputs_ready"]:
                             break
-                        except AnalysisError as exc:
-                            reason = str(exc)
-                    if model["inputs_ready"]:
-                        break
             if not model["inputs_ready"]:
                 model["availability_reason"] = reason
             elif model["configured"] and not recommended:
@@ -717,7 +726,7 @@ def admin_publish_result(
     result = disaster_repo.get_result_for_run(db, run_id)
     if result is None:
         raise HTTPException(status_code=404, detail="No result exists yet for this run")
-    if run.status not in ("completed", "review_required", "published") or not result.tile_url:
+    if run.status not in ("completed", "review_required", "published") or not (result.tile_url or result.features):
         raise HTTPException(status_code=400, detail="Hasil gagal/belum selesai tidak dapat dipublikasikan")
     capability = disaster_capability_service.validate_persisted_result(
         db, disaster_repo.get_event(db, run.event_id), run, result, require_published=False

@@ -80,7 +80,7 @@ def get_job(job_id: str, owner: str | None = None) -> dict:
     return status
 
 
-def start_job(data: dict, owner: str) -> dict:
+def start_job(data: dict, owner: str = "disaster-viewer") -> dict:
     if not data.get("item_url") or not data.get("aoi"):
         raise AnalysisError("Scene COG dan AOI diperlukan untuk segmentasi", 400)
     provider_key = str(data.get("provider_key") or "")

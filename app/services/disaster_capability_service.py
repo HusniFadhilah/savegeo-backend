@@ -56,10 +56,10 @@ def model_state(model: dict | None) -> str:
     """Map registry metadata to the honest user-facing capability state."""
     if not model or not model.get("enabled"):
         return "not_available"
+    if model.get("validation_status") in {"review_required", "method_validation_only"}:
+        return "review_required" if model.get("validation_status") == "review_required" else "indicator_only"
     if not model.get("damage_model", False):
         return "indicator_only"
-    if model.get("validation_status") in {"review_required", "method_validation_only"}:
-        return "review_required"
     return "validated"
 
 
@@ -228,8 +228,12 @@ def validate_persisted_result(
         return CapabilityCheck(False, "stale", ("Analysis run ditandai stale dan harus dihitung ulang",))
     if require_published and not getattr(result, "is_published", False):
         return CapabilityCheck(False, "not_available", ("Hasil belum dipublikasikan",))
-    if not getattr(result, "statistics", None) or not getattr(result, "tile_url", None):
-        return CapabilityCheck(False, "not_available", ("Tile atau statistik hasil belum lengkap",))
+    has_statistics = bool(getattr(result, "statistics", None))
+    has_output = bool(getattr(result, "tile_url", None))
+    if model.get("output_type") == "feature_collection":
+        has_output = has_output or bool(getattr(result, "features", None))
+    if not has_statistics or not has_output:
+        return CapabilityCheck(False, "not_available", ("Output atau statistik hasil belum lengkap",))
     provenance = getattr(result, "provenance", None) or {}
     required = {"event_id", "aoi_id", "imagery", "model_id", "model_version", "input_fingerprint"}
     missing = sorted(required.difference(provenance))
@@ -248,7 +252,9 @@ def validate_persisted_result(
     inputs = check_inputs(model["model_id"], event, aoi, pre, post)
     if not inputs.allowed:
         return inputs
-    current_fingerprint = build_input_fingerprint(event, aoi, pre, post, model)
+    current_fingerprint = build_input_fingerprint(
+        event, aoi, pre, post, model, getattr(run, "parameters", None)
+    )
     if provenance.get("input_fingerprint") != current_fingerprint:
         return CapabilityCheck(False, "stale", ("Input imagery atau AOI berubah; hasil harus dihitung ulang",))
     return CapabilityCheck(True, inputs.status, ())
@@ -271,7 +277,7 @@ def event_publication_check(db, event: object) -> CapabilityCheck:
         if run.status not in {"completed", "review_required", "published"}:
             continue
         result = disaster_repo.get_result_for_run(db, run.id)
-        if result and result.statistics and result.tile_url:
+        if result and result.statistics and (result.tile_url or result.features):
             result_check = validate_persisted_result(db, event, run, result, require_published=False)
             if not result_check.allowed:
                 reasons.extend(result_check.reasons)
@@ -309,7 +315,7 @@ def readiness_matrix(db, event: object) -> dict[str, dict[str, Any]]:
         for run in runs
         if run.status in {"completed", "review_required", "published"}
     )
-    return {
+    matrix = {
         "metadata_event": {"status": "ready" if metadata_ready else "missing", "reasons": [] if metadata_ready else ["Nama dan jenis bencana wajib diisi"]},
         "official_source": {"status": "ready" if source_ready else "missing", "reasons": [] if source_ready else ["Sumber resmi belum diisi"]},
         "aoi": {"status": "ready" if aoi else "missing", "reasons": [] if aoi else ["AOI belum dibuat"]},
@@ -319,3 +325,52 @@ def readiness_matrix(db, event: object) -> dict[str, dict[str, Any]]:
         "qc": {"status": "passed" if result_ready else "review_required", "reasons": [] if result_ready else ["Belum ada hasil dengan statistik valid"]},
         "publication": {"status": "allowed" if event_publication_check(db, event).allowed else "blocked", "reasons": list(event_publication_check(db, event).reasons)},
     }
+    # Earthquake readiness must show the real local-raster gate.  A BlackSky
+    # upload can be valid input while the damage model itself is still absent;
+    # keeping those states separate prevents an imagery upload from looking
+    # like a validated building-damage result.
+    if getattr(event, "disaster_type", None) == "earthquake":
+        matrix["local_imagery_pre"] = _local_imagery_check(pre)
+        matrix["local_imagery_post"] = _local_imagery_check(post)
+        matrix["damage_model"] = {
+            "status": "unavailable",
+            "reasons": ["Model kerusakan bangunan tervalidasi belum tersedia; hasil hanya boleh candidate_damage setelah review."],
+        }
+    elif getattr(event, "disaster_type", None) == "landslide":
+        matrix["domain_capability"] = {
+            "status": "unavailable",
+            "reasons": ["Workflow longsor multi-sumber belum tersedia sebagai AnalysisRun."],
+        }
+        matrix["required_dependencies"] = {
+            "status": "missing",
+            "reasons": ["Memerlukan pasangan SAR/optical, DEM/slope, hujan, dan inventory longsor resmi."],
+        }
+    return matrix
+
+
+def _local_imagery_check(image: object | None) -> dict[str, Any]:
+    if image is None:
+        return {"status": "missing", "reasons": ["Imagery lokal belum tersedia"]}
+    if _source_kind(image) != "local_upload":
+        return {"status": "review_required", "reasons": ["Imagery bukan local_upload; metadata raster lokal belum dapat diperiksa"]}
+    stored_path = getattr(image, "local_file_path", None)
+    if not stored_path:
+        return {"status": "missing", "reasons": ["local_file_path belum tersimpan"]}
+    try:
+        from app.services.local_imagery_tile_service import resolve_local_raster_path
+        import rasterio
+
+        path = resolve_local_raster_path(stored_path)
+        with rasterio.open(path) as raster:
+            reasons = []
+            if raster.crs is None:
+                reasons.append("CRS raster belum tersedia")
+            if raster.count < 1 or raster.width < 2 or raster.height < 2:
+                reasons.append("Dimensi atau band raster tidak valid")
+            if raster.transform.is_identity:
+                reasons.append("Georeferencing raster belum tersedia")
+            return {"status": "ready" if not reasons else "review_required", "reasons": reasons}
+    except FileNotFoundError:
+        return {"status": "missing", "reasons": ["File raster lokal tidak ditemukan"]}
+    except Exception:
+        return {"status": "review_required", "reasons": ["Raster lokal tidak dapat diinspeksi; cek CRS, georeferencing, dan band"]}

@@ -1,0 +1,606 @@
+{
+  "mode": "report_only",
+  "events": [
+    {
+      "event_id": 38,
+      "name": "Banjir Sumatera 2025 - Sumatera Utara (BSG-104)",
+      "status": "draft",
+      "aoi_id": 37,
+      "imagery": {
+        "pre": 1,
+        "post": 1
+      },
+      "models": [
+        {
+          "model_id": "dynamic_world_v1",
+          "status": "not_available",
+          "reasons": [
+            "Resolusi imagery post harus 10 m",
+            "Sensor imagery post tidak kompatibel; diterima: sentinel2, sentinel-2",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        },
+        {
+          "model_id": "flood_change_v1",
+          "status": "not_available",
+          "reasons": [
+            "Sensor imagery post tidak kompatibel; diterima: sentinel1, sentinel-1",
+            "Sensor imagery pre tidak kompatibel; diterima: sentinel1, sentinel-1",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        },
+        {
+          "model_id": "water_segmentation_v1",
+          "status": "not_available",
+          "reasons": [
+            "Sensor imagery post tidak kompatibel; diterima: sentinel2, sentinel-2",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        }
+      ]
+    },
+    {
+      "event_id": 37,
+      "name": "Banjir Sumatera 2025 - Aceh (BSG-105)",
+      "status": "draft",
+      "aoi_id": 36,
+      "imagery": {
+        "pre": 1,
+        "post": 1
+      },
+      "models": [
+        {
+          "model_id": "dynamic_world_v1",
+          "status": "not_available",
+          "reasons": [
+            "Resolusi imagery post harus 10 m",
+            "Sensor imagery post tidak kompatibel; diterima: sentinel2, sentinel-2",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        },
+        {
+          "model_id": "flood_change_v1",
+          "status": "not_available",
+          "reasons": [
+            "Sensor imagery post tidak kompatibel; diterima: sentinel1, sentinel-1",
+            "Sensor imagery pre tidak kompatibel; diterima: sentinel1, sentinel-1",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        },
+        {
+          "model_id": "water_segmentation_v1",
+          "status": "not_available",
+          "reasons": [
+            "Sensor imagery post tidak kompatibel; diterima: sentinel2, sentinel-2",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        }
+      ]
+    },
+    {
+      "event_id": 21,
+      "name": "Banjir Sumatera 2025 - Sumatera Utara (BSG-104)",
+      "status": "published",
+      "aoi_id": 20,
+      "imagery": {
+        "pre": 1,
+        "post": 1
+      },
+      "models": [
+        {
+          "model_id": "dynamic_world_v1",
+          "status": "not_available",
+          "reasons": [
+            "Resolusi imagery post harus 10 m",
+            "Sensor imagery post tidak kompatibel; diterima: sentinel2, sentinel-2",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        },
+        {
+          "model_id": "flood_change_v1",
+          "status": "not_available",
+          "reasons": [
+            "Sensor imagery post tidak kompatibel; diterima: sentinel1, sentinel-1",
+            "Sensor imagery pre tidak kompatibel; diterima: sentinel1, sentinel-1",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        },
+        {
+          "model_id": "water_segmentation_v1",
+          "status": "not_available",
+          "reasons": [
+            "Sensor imagery post tidak kompatibel; diterima: sentinel2, sentinel-2",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        }
+      ]
+    },
+    {
+      "event_id": 20,
+      "name": "Banjir Sumatera 2025 - Aceh (BSG-105)",
+      "status": "published",
+      "aoi_id": 19,
+      "imagery": {
+        "pre": 1,
+        "post": 1
+      },
+      "models": [
+        {
+          "model_id": "dynamic_world_v1",
+          "status": "not_available",
+          "reasons": [
+            "Resolusi imagery post harus 10 m",
+            "Sensor imagery post tidak kompatibel; diterima: sentinel2, sentinel-2",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        },
+        {
+          "model_id": "flood_change_v1",
+          "status": "not_available",
+          "reasons": [
+            "Sensor imagery post tidak kompatibel; diterima: sentinel1, sentinel-1",
+            "Sensor imagery pre tidak kompatibel; diterima: sentinel1, sentinel-1",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        },
+        {
+          "model_id": "water_segmentation_v1",
+          "status": "not_available",
+          "reasons": [
+            "Sensor imagery post tidak kompatibel; diterima: sentinel2, sentinel-2",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        }
+      ]
+    },
+    {
+      "event_id": 36,
+      "name": "Banjir Sumatera 2025 - Sumatera Barat 1",
+      "status": "draft",
+      "aoi_id": 35,
+      "imagery": {
+        "pre": 1,
+        "post": 1
+      },
+      "models": [
+        {
+          "model_id": "dynamic_world_v1",
+          "status": "not_available",
+          "reasons": [
+            "Resolusi imagery post harus 10 m",
+            "Sensor imagery post tidak kompatibel; diterima: sentinel2, sentinel-2",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        },
+        {
+          "model_id": "flood_change_v1",
+          "status": "not_available",
+          "reasons": [
+            "Sensor imagery post tidak kompatibel; diterima: sentinel1, sentinel-1",
+            "Sensor imagery pre tidak kompatibel; diterima: sentinel1, sentinel-1",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        },
+        {
+          "model_id": "water_segmentation_v1",
+          "status": "not_available",
+          "reasons": [
+            "Sensor imagery post tidak kompatibel; diterima: sentinel2, sentinel-2",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        }
+      ]
+    },
+    {
+      "event_id": 35,
+      "name": "Banjir Sumatera 2025 - Takengon",
+      "status": "draft",
+      "aoi_id": 34,
+      "imagery": {
+        "pre": 1,
+        "post": 1
+      },
+      "models": [
+        {
+          "model_id": "dynamic_world_v1",
+          "status": "not_available",
+          "reasons": [
+            "Resolusi imagery post harus 10 m",
+            "Sensor imagery post tidak kompatibel; diterima: sentinel2, sentinel-2",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        },
+        {
+          "model_id": "flood_change_v1",
+          "status": "not_available",
+          "reasons": [
+            "Sensor imagery post tidak kompatibel; diterima: sentinel1, sentinel-1",
+            "Sensor imagery pre tidak kompatibel; diterima: sentinel1, sentinel-1",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        },
+        {
+          "model_id": "water_segmentation_v1",
+          "status": "not_available",
+          "reasons": [
+            "Sensor imagery post tidak kompatibel; diterima: sentinel2, sentinel-2",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        }
+      ]
+    },
+    {
+      "event_id": 34,
+      "name": "Banjir Sumatera 2025 - Sipirok",
+      "status": "draft",
+      "aoi_id": 33,
+      "imagery": {
+        "pre": 1,
+        "post": 1
+      },
+      "models": [
+        {
+          "model_id": "dynamic_world_v1",
+          "status": "not_available",
+          "reasons": [
+            "Resolusi imagery post harus 10 m",
+            "Sensor imagery post tidak kompatibel; diterima: sentinel2, sentinel-2",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        },
+        {
+          "model_id": "flood_change_v1",
+          "status": "not_available",
+          "reasons": [
+            "Sensor imagery post tidak kompatibel; diterima: sentinel1, sentinel-1",
+            "Sensor imagery pre tidak kompatibel; diterima: sentinel1, sentinel-1",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        },
+        {
+          "model_id": "water_segmentation_v1",
+          "status": "not_available",
+          "reasons": [
+            "Sensor imagery post tidak kompatibel; diterima: sentinel2, sentinel-2",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        }
+      ]
+    },
+    {
+      "event_id": 33,
+      "name": "Banjir Sumatera 2025 - Cot Kuta",
+      "status": "draft",
+      "aoi_id": 32,
+      "imagery": {
+        "pre": 1,
+        "post": 1
+      },
+      "models": [
+        {
+          "model_id": "dynamic_world_v1",
+          "status": "not_available",
+          "reasons": [
+            "Resolusi imagery post harus 10 m",
+            "Sensor imagery post tidak kompatibel; diterima: sentinel2, sentinel-2",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        },
+        {
+          "model_id": "flood_change_v1",
+          "status": "not_available",
+          "reasons": [
+            "Sensor imagery post tidak kompatibel; diterima: sentinel1, sentinel-1",
+            "Sensor imagery pre tidak kompatibel; diterima: sentinel1, sentinel-1",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        },
+        {
+          "model_id": "water_segmentation_v1",
+          "status": "not_available",
+          "reasons": [
+            "Sensor imagery post tidak kompatibel; diterima: sentinel2, sentinel-2",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        }
+      ]
+    },
+    {
+      "event_id": 32,
+      "name": "Banjir Sumatera 2025 - Batuphat Barat",
+      "status": "draft",
+      "aoi_id": 31,
+      "imagery": {
+        "pre": 1,
+        "post": 1
+      },
+      "models": [
+        {
+          "model_id": "dynamic_world_v1",
+          "status": "not_available",
+          "reasons": [
+            "Resolusi imagery post harus 10 m",
+            "Sensor imagery post tidak kompatibel; diterima: sentinel2, sentinel-2",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        },
+        {
+          "model_id": "flood_change_v1",
+          "status": "not_available",
+          "reasons": [
+            "Sensor imagery post tidak kompatibel; diterima: sentinel1, sentinel-1",
+            "Sensor imagery pre tidak kompatibel; diterima: sentinel1, sentinel-1",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        },
+        {
+          "model_id": "water_segmentation_v1",
+          "status": "not_available",
+          "reasons": [
+            "Sensor imagery post tidak kompatibel; diterima: sentinel2, sentinel-2",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        }
+      ]
+    },
+    {
+      "event_id": 31,
+      "name": "Banjir Sumatera 2025 - Aceh Tenggara",
+      "status": "draft",
+      "aoi_id": 30,
+      "imagery": {
+        "pre": 1,
+        "post": 1
+      },
+      "models": [
+        {
+          "model_id": "dynamic_world_v1",
+          "status": "not_available",
+          "reasons": [
+            "Resolusi imagery post harus 10 m",
+            "Sensor imagery post tidak kompatibel; diterima: sentinel2, sentinel-2",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        },
+        {
+          "model_id": "flood_change_v1",
+          "status": "not_available",
+          "reasons": [
+            "Sensor imagery post tidak kompatibel; diterima: sentinel1, sentinel-1",
+            "Sensor imagery pre tidak kompatibel; diterima: sentinel1, sentinel-1",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        },
+        {
+          "model_id": "water_segmentation_v1",
+          "status": "not_available",
+          "reasons": [
+            "Sensor imagery post tidak kompatibel; diterima: sentinel2, sentinel-2",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        }
+      ]
+    },
+    {
+      "event_id": 19,
+      "name": "Banjir Sumatera 2025 - Sumatera Barat 1",
+      "status": "published",
+      "aoi_id": 18,
+      "imagery": {
+        "pre": 1,
+        "post": 2
+      },
+      "models": [
+        {
+          "model_id": "dynamic_world_v1",
+          "status": "ready",
+          "reasons": []
+        },
+        {
+          "model_id": "flood_change_v1",
+          "status": "not_available",
+          "reasons": [
+            "Sensor imagery post tidak kompatibel; diterima: sentinel1, sentinel-1",
+            "Sensor imagery pre tidak kompatibel; diterima: sentinel1, sentinel-1",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        },
+        {
+          "model_id": "water_segmentation_v1",
+          "status": "ready",
+          "reasons": []
+        }
+      ]
+    },
+    {
+      "event_id": 18,
+      "name": "Banjir Sumatera 2025 - Takengon",
+      "status": "published",
+      "aoi_id": 17,
+      "imagery": {
+        "pre": 1,
+        "post": 1
+      },
+      "models": [
+        {
+          "model_id": "dynamic_world_v1",
+          "status": "not_available",
+          "reasons": [
+            "Resolusi imagery post harus 10 m",
+            "Sensor imagery post tidak kompatibel; diterima: sentinel2, sentinel-2",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        },
+        {
+          "model_id": "flood_change_v1",
+          "status": "not_available",
+          "reasons": [
+            "Sensor imagery post tidak kompatibel; diterima: sentinel1, sentinel-1",
+            "Sensor imagery pre tidak kompatibel; diterima: sentinel1, sentinel-1",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        },
+        {
+          "model_id": "water_segmentation_v1",
+          "status": "not_available",
+          "reasons": [
+            "Sensor imagery post tidak kompatibel; diterima: sentinel2, sentinel-2",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        }
+      ]
+    },
+    {
+      "event_id": 17,
+      "name": "Banjir Sumatera 2025 - Sipirok",
+      "status": "published",
+      "aoi_id": 16,
+      "imagery": {
+        "pre": 1,
+        "post": 1
+      },
+      "models": [
+        {
+          "model_id": "dynamic_world_v1",
+          "status": "not_available",
+          "reasons": [
+            "Resolusi imagery post harus 10 m",
+            "Sensor imagery post tidak kompatibel; diterima: sentinel2, sentinel-2",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        },
+        {
+          "model_id": "flood_change_v1",
+          "status": "not_available",
+          "reasons": [
+            "Sensor imagery post tidak kompatibel; diterima: sentinel1, sentinel-1",
+            "Sensor imagery pre tidak kompatibel; diterima: sentinel1, sentinel-1",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        },
+        {
+          "model_id": "water_segmentation_v1",
+          "status": "not_available",
+          "reasons": [
+            "Sensor imagery post tidak kompatibel; diterima: sentinel2, sentinel-2",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        }
+      ]
+    },
+    {
+      "event_id": 15,
+      "name": "Banjir Sumatera 2025 - Cot Kuta",
+      "status": "published",
+      "aoi_id": 14,
+      "imagery": {
+        "pre": 1,
+        "post": 1
+      },
+      "models": [
+        {
+          "model_id": "dynamic_world_v1",
+          "status": "not_available",
+          "reasons": [
+            "Resolusi imagery post harus 10 m",
+            "Sensor imagery post tidak kompatibel; diterima: sentinel2, sentinel-2",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        },
+        {
+          "model_id": "flood_change_v1",
+          "status": "not_available",
+          "reasons": [
+            "Sensor imagery post tidak kompatibel; diterima: sentinel1, sentinel-1",
+            "Sensor imagery pre tidak kompatibel; diterima: sentinel1, sentinel-1",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        },
+        {
+          "model_id": "water_segmentation_v1",
+          "status": "not_available",
+          "reasons": [
+            "Sensor imagery post tidak kompatibel; diterima: sentinel2, sentinel-2",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        }
+      ]
+    },
+    {
+      "event_id": 14,
+      "name": "Banjir Sumatera 2025 - Batuphat Barat",
+      "status": "published",
+      "aoi_id": 13,
+      "imagery": {
+        "pre": 1,
+        "post": 1
+      },
+      "models": [
+        {
+          "model_id": "dynamic_world_v1",
+          "status": "not_available",
+          "reasons": [
+            "Resolusi imagery post harus 10 m",
+            "Sensor imagery post tidak kompatibel; diterima: sentinel2, sentinel-2",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        },
+        {
+          "model_id": "flood_change_v1",
+          "status": "not_available",
+          "reasons": [
+            "Sensor imagery post tidak kompatibel; diterima: sentinel1, sentinel-1",
+            "Sensor imagery pre tidak kompatibel; diterima: sentinel1, sentinel-1",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        },
+        {
+          "model_id": "water_segmentation_v1",
+          "status": "not_available",
+          "reasons": [
+            "Sensor imagery post tidak kompatibel; diterima: sentinel2, sentinel-2",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        }
+      ]
+    },
+    {
+      "event_id": 13,
+      "name": "Banjir Sumatera 2025 - Aceh Tenggara",
+      "status": "published",
+      "aoi_id": 12,
+      "imagery": {
+        "pre": 1,
+        "post": 1
+      },
+      "models": [
+        {
+          "model_id": "dynamic_world_v1",
+          "status": "not_available",
+          "reasons": [
+            "Resolusi imagery post harus 10 m",
+            "Sensor imagery post tidak kompatibel; diterima: sentinel2, sentinel-2",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        },
+        {
+          "model_id": "flood_change_v1",
+          "status": "not_available",
+          "reasons": [
+            "Sensor imagery post tidak kompatibel; diterima: sentinel1, sentinel-1",
+            "Sensor imagery pre tidak kompatibel; diterima: sentinel1, sentinel-1",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        },
+        {
+          "model_id": "water_segmentation_v1",
+          "status": "not_available",
+          "reasons": [
+            "Sensor imagery post tidak kompatibel; diterima: sentinel2, sentinel-2",
+            "Source kind local_upload tidak kompatibel; diterima: gee"
+          ]
+        }
+      ]
+    }
+  ]
+}

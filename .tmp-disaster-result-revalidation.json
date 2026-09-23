@@ -1,0 +1,516 @@
+{
+  "revalidated": 51,
+  "unpublished": 0,
+  "findings": [
+    {
+      "event_id": 10,
+      "run_id": 57,
+      "result_id": 53,
+      "model_id": "water_segmentation_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 13,
+      "run_id": 11,
+      "result_id": 9,
+      "model_id": "flood_change_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 13,
+      "run_id": 13,
+      "result_id": 11,
+      "model_id": "water_segmentation_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 13,
+      "run_id": 15,
+      "result_id": 13,
+      "model_id": "forest_change_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 14,
+      "run_id": 17,
+      "result_id": 14,
+      "model_id": "flood_change_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 14,
+      "run_id": 18,
+      "result_id": 16,
+      "model_id": "water_segmentation_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 14,
+      "run_id": 20,
+      "result_id": 19,
+      "model_id": "forest_change_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 5,
+      "run_id": 12,
+      "result_id": 10,
+      "model_id": "water_segmentation_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 5,
+      "run_id": 10,
+      "result_id": 8,
+      "model_id": "forest_change_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 6,
+      "run_id": 16,
+      "result_id": 15,
+      "model_id": "water_segmentation_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 6,
+      "run_id": 14,
+      "result_id": 12,
+      "model_id": "forest_change_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 7,
+      "run_id": 19,
+      "result_id": 17,
+      "model_id": "forest_change_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 8,
+      "run_id": 21,
+      "result_id": 18,
+      "model_id": "forest_change_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 15,
+      "run_id": 23,
+      "result_id": 20,
+      "model_id": "flood_change_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 11,
+      "run_id": 58,
+      "result_id": 54,
+      "model_id": "flood_change_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 15,
+      "run_id": 24,
+      "result_id": 21,
+      "model_id": "water_segmentation_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 15,
+      "run_id": 25,
+      "result_id": 23,
+      "model_id": "forest_change_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 11,
+      "run_id": 59,
+      "result_id": 55,
+      "model_id": "water_segmentation_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 17,
+      "run_id": 27,
+      "result_id": 25,
+      "model_id": "flood_change_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 17,
+      "run_id": 29,
+      "result_id": 26,
+      "model_id": "water_segmentation_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 17,
+      "run_id": 30,
+      "result_id": 28,
+      "model_id": "forest_change_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 18,
+      "run_id": 32,
+      "result_id": 29,
+      "model_id": "flood_change_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 18,
+      "run_id": 33,
+      "result_id": 31,
+      "model_id": "water_segmentation_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 18,
+      "run_id": 35,
+      "result_id": 33,
+      "model_id": "forest_change_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 19,
+      "run_id": 37,
+      "result_id": 34,
+      "model_id": "flood_change_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 20,
+      "run_id": 40,
+      "result_id": 36,
+      "model_id": "flood_change_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 20,
+      "run_id": 41,
+      "result_id": 37,
+      "model_id": "water_segmentation_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 12,
+      "run_id": 60,
+      "result_id": 56,
+      "model_id": "flood_change_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 20,
+      "run_id": 42,
+      "result_id": 38,
+      "model_id": "forest_change_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 21,
+      "run_id": 43,
+      "result_id": 39,
+      "model_id": "flood_change_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 21,
+      "run_id": 44,
+      "result_id": 40,
+      "model_id": "water_segmentation_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 21,
+      "run_id": 45,
+      "result_id": 41,
+      "model_id": "forest_change_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 9,
+      "run_id": 22,
+      "result_id": 22,
+      "model_id": "forest_change_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 10,
+      "run_id": 26,
+      "result_id": 24,
+      "model_id": "forest_change_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 11,
+      "run_id": 28,
+      "result_id": 27,
+      "model_id": "forest_change_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 12,
+      "run_id": 34,
+      "result_id": 32,
+      "model_id": "water_segmentation_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 12,
+      "run_id": 31,
+      "result_id": 30,
+      "model_id": "forest_change_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 16,
+      "run_id": 36,
+      "result_id": 35,
+      "model_id": "forest_change_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 19,
+      "run_id": 46,
+      "result_id": 42,
+      "model_id": "water_segmentation_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 19,
+      "run_id": 47,
+      "result_id": 43,
+      "model_id": "forest_change_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 5,
+      "run_id": 48,
+      "result_id": 44,
+      "model_id": "flood_change_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 16,
+      "run_id": 61,
+      "result_id": 57,
+      "model_id": "flood_change_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 6,
+      "run_id": 49,
+      "result_id": 45,
+      "model_id": "flood_change_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 7,
+      "run_id": 50,
+      "result_id": 46,
+      "model_id": "flood_change_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 16,
+      "run_id": 62,
+      "result_id": 58,
+      "model_id": "water_segmentation_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 7,
+      "run_id": 51,
+      "result_id": 47,
+      "model_id": "water_segmentation_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 8,
+      "run_id": 52,
+      "result_id": 48,
+      "model_id": "flood_change_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 8,
+      "run_id": 53,
+      "result_id": 49,
+      "model_id": "water_segmentation_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 9,
+      "run_id": 54,
+      "result_id": 50,
+      "model_id": "flood_change_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 9,
+      "run_id": 55,
+      "result_id": 51,
+      "model_id": "water_segmentation_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    },
+    {
+      "event_id": 10,
+      "run_id": 56,
+      "result_id": 52,
+      "model_id": "flood_change_v1",
+      "status": "stale",
+      "reasons": [
+        "Provenance tidak lengkap: aoi_id, event_id, imagery, input_fingerprint, model_id, model_version"
+      ]
+    }
+  ]
+}

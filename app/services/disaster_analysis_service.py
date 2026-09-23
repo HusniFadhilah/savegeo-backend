@@ -294,6 +294,7 @@ def run_analysis(db: Session, run_id: int, force: bool = False) -> dict:
     import hashlib
     import json
     from app.services.disaster_segmentation_service import compute_segmentation
+    from app.services.wildfire_analysis_service import compute_persisted_product
 
     run = disaster_repo.get_run(db, run_id)
     if run is None:
@@ -306,7 +307,8 @@ def run_analysis(db: Session, run_id: int, force: bool = False) -> dict:
             run.pre_imagery_id, run.post_imagery_id, run.model_id)
         key = hashlib.sha256(json.dumps([run.event_id, run.aoi_id, run.pre_imagery_id,
             run.post_imagery_id, run.model_id, model["version"], aoi_row.geojson,
-            pre_img.acquisition_date.isoformat(), post_img.acquisition_date.isoformat()], sort_keys=True).encode()).hexdigest()
+            getattr(pre_img, "acquisition_date", None), getattr(post_img, "acquisition_date", None),
+            getattr(run, "parameters", None) or {}], sort_keys=True, default=str).encode()).hexdigest()
         for candidate in ([] if force else disaster_repo.list_runs_for_event(db, run.event_id)):
             if candidate.status not in ("completed", "review_required", "published"):
                 continue
@@ -322,6 +324,7 @@ def run_analysis(db: Session, run_id: int, force: bool = False) -> dict:
                     "statistics": cached.statistics,
                     "provenance": build_provenance(
                         disaster_repo.get_event(db, run.event_id), aoi_row, pre_img, post_img, model,
+                        parameters=getattr(run, "parameters", None) or {},
                     ),
                     "validation_status": model_state(model),
                     "limitations": list(model.get("limitations", [])),
@@ -339,8 +342,13 @@ def run_analysis(db: Session, run_id: int, force: bool = False) -> dict:
         db.commit()
         event = disaster_repo.get_event(db, run.event_id)
         aoi = create_geometry_from_payload({"geojson": aoi_row.geojson})
-        pre_date, post_date = pre_img.acquisition_date, post_img.acquisition_date
-        if run.model_id == "dynamic_world_v1":
+        pre_date = pre_img.acquisition_date if pre_img else None
+        post_date = post_img.acquisition_date if post_img else None
+        if run.model_id in {"fire_hotspot_observation_v1", "fire_burned_area_v1", "fire_dnbr_v1"}:
+            output = compute_persisted_product(
+                    db, event, aoi_row, pre_img, post_img, run.model_id, getattr(run, "parameters", None) or {}
+            )
+        elif run.model_id == "dynamic_world_v1":
             output = compute_segmentation(aoi, pre_date, post_date)
         elif run.model_id == "flood_change_v1":
             output = _compute_flood_change(aoi, pre_date, post_date)
@@ -350,10 +358,15 @@ def run_analysis(db: Session, run_id: int, force: bool = False) -> dict:
             output = _compute_forest_change(aoi, pre_date, post_date)
         else:
             raise AnalysisError("Model belum memiliki implementasi", 400)
-        if not output.get("tile_url") or not output.get("statistics"):
-            raise AnalysisError("Model tidak menghasilkan tile dan statistik yang valid", 422)
+        requires_review = bool(output.pop("requires_review", False))
+        if not output.get("statistics") or (
+            not output.get("tile_url") and not output.get("features")
+        ):
+            raise AnalysisError("Model tidak menghasilkan output dan statistik yang valid", 422)
         output["statistics"]["cache_key"] = key
-        output["provenance"] = build_provenance(event, aoi_row, pre_img, post_img, model)
+        output["provenance"] = build_provenance(
+                event, aoi_row, pre_img, post_img, model, parameters=getattr(run, "parameters", None) or {}
+        )
         output["validation_status"] = model_state(model)
         output["limitations"] = list(model.get("limitations", []))
         comparison = output["statistics"].get("comparison")
@@ -361,7 +374,7 @@ def run_analysis(db: Session, run_id: int, force: bool = False) -> dict:
             comparison.update(event_id=run.event_id, aoi_id=run.aoi_id,
                 pre_imagery_id=run.pre_imagery_id, post_imagery_id=run.post_imagery_id)
         result = disaster_repo.upsert_result(db, run.id, output)
-        run.status = "review_required" if comparison and comparison.get("review_reasons") else "completed"
+        run.status = "review_required" if requires_review or (comparison and comparison.get("review_reasons")) else "completed"
         run.completed_at = dt.datetime.now(dt.UTC)
         db.commit()
         return {"run": run.to_dict(), "result": result.to_dict(include_features=True)}

@@ -80,7 +80,7 @@ def _build_analyses(db: Session, event_id: int) -> list[dict]:
                 "capability_status": capability.status,
                 "available": True,
                 "run": run.to_dict(),
-                "result": result.to_dict(),
+                "result": result.to_dict(include_features=model.get("output_type") in {"feature_collection", "polygon"}),
             })
         else:
             entries.append({

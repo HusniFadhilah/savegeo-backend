@@ -310,6 +310,7 @@ def create_run(db: Session, event_id: int, data: dict, created_by: int | None) -
         aoi_id=data["aoi_id"],
         pre_imagery_id=data.get("pre_imagery_id"),
         post_imagery_id=data.get("post_imagery_id"),
+        parameters=data.get("parameters") or {},
         status="queued",
         created_by=created_by,
     )
