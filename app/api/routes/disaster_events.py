@@ -23,7 +23,7 @@ from app.db.session import get_db
 from app.registries import disaster_model_registry
 from app.repositories import disaster_repo
 from app.services.disaster_cross_layer_service import get_available_cross_layer_stats
-from app.services import firms_service, wildfire_hotspot_service
+from app.services import disaster_capability_service, firms_service, wildfire_hotspot_service
 
 router = APIRouter(prefix="/disasters", tags=["disasters"])
 
@@ -41,7 +41,7 @@ def _viewer_imagery_dict(img) -> dict:
 
 def _get_published_event(db: Session, event_id: int) -> DisasterEvent:
     event = disaster_repo.get_event(db, event_id)
-    if event is None or event.status != "published":
+    if event is None or event.status != "published" or not event.is_public:
         raise HTTPException(status_code=404, detail="Disaster event not found")
     return event
 
@@ -54,11 +54,21 @@ def _build_analyses(db: Session, event_id: int) -> list[dict]:
     vanishing (contract doc, section B)."""
     entries = []
     event = disaster_repo.get_event(db, event_id)
-    for model in disaster_model_registry.list_models(enabled_only=True, disaster_type=event.disaster_type if event else None):
+    models = disaster_model_registry.list_models(enabled_only=True, disaster_type=event.disaster_type if event else None)
+    if event and event.disaster_type == "other":
+        models.extend(
+            model for model in disaster_model_registry.list_models(enabled_only=False, disaster_type="other")
+            if model.get("result_semantics") == "not_available"
+        )
+    for model in models:
         model_id = model["model_id"]
         published = disaster_repo.get_published_analysis(db, event_id, model_id)
         if published is not None and published[0].status in ("completed", "review_required", "published"):
             run, result = published
+            capability = disaster_capability_service.validate_persisted_result(db, event, run, result)
+        else:
+            capability = None
+        if published is not None and capability and capability.allowed:
             entries.append({
                 "model_id": model_id,
                 "user_label": model["user_label"],
@@ -67,6 +77,7 @@ def _build_analyses(db: Session, event_id: int) -> list[dict]:
                 "damage_model": bool(model.get("damage_model", False)),
                 "validation_status": model.get("validation_status"),
                 "limitations": list(model.get("limitations", [])),
+                "capability_status": capability.status,
                 "available": True,
                 "run": run.to_dict(),
                 "result": result.to_dict(),
@@ -80,6 +91,8 @@ def _build_analyses(db: Session, event_id: int) -> list[dict]:
                 "damage_model": bool(model.get("damage_model", False)),
                 "validation_status": model.get("validation_status"),
                 "limitations": list(model.get("limitations", [])),
+                "capability_status": capability.status if capability else disaster_capability_service.model_state(model),
+                "availability_reason": list(capability.reasons) if capability else ["Belum ada hasil AnalysisResult yang dipublikasikan"],
                 "available": False,
                 "run": None,
                 "result": None,
@@ -233,6 +246,9 @@ def get_disaster_statistics(event_id: int, viewer=Depends(get_current_disaster_v
     for run, result in disaster_repo.list_published_analyses(db, event_id):
         if run.model_id not in allowed or not result.statistics:
             continue
+        capability = disaster_capability_service.validate_persisted_result(db, event, run, result)
+        if not capability.allowed:
+            continue
         kpis[run.model_id] = result.to_dict()["statistics"]
     cross_layer = [
         stat for stat in get_available_cross_layer_stats(db, event_id)
@@ -267,13 +283,18 @@ def get_disaster_features(
     viewer=Depends(get_current_disaster_viewer),
     db: Session = Depends(get_db),
 ):
-    """Always an empty FeatureCollection for MVP - none of the 3 real models
-    produce per-object `features` (see contract doc intro). Kept as a real,
-    published-gated endpoint so the frontend can call it without special-
-    casing, and so the route shape is future-proof once a feature-producing
-    model exists."""
-    _get_published_event(db, event_id)
+    """Return feature outputs only from currently compatible published results."""
+    event = _get_published_event(db, event_id)
+    features = []
+    for run, result in disaster_repo.list_published_analyses(db, event_id):
+        if analysis and run.model_id != analysis:
+            continue
+        if not disaster_capability_service.validate_persisted_result(db, event, run, result).allowed:
+            continue
+        collection = result.features or {}
+        if collection.get("type") == "FeatureCollection":
+            features.extend(collection.get("features", []))
     return {
-        "features": {"type": "FeatureCollection", "features": []},
-        "note": "Per-feature detail is not available for this event's analyses yet.",
+        "features": {"type": "FeatureCollection", "features": features},
+        "note": None if features else "Per-feature detail is not available for compatible published analyses.",
     }

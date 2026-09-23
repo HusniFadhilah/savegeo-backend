@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import datetime as dt
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -24,6 +24,10 @@ class AnalysisResult(Base):
     features: Mapped[dict | None] = mapped_column(JSONB)  # GeoJSON FeatureCollection, nullable
     legend: Mapped[list | None] = mapped_column(JSONB)  # [{"label": .., "color": ..}, ...]
     confidence_summary: Mapped[dict | None] = mapped_column(JSONB)  # {"mean": .., "high_pct": .., ...}, nullable
+    provenance: Mapped[dict | None] = mapped_column(JSONB)
+    validation_status: Mapped[str | None] = mapped_column(String(30))
+    limitations: Mapped[list | None] = mapped_column(JSONB)
+    stale_reason: Mapped[str | None] = mapped_column(Text)
     is_published: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
     published_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     published_by: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id", ondelete="SET NULL"))
@@ -39,6 +43,10 @@ class AnalysisResult(Base):
             "comparison": (self.statistics or {}).get("comparison"),
             "legend": self.legend or [],
             "confidence_summary": self.confidence_summary,
+            "provenance": self.provenance,
+            "validation_status": self.validation_status,
+            "limitations": self.limitations or [],
+            "stale_reason": self.stale_reason,
             "is_published": self.is_published,
             "published_at": self.published_at.isoformat() if self.published_at else None,
             "publication_version": self.publication_version,

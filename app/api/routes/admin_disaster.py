@@ -44,6 +44,7 @@ from app.registries.disaster_model_registry import list_models
 from app.repositories import disaster_repo
 from app.services import (
     audit_service,
+    disaster_capability_service,
     disaster_analysis_service,
     firms_service,
     local_imagery_tile_service,
@@ -143,6 +144,7 @@ class ImageryCreateRequest(BaseModel):
     resolution_m: float | None = None
     cloud_coverage_pct: float | None = None
     data_source: str | None = None
+    scene_id: str | None = None
     is_primary: bool | None = False
     # "gee" (default) - preview_tile_url is a ready GEE getMapId() template.
     # "local_upload" - preview_tile_url is filled in AFTER creation (its
@@ -285,7 +287,12 @@ def admin_list_disaster_models(event_id: int | None = None, admin: AdminUser = D
     settings = get_settings()
     configured = bool(settings.gee_service_account and settings.gee_key_file and Path(settings.gee_key_file).is_file())
     models = [{**m, "configured": configured and m["enabled"],
-        "availability_reason": ("Citra pada tanggal/AOI akan diperiksa saat analisis" if configured and m["enabled"] else "Kredensial GEE atau implementasi model belum tersedia"),
+        "capability_status": disaster_capability_service.model_state(m),
+        "availability_reason": (
+            "Citra pada tanggal/AOI akan diperiksa saat analisis"
+            if configured and m["enabled"]
+            else m.get("availability_reason") or "Kredensial GEE atau implementasi model belum tersedia"
+        ),
         "recommended": bool(m.get("multiclass") and configured and m["enabled"])} for m in models]
     if event:
         aoi = disaster_repo.get_active_aoi(db, event_id)
@@ -361,6 +368,16 @@ def admin_update_event(
         minimum = (event.slug or changes.get("slug"), event.source, event.start_date or changes.get("start_date"), event.province or changes.get("province"))
         if not all(minimum):
             raise HTTPException(status_code=400, detail="Event karhutla memerlukan slug, periode, cakupan wilayah, dan sumber sebelum dipublikasikan")
+
+    if changes.get("status") == "published":
+        import copy
+
+        candidate = copy.copy(event)
+        for field, value in changes.items():
+            setattr(candidate, field, value)
+        publication = disaster_capability_service.event_publication_check(db, candidate)
+        if not publication.allowed:
+            raise HTTPException(status_code=400, detail={"message": "Event belum memenuhi publication gate", "reasons": list(publication.reasons)})
 
     event = disaster_repo.update_event(db, event, changes)
     audit_service.log_audit(db, admin.id, "disaster_event.update", "disaster_event", str(event.id), detail=changes)
@@ -515,6 +532,7 @@ async def admin_upload_imagery(
             "resolution_m": resolution_m,
             "cloud_coverage_pct": cloud_coverage_pct,
             "data_source": data_source or file.filename or "Local GeoTIFF upload",
+            "scene_id": None,
             "is_primary": is_primary,
             "source_kind": "local_upload",
             "local_file_path": str(cog_path.resolve()),
@@ -701,6 +719,11 @@ def admin_publish_result(
         raise HTTPException(status_code=404, detail="No result exists yet for this run")
     if run.status not in ("completed", "review_required", "published") or not result.tile_url:
         raise HTTPException(status_code=400, detail="Hasil gagal/belum selesai tidak dapat dipublikasikan")
+    capability = disaster_capability_service.validate_persisted_result(
+        db, disaster_repo.get_event(db, run.event_id), run, result, require_published=False
+    )
+    if not capability.allowed:
+        raise HTTPException(status_code=400, detail={"message": "Hasil belum memenuhi publication gate", "reasons": list(capability.reasons)})
     run.status = "published"
     result = disaster_repo.publish_result(db, result, admin.id)
     audit_service.log_audit(
@@ -778,7 +801,7 @@ def admin_delete_result(
 
 @router.get("/disasters/{id}/qc")
 def admin_qc_summary(id: int, admin: AdminUser = Depends(require_permission("disaster.read")), db: Session = Depends(get_db)):
-    _get_event_or_404(db, id)
+    event = _get_event_or_404(db, id)
     aoi = disaster_repo.get_active_aoi(db, id)
     pre_imagery = disaster_repo.get_primary_imagery(db, id, "pre")
     post_imagery = disaster_repo.get_primary_imagery(db, id, "post")
@@ -803,6 +826,7 @@ def admin_qc_summary(id: int, admin: AdminUser = Depends(require_permission("dis
         "post_imagery_available": bool(post_imagery),
         "analyses": analyses,
         "ready_to_publish": ready_to_publish,
+        "readiness": disaster_capability_service.readiness_matrix(db, event),
     }
 
 

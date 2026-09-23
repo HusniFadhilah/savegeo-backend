@@ -32,6 +32,10 @@ def _event_slug(name: str) -> str:
 
 def create_event(db: Session, data: dict, created_by: int | None) -> DisasterEvent:
     event_date = data.get("event_date")
+    slug = data.get("slug") or _event_slug(data["name"])
+    existing = db.execute(select(DisasterEvent).where(DisasterEvent.slug == slug).limit(1)).scalars().first()
+    if existing is not None:
+        return existing
     event = DisasterEvent(
         name=data["name"],
         disaster_type=data["disaster_type"],
@@ -46,7 +50,7 @@ def create_event(db: Session, data: dict, created_by: int | None) -> DisasterEve
         description=data.get("description"),
         source=data.get("source"),
         thumbnail=data.get("thumbnail"),
-        slug=data.get("slug") or _event_slug(data["name"]),
+        slug=slug,
         short_title=data.get("short_title") or data["name"],
         monitoring_from=data.get("monitoring_from") or data.get("start_date"),
         monitoring_to=data.get("monitoring_to") or data.get("end_date"),
@@ -115,7 +119,7 @@ def list_events(
 ) -> list[DisasterEvent]:
     stmt = select(DisasterEvent)
     if published_only:
-        stmt = stmt.where(DisasterEvent.status == "published")
+        stmt = stmt.where(DisasterEvent.status == "published", DisasterEvent.is_public.is_(True))
     elif status:
         stmt = stmt.where(DisasterEvent.status == status)
     if disaster_type:
@@ -183,6 +187,25 @@ def get_aoi(db: Session, aoi_id: int) -> DisasterAOI | None:
 
 
 def add_imagery(db: Session, event_id: int, data: dict) -> SatelliteImagery:
+    match = select(SatelliteImagery).where(
+        SatelliteImagery.event_id == event_id,
+        SatelliteImagery.phase == data["phase"],
+        SatelliteImagery.acquisition_date == data["acquisition_date"],
+        SatelliteImagery.satellite == data["satellite"],
+        SatelliteImagery.source_kind == data.get("source_kind", "gee"),
+    )
+    if data.get("scene_id"):
+        match = match.where(SatelliteImagery.scene_id == data["scene_id"])
+    else:
+        match = match.where(SatelliteImagery.data_source == data.get("data_source"))
+    existing = db.execute(match.limit(1)).scalars().first()
+    if existing is not None:
+        if data.get("is_primary"):
+            _clear_primary(db, event_id, existing.phase)
+            existing.is_primary = True
+            db.commit()
+            db.refresh(existing)
+        return existing
     img = SatelliteImagery(
         event_id=event_id,
         phase=data["phase"],
@@ -192,6 +215,7 @@ def add_imagery(db: Session, event_id: int, data: dict) -> SatelliteImagery:
         resolution_m=data.get("resolution_m"),
         cloud_coverage_pct=data.get("cloud_coverage_pct"),
         data_source=data.get("data_source"),
+        scene_id=data.get("scene_id"),
         is_primary=bool(data.get("is_primary", False)),
         preview_tile_url=data.get("preview_tile_url"),
         source_kind=data.get("source_kind", "gee"),
@@ -262,6 +286,23 @@ def get_imagery(db: Session, imagery_id: int) -> SatelliteImagery | None:
 
 
 def create_run(db: Session, event_id: int, data: dict, created_by: int | None) -> AnalysisRun:
+    # A new computation invalidates the previously published result for the
+    # same event/model.  It must not remain visible while its replacement is
+    # being processed.
+    previous = db.execute(
+        select(AnalysisRun, AnalysisResult)
+        .join(AnalysisResult, AnalysisResult.run_id == AnalysisRun.id)
+        .where(
+            AnalysisRun.event_id == event_id,
+            AnalysisRun.model_id == data["model_id"],
+            AnalysisResult.is_published.is_(True),
+        )
+    ).all()
+    for old_run, old_result in previous:
+        old_result.is_published = False
+        old_result.stale_reason = "A new analysis run was created for this model; revalidation required"
+        if old_run.status == "published":
+            old_run.status = "stale"
     run = AnalysisRun(
         event_id=event_id,
         model_id=data["model_id"],
@@ -305,6 +346,10 @@ def upsert_result(db: Session, run_id: int, data: dict) -> AnalysisResult:
     result.features = data.get("features")
     result.legend = data.get("legend")
     result.confidence_summary = data.get("confidence_summary")
+    result.provenance = data.get("provenance")
+    result.validation_status = data.get("validation_status")
+    result.limitations = data.get("limitations")
+    result.stale_reason = None
     result.is_published = False
     db.commit()
     db.refresh(result)
@@ -313,6 +358,7 @@ def upsert_result(db: Session, run_id: int, data: dict) -> AnalysisResult:
 
 def publish_result(db: Session, result: AnalysisResult, published_by: int | None) -> AnalysisResult:
     result.is_published = True
+    result.stale_reason = None
     result.published_at = dt.datetime.now(dt.UTC)
     result.published_by = published_by
     result.publication_version = (result.publication_version or 0) + 1

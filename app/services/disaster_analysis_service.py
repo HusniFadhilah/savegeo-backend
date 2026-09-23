@@ -13,6 +13,11 @@ from sqlalchemy.orm import Session
 
 from app.registries.disaster_model_registry import get_model
 from app.repositories import disaster_repo
+from app.services.disaster_capability_service import (
+    build_provenance,
+    check_inputs,
+    model_state,
+)
 from app.services.gee_common import (
     AnalysisError,
     _event_area_ha,
@@ -264,32 +269,24 @@ def compute_flood_change(aoi, pre_date: dt.date, post_date: dt.date, scale: int 
 
 def validate_inputs(db, event_id, aoi_id, pre_id, post_id, model_id):
     model = get_model(model_id)
-    if not model or not model["enabled"]:
-        raise AnalysisError("Model tidak aktif atau tidak memiliki implementasi", 400)
     event = disaster_repo.get_event(db, event_id)
-    if not event or event.disaster_type not in model.get("disaster_types", []):
-        raise AnalysisError("Model tidak mendukung jenis bencana ini", 400)
     aoi = disaster_repo.get_aoi(db, aoi_id)
-    if not aoi or aoi.event_id != event_id or not aoi.geojson:
+    pre = disaster_repo.get_imagery(db, pre_id) if pre_id else None
+    post = disaster_repo.get_imagery(db, post_id) if post_id else None
+    if not model:
+        raise AnalysisError("Model tidak terdaftar", 400)
+    if event is None:
+        raise AnalysisError("Disaster event tidak ditemukan", 404)
+    if aoi is None or aoi.event_id != event_id:
         raise AnalysisError("AOI tidak tersedia atau berasal dari event lain", 400)
-    images = []
-    for phase, image_id in (("pre", pre_id), ("post", post_id)):
-        image = disaster_repo.get_imagery(db, image_id) if image_id else None
-        if not image or image.event_id != event_id or image.phase != phase:
-            raise AnalysisError(f"Imagery {phase} wajib tersedia pada event dan fase yang benar", 400)
-        if image.source_kind != "gee":
-            raise AnalysisError("Model ini hanya mendukung sumber GEE; raster unggahan tidak boleh diganti dengan citra lain", 400)
-        sensor = image.satellite.lower().replace("-", "").replace(" ", "")
-        expected = "sentinel1" if model_id == "flood_change_v1" else "sentinel2"
-        if expected not in sensor:
-            raise AnalysisError(f"Input {phase} harus berasal dari {expected}", 400)
-        if not image.acquisition_date:
-            raise AnalysisError(f"Tanggal imagery {phase} tidak tersedia", 400)
-        if model_id == "dynamic_world_v1" and image.resolution_m != 10:
-            raise AnalysisError("Dynamic World memerlukan imagery Sentinel-2 dengan metadata resolusi 10 m", 400)
-        images.append(image)
-    if images[0].acquisition_date >= images[1].acquisition_date:
-        raise AnalysisError("Tanggal pre harus lebih awal dari post", 400)
+    if pre is not None and pre.event_id != event_id:
+        raise AnalysisError("Imagery pre berasal dari event lain", 400)
+    if post is not None and post.event_id != event_id:
+        raise AnalysisError("Imagery post berasal dari event lain", 400)
+    check = check_inputs(model_id, event, aoi, pre, post)
+    if not check.allowed:
+        raise AnalysisError("; ".join(check.reasons), 400)
+    images = [pre, post]
     return model, aoi, images[0], images[1]
 
 
@@ -314,13 +311,21 @@ def run_analysis(db: Session, run_id: int, force: bool = False) -> dict:
             if candidate.status not in ("completed", "review_required", "published"):
                 continue
             cached = disaster_repo.get_result_for_run(db, candidate.id)
-            if not cached or (cached.statistics or {}).get("cache_key") != key:
+            if not cached or (candidate.id != run.id and not getattr(cached, "provenance", None)) or (cached.statistics or {}).get("cache_key") != key:
                 continue
             # GEE map URLs are ephemeral: bound reuse, never pretend an old tile is fresh.
             if not candidate.completed_at or (dt.datetime.now(dt.UTC) - candidate.completed_at.replace(tzinfo=dt.UTC)).total_seconds() > 21600:
                 continue
             if candidate.id != run.id:
-                cached = disaster_repo.upsert_result(db, run.id, {**cached.to_dict(include_features=True), "statistics": cached.statistics})
+                cached = disaster_repo.upsert_result(db, run.id, {
+                    **cached.to_dict(include_features=True),
+                    "statistics": cached.statistics,
+                    "provenance": build_provenance(
+                        disaster_repo.get_event(db, run.event_id), aoi_row, pre_img, post_img, model,
+                    ),
+                    "validation_status": model_state(model),
+                    "limitations": list(model.get("limitations", [])),
+                })
                 run.status = "review_required" if (cached.statistics or {}).get("comparison", {}).get("review_reasons") else "completed"
                 run.error_message = None
                 run.model_version = model["version"]
@@ -332,6 +337,7 @@ def run_analysis(db: Session, run_id: int, force: bool = False) -> dict:
         run.model_version = model["version"]
         run.started_at = dt.datetime.now(dt.UTC)
         db.commit()
+        event = disaster_repo.get_event(db, run.event_id)
         aoi = create_geometry_from_payload({"geojson": aoi_row.geojson})
         pre_date, post_date = pre_img.acquisition_date, post_img.acquisition_date
         if run.model_id == "dynamic_world_v1":
@@ -347,6 +353,9 @@ def run_analysis(db: Session, run_id: int, force: bool = False) -> dict:
         if not output.get("tile_url") or not output.get("statistics"):
             raise AnalysisError("Model tidak menghasilkan tile dan statistik yang valid", 422)
         output["statistics"]["cache_key"] = key
+        output["provenance"] = build_provenance(event, aoi_row, pre_img, post_img, model)
+        output["validation_status"] = model_state(model)
+        output["limitations"] = list(model.get("limitations", []))
         comparison = output["statistics"].get("comparison")
         if comparison:
             comparison.update(event_id=run.event_id, aoi_id=run.aoi_id,

@@ -12,7 +12,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
 
-RUN_STATUSES = ("queued", "processing", "completed", "failed", "review_required", "published")
+RUN_STATUSES = ("queued", "processing", "completed", "failed", "review_required", "published", "stale")
 
 
 class AnalysisRun(Base):

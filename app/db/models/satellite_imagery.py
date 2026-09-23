@@ -26,6 +26,7 @@ class SatelliteImagery(Base):
     resolution_m: Mapped[float | None] = mapped_column(Float)
     cloud_coverage_pct: Mapped[float | None] = mapped_column(Float)
     data_source: Mapped[str | None] = mapped_column(String(100))
+    scene_id: Mapped[str | None] = mapped_column(String(255), index=True)
     is_primary: Mapped[bool] = mapped_column(Boolean, default=False)
     preview_tile_url: Mapped[str | None] = mapped_column(String(1000))
     # "gee" (default, existing behavior - preview_tile_url points at an
@@ -47,6 +48,7 @@ class SatelliteImagery(Base):
             "resolution_m": self.resolution_m,
             "cloud_coverage_pct": self.cloud_coverage_pct,
             "data_source": self.data_source,
+            "scene_id": self.scene_id,
             "is_primary": self.is_primary,
             "preview_tile_url": self.preview_tile_url,
             "source_kind": self.source_kind,
