@@ -12,14 +12,18 @@ every route uses to enforce this.
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.security import get_current_disaster_viewer
 from app.db.models.disaster_event import DisasterEvent
+from app.db.models.hotspot import Hotspot
+from app.db.models.wildfire_hotspot import WildfireHotspot
 from app.db.session import get_db
 from app.registries import disaster_model_registry
 from app.repositories import disaster_repo
 from app.services.disaster_cross_layer_service import get_available_cross_layer_stats
+from app.services import firms_service, wildfire_hotspot_service
 
 router = APIRouter(prefix="/disasters", tags=["disasters"])
 
@@ -95,6 +99,40 @@ def _compatible_model_ids(event: DisasterEvent) -> set[str]:
     )}
 
 
+def _wildfire_metrics(db: Session, event: DisasterEvent) -> tuple[int, int]:
+    """Return persisted hotspot totals for a forest-fire event.
+
+    The generic disaster list is also used by the Karhutla overview card. Keep
+    that card backed by the same persisted NASA FIRMS table as the standalone
+    wildfire API instead of letting the frontend interpret missing fields as 0.
+    """
+    rows = list(
+        db.execute(
+            select(WildfireHotspot.stats).where(
+                WildfireHotspot.event_id == event.id,
+                WildfireHotspot.is_published.is_(True),
+            )
+        ).scalars()
+    )
+    if rows:
+        high_confidence = sum(
+            str((stats or {}).get("confidence_category", (stats or {}).get("confidence_label", ""))).casefold()
+            == "high"
+            for stats in rows
+        )
+        return len(rows), high_confidence
+
+    # Preserve compatibility with older admin-curated hotspot rows when the
+    # persisted NASA table is still empty.
+    curated_count = db.execute(
+        select(Hotspot.id).where(
+            Hotspot.event_id == event.id,
+            Hotspot.is_published.is_(True),
+        )
+    ).scalars().all()
+    return len(curated_count), 0
+
+
 @router.get("")
 def list_disasters(
     disaster_type: str | None = None,
@@ -116,12 +154,31 @@ def list_disasters(
     )
     result = []
     for event in events:
+        if event.disaster_type == "forest_fire":
+            # Populate the cache only once. Subsequent overview/detail reads
+            # are served from the database until an explicit admin sync.
+            try:
+                wildfire_hotspot_service.ensure_initial_sync(db, event)
+            except firms_service.FirmsRequestError:
+                # A source outage must not hide the published event. Existing
+                # database rows, if any, remain usable below.
+                pass
         data = event.to_dict()
         allowed = _compatible_model_ids(event)
         data["available_analysis_count"] = sum(
             1 for run, _ in disaster_repo.list_published_analyses(db, event.id)
             if run.model_id in allowed
         )
+        if event.disaster_type == "forest_fire":
+            hotspot_count, high_confidence_count = _wildfire_metrics(db, event)
+            data.update(
+                {
+                    "hotspot_count": hotspot_count,
+                    "high_confidence_count": high_confidence_count,
+                    "burned_area_ha": None,
+                    "burned_area_source": None,
+                }
+            )
         result.append(data)
     return {"events": result}
 

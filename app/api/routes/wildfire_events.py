@@ -239,22 +239,31 @@ def list_wildfire_events(
         events = [event for event in events if province in (event.province or [])]
     items = []
     for event in events:
-        count = len(
+        try:
+            wildfire_hotspot_service.ensure_initial_sync(db, event)
+        except firms_service.FirmsRequestError:
+            # The persisted cache remains readable when NASA FIRMS is
+            # temporarily unavailable.
+            pass
+        persisted_stats = list(
             db.execute(
-                select(WildfireHotspot).where(
+                select(WildfireHotspot.stats).where(
                     WildfireHotspot.event_id == event.id,
                     WildfireHotspot.is_published.is_(True),
                 )
-            ).scalars().all()
+            ).scalars()
+        )
+        count = len(persisted_stats)
+        high_confidence_count = sum(
+            str((stats or {}).get("confidence_category", (stats or {}).get("confidence_label", ""))).casefold()
+            == "high"
+            for stats in persisted_stats
         )
         if count == 0:
-            count = len(
-                db.execute(
-                    select(Hotspot).where(Hotspot.event_id == event.id, Hotspot.is_published.is_(True))
-                )
-                .scalars()
-                .all()
+            curated_rows = db.execute(
+                select(Hotspot).where(Hotspot.event_id == event.id, Hotspot.is_published.is_(True))
             )
+            count = len(curated_rows.scalars().all())
         data = event.to_dict()
         data.update(
             {
@@ -262,7 +271,7 @@ def list_wildfire_events(
                 "provinces": data.get("province", []),
                 "status": _public_status(event),
                 "hotspot_count": count,
-                "high_confidence_count": 0,
+                "high_confidence_count": high_confidence_count,
                 "burned_area_ha": None,
                 "burned_area_source": None,
             }
