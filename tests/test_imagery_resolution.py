@@ -88,6 +88,36 @@ def test_rgb_tile_uses_final_masked_selected_clipped_image():
     image.reproject.assert_not_called()
 
 
+def test_large_sentinel_aoi_uses_date_range_mosaic():
+    metadata = get_imagery_provider_meta("sentinel2")
+    with patch.object(imagery_service, "ee") as ee, \
+         patch.object(imagery_service, "create_geometry_from_payload", return_value=MagicMock(name="aoi")), \
+         patch.object(imagery_service, "_aoi_exceeds_scene_footprint", return_value=True), \
+         patch.object(imagery_service, "_get_sentinel2_mosaic_tile", return_value={
+             "tile_url": "mosaic-url",
+             "scene_count": 4,
+             "super_resolution": None,
+             "cloud_mask_technique": "scl",
+         }) as mosaic:
+        matches = ee.ImageCollection.return_value.filter.return_value
+        matches.size.return_value.getInfo.return_value = 1
+        result = imagery_service.get_scene_tile({
+            "satellite": "sentinel2",
+            "scene_id": "scene",
+            "aoi": {"geojson": {}},
+            "auto_mosaic": True,
+            "start_date": "2025-01-01",
+            "end_date": "2025-02-01",
+            "cloud_mask_technique": "scl",
+        })
+    mosaic.assert_called_once()
+    assert result["tile_url"] == "mosaic-url"
+    assert result["render_mode"] == "mosaic"
+    assert result["scene_count"] == 4
+    assert result["aoi_larger_than_scene"] is True
+    assert result["satellite"] == metadata
+
+
 def test_cog_renderer_reads_requested_high_zoom_without_thumbnail_resize():
     with patch.object(imagery_service, "_readable_stac_asset_href", return_value="https://example.org/full.tif"), \
          patch.object(imagery_service, "_validate_public_http_url"), \

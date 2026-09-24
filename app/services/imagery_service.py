@@ -1,7 +1,8 @@
 """Raw satellite imagery browser - list individual scenes with their real
 acquisition date+time and view any single one visualized appropriately for
-its sensor type, with no compositing across a date range and no land-cover/
-vegetation/carbon analysis involved.
+its sensor type. Sentinel-2 uses a date-range mosaic automatically when one
+granule cannot cover the requested AOI; no land-cover/vegetation/carbon
+analysis is involved.
 
 User request: "bagaimana bisa melihat citra satelit utk tanggal beserta jam
 tertentu, tanpa harus land cover?" - every existing analysis module
@@ -16,13 +17,13 @@ genuinely different visualization strategy - see imagery_provider_registry.py
 for the full rationale on why that's a separate catalog from
 satellite_provider_registry.py (vegetation/carbon's index-analysis one).
 
-Unlike the analysis pipelines, optical scenes here are shown UNMASKED (clouds
-visible as white, not removed) - the point of browsing is to let a user
-visually judge a specific scene themselves, not to extract a clean statistic
-from it. SAR is naturally cloud-independent; S5P products have no per-pixel
-cloud mask applied here either (their own `cloud_fraction`/similar bands are
-metadata, not something this endpoint filters on beyond the optional
-`max_cloud_cover` scene-level query for optical sensors).
+Unlike the analysis pipelines, exact optical scenes remain available as an
+unmasked view (clouds visible as white), while the browser can opt into a
+per-pixel mask and the large-AOI mosaic uses that selected mask. SAR is
+naturally cloud-independent; S5P products have no per-pixel cloud mask applied
+here either (their own `cloud_fraction`/similar bands are metadata, not
+something this endpoint filters on beyond the optional `max_cloud_cover`
+scene-level query for optical sensors).
 """
 from __future__ import annotations
 
@@ -74,6 +75,7 @@ logger = logging.getLogger(__name__)
 # Keep a generous safety ceiling for one browsing response. The UI paginates
 # this collection, so users are no longer forced to stop at 200 scenes.
 _MAX_SCENES = 2000
+_SENTINEL2_MOSAIC_PROVIDER_KEYS = {"sentinel2", "sentinel2_l1c"}
 _COMMERCIAL_ITEM_CACHE: dict[tuple[str, str], str] = {}
 _COMMERCIAL_ITEM_CACHE_LOCK = threading.RLock()
 _COPERNICUS_PROVIDER_KEYS = {"copernicus_s2_l2a", "copernicus_s2_l1c"}
@@ -1029,6 +1031,93 @@ def _apply_s2_single_scene_mask(img: ee.Image, technique: str) -> ee.Image:
     return img.updateMask(mask)
 
 
+def _aoi_exceeds_scene_footprint(aoi: ee.Geometry, scene: ee.Image) -> bool:
+    """Return whether the requested AOI is larger than one Sentinel-2 granule.
+
+    Sentinel-2 tiles are roughly 100 km wide, while users often draw an AOI
+    spanning an entire province.  Keep this check server-side and bundle both
+    area requests into one ``getInfo`` call.  If Earth Engine cannot evaluate
+    the footprint for an unusual image, retain the safe single-scene behavior.
+    """
+    try:
+        areas = ee.Dictionary({
+            "aoi": aoi.area(maxError=1),
+            # The Python Earth Engine Image wrapper does not expose the
+            # JavaScript ``image.geometry()`` helper.  Sentinel-2 publishes
+            # the equivalent footprint as the system:footprint property.
+            "scene": ee.Geometry(scene.get("system:footprint")).area(maxError=1),
+        }).getInfo()
+        aoi_area = float((areas or {}).get("aoi") or 0)
+        scene_area = float((areas or {}).get("scene") or 0)
+        return aoi_area > 0 and scene_area > 0 and aoi_area > scene_area
+    except Exception:  # noqa: BLE001
+        logger.warning("Could not compare AOI and Sentinel-2 scene footprint; using single scene")
+        return False
+
+
+def _get_sentinel2_mosaic_tile(data: dict, aoi: ee.Geometry, meta: dict) -> dict | None:
+    """Build one cloud-masked RGB mosaic for a Sentinel-2 date range.
+
+    The scene browser still returns and identifies exact acquisitions.  This
+    helper is only used when the selected granule cannot cover the requested
+    AOI, so the map can fill the AOI from all matching granules without
+    changing the scene table semantics.
+    """
+    start_date = data.get("start_date")
+    end_date = data.get("end_date")
+    if not start_date or not end_date:
+        return None
+
+    collection = (
+        ee.ImageCollection(meta["gee_collection"])
+        .filterBounds(aoi)
+        .filterDate(start_date, end_date)
+        .sort("system:time_start")
+    )
+    cloud_prop = meta.get("cloud_property")
+    max_cloud_cover = data.get("max_cloud_cover")
+    if cloud_prop and max_cloud_cover is not None:
+        collection = collection.filter(ee.Filter.lte(cloud_prop, float(max_cloud_cover)))
+    collection = collection.limit(_MAX_SCENES)
+    scene_count = int(collection.size().getInfo() or 0)
+    if scene_count == 0:
+        return None
+
+    available_techniques = meta.get("cloud_mask_techniques") or []
+    requested_technique = data.get("cloud_mask_technique")
+    applied_cloud_mask = None
+    if available_techniques and requested_technique:
+        technique = resolve_cloud_mask_technique(requested_technique)
+        if technique not in available_techniques:
+            technique = available_techniques[0]
+        applied_cloud_mask = technique
+
+    band_role_map = meta["band_role_map"]
+    bands = list(band_role_map.values())
+
+    def prepare_image(image):
+        if applied_cloud_mask:
+            image = _apply_s2_single_scene_mask(image, applied_cloud_mask)
+        return image.select(bands).multiply(meta["reflectance_scale"]).add(meta.get("reflectance_offset", 0))
+
+    mosaic = collection.map(prepare_image).mosaic().clip(aoi)
+    vis = {
+        "bands": [band_role_map["red"], band_role_map["green"], band_role_map["blue"]],
+        "min": meta["vis_min"],
+        "max": meta["vis_max"],
+    }
+    mosaic, super_resolution = _apply_super_resolution(mosaic, meta, data.get("super_resolution"))
+    tile = get_tile_url(mosaic, vis, f"{meta['name']} mosaic")
+    if not tile:
+        raise AnalysisError("Gagal membuat tile mosaik Sentinel-2", 500)
+    return {
+        "tile_url": tile["tile_url"],
+        "scene_count": scene_count,
+        "super_resolution": super_resolution,
+        "cloud_mask_technique": applied_cloud_mask,
+    }
+
+
 def _apply_super_resolution(img: ee.Image, meta: dict, mode: str | None) -> tuple[ee.Image, dict | None]:
     """Visual super-resolution for GEE-backed scene tiles.
 
@@ -1172,6 +1261,40 @@ def get_scene_tile(data: dict, request=None) -> dict:
     if matches.size().getInfo() == 0:
         raise AnalysisError(f"Scene '{scene_id}' tidak ditemukan untuk {meta['name']}", 404)
     img = matches.first()
+    aoi = None
+
+    # A Sentinel-2 granule cannot cover a province-sized AOI.  Keep the
+    # selected scene as the provenance anchor, but automatically render a
+    # date-range mosaic when the AOI is larger than that granule footprint.
+    if (
+        data.get("auto_mosaic")
+        and provider_key in _SENTINEL2_MOSAIC_PROVIDER_KEYS
+        and data.get("aoi")
+        and data.get("start_date")
+        and data.get("end_date")
+    ):
+        aoi = create_geometry_from_payload(data["aoi"])
+        if _aoi_exceeds_scene_footprint(aoi, img):
+            mosaic = _get_sentinel2_mosaic_tile(data, aoi, meta)
+            if mosaic:
+                return {
+                    "scene_id": scene_id,
+                    "tile_url": mosaic["tile_url"],
+                    "satellite": meta,
+                    "super_resolution": mosaic["super_resolution"],
+                    "resolution_m": meta.get("resolution_m"),
+                    "native_scale_m": meta.get("resolution_m"),
+                    "dataset": meta.get("gee_collection"),
+                    "visualization_bands": [
+                        meta["band_role_map"]["red"],
+                        meta["band_role_map"]["green"],
+                        meta["band_role_map"]["blue"],
+                    ],
+                    "scene_count": mosaic["scene_count"],
+                    "render_mode": "mosaic",
+                    "aoi_larger_than_scene": True,
+                    "cloud_mask_technique": mosaic["cloud_mask_technique"],
+                }
 
     visualization = meta["visualization"]
     applied_cloud_mask = None
@@ -1222,7 +1345,8 @@ def get_scene_tile(data: dict, request=None) -> dict:
     img, super_resolution = _apply_super_resolution(img, meta, data.get("super_resolution"))
 
     if data.get("aoi"):
-        aoi = create_geometry_from_payload(data["aoi"])
+        if aoi is None:
+            aoi = create_geometry_from_payload(data["aoi"])
         img = img.clip(aoi)
 
     tile = get_tile_url(img, vis, f"{meta['name']} scene")
@@ -1239,6 +1363,8 @@ def get_scene_tile(data: dict, request=None) -> dict:
         "dataset": meta.get("gee_collection"),
         "visualization_bands": vis.get("bands"),
         "scene_count": 1,
+        "render_mode": "scene",
+        "aoi_larger_than_scene": False,
         "cloud_mask_technique": applied_cloud_mask,
     }
 
