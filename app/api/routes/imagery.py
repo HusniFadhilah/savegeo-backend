@@ -2,7 +2,8 @@
 /api/imagery/scenes (list real scenes with their exact acquisition date+time)
 and /api/imagery/scene-tile (RGB/SAR/gas-colormap tile for one single scene;
 Sentinel-2 can automatically use a date-range mosaic when the AOI is larger
-than that scene) - independent of vegetation/landcover/carbon analysis. See
+than that scene, or when the mosaic group is selected) - independent of
+vegetation/landcover/carbon analysis. See
 app.services.imagery_service for the full rationale.
 """
 from __future__ import annotations

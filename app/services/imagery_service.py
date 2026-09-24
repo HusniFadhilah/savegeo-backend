@@ -1058,10 +1058,11 @@ def _aoi_exceeds_scene_footprint(aoi: ee.Geometry, scene: ee.Image) -> bool:
 def _get_sentinel2_mosaic_tile(data: dict, aoi: ee.Geometry, meta: dict) -> dict | None:
     """Build one cloud-masked RGB mosaic for a Sentinel-2 date range.
 
-    The scene browser still returns and identifies exact acquisitions.  This
-    helper is only used when the selected granule cannot cover the requested
-    AOI, so the map can fill the AOI from all matching granules without
-    changing the scene table semantics.
+    The scene browser still returns and identifies exact acquisitions. This
+    helper is used automatically when the selected granule cannot cover the
+    requested AOI, or explicitly when the user selects the mosaic group, so
+    the map can fill the AOI from all matching granules without changing the
+    scene table semantics.
     """
     start_date = data.get("start_date")
     end_date = data.get("end_date")
@@ -1267,14 +1268,15 @@ def get_scene_tile(data: dict, request=None) -> dict:
     # selected scene as the provenance anchor, but automatically render a
     # date-range mosaic when the AOI is larger than that granule footprint.
     if (
-        data.get("auto_mosaic")
+        not data.get("force_scene")
+        and (data.get("force_mosaic") or data.get("auto_mosaic"))
         and provider_key in _SENTINEL2_MOSAIC_PROVIDER_KEYS
         and data.get("aoi")
         and data.get("start_date")
         and data.get("end_date")
     ):
         aoi = create_geometry_from_payload(data["aoi"])
-        if _aoi_exceeds_scene_footprint(aoi, img):
+        if data.get("force_mosaic") or _aoi_exceeds_scene_footprint(aoi, img):
             mosaic = _get_sentinel2_mosaic_tile(data, aoi, meta)
             if mosaic:
                 return {
