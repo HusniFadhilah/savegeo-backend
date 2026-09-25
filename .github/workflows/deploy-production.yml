@@ -188,11 +188,27 @@ jobs:
           fetch-depth: 0
 
       - name: Scan working tree for secrets
+        env:
+          GITLEAKS_IMAGE: ghcr.io/gitleaks/gitleaks:v8.30.1
         run: |
+          set -euo pipefail
+          pulled=false
+          for attempt in 1 2 3 4 5; do
+            if docker pull "$GITLEAKS_IMAGE"; then
+              pulled=true
+              break
+            fi
+            echo "Gitleaks image pull failed (attempt $attempt/5); retrying..." >&2
+            sleep $((attempt * 10))
+          done
+          if [ "$pulled" != true ]; then
+            echo "Unable to pull $GITLEAKS_IMAGE after 5 attempts." >&2
+            exit 1
+          fi
           set +e
           docker run --rm \
             -v "${{ github.workspace }}:/repo" \
-            zricethezav/gitleaks:latest detect \
+            "$GITLEAKS_IMAGE" detect \
             --source /repo \
             --config /repo/.gitleaks.toml \
             --no-git \
