@@ -138,6 +138,28 @@ local-forward endpoint instead of exposing Ollama publicly. Select **Ollama
 an existing `ai.provider` value, because database configuration takes
 precedence over the environment fallback.
 
+### Documented test accounts
+
+Create or rotate the four role accounts only on the server, using temporary
+environment variables. Do not put these values in `.env.example`, GitHub
+Actions, or a commit:
+
+```bash
+export SAVEGEO_PASSWORD_SAVEGEOGEOSPATIAL='(value supplied by the operator)'
+export SAVEGEO_PASSWORD_EXAMPLE_USER='(value supplied by the operator)'
+export SAVEGEO_PASSWORD_DEMO_ADMIN='(value supplied by the operator)'
+export SAVEGEO_PASSWORD_SUPER_ADMIN='(value supplied by the operator)'
+.venv/bin/python -m scripts.seed_rbac
+.venv/bin/python -m scripts.ensure_test_accounts
+unset SAVEGEO_PASSWORD_SAVEGEOGEOSPATIAL SAVEGEO_PASSWORD_EXAMPLE_USER \
+  SAVEGEO_PASSWORD_DEMO_ADMIN SAVEGEO_PASSWORD_SUPER_ADMIN
+```
+
+The command is idempotent. It assigns `SavegeoGeospatial` to
+`geospatial_expert`, `example_user` to `viewer`, `demo_admin` to `admin`, and
+`super_admin` to the full-access state (`role_id = NULL`). It prints usernames
+and role names only; passwords and password hashes are never printed.
+
 ## Verification
 
 ```bash
