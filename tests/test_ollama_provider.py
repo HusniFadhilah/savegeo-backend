@@ -43,6 +43,7 @@ def test_ollama_uses_openai_compatible_base_url_and_local_dummy_key(monkeypatch)
     assert isinstance(request, dict)
     assert request["model"] == "qwen3:8b"
     assert request["messages"][-1]["content"][0]["text"] == "hello"
+    assert request["reasoning_effort"] == "none"
 
 
 def test_geoai_dispatches_tool_calling_to_ollama(monkeypatch):

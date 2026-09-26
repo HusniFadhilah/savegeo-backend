@@ -1795,6 +1795,13 @@ def _call_openai_compat(api_key: str, model: str, user_input: str,
         "temperature": 0.3,
         "messages":    messages,
     }
+    # Ollama's OpenAI-compatible endpoint enables Qwen3 thinking by default.
+    # The reasoning tokens can consume the whole completion budget and leave
+    # ``message.content`` empty, which makes the controller appear broken.
+    # ``reasoning_effort=none`` is Ollama's OpenAI-compatible switch for the
+    # native ``think=false`` behavior; keep it scoped to the local provider.
+    if api_key == "ollama":
+        create_kwargs["reasoning_effort"] = "none"
     if force_json:
         create_kwargs["response_format"] = {"type": "json_object"}
 
@@ -2259,9 +2266,16 @@ def _call_openai_compat_tools(api_key: str, model: str, user_input: str,
     tools = _tool_schema_for_openai()
 
     for _ in range(max_rounds):
-        resp = client.chat.completions.create(
-            model=model, max_tokens=4096, temperature=0.2, messages=messages, tools=tools,
-        )
+        request_kwargs = {
+            "model": model,
+            "max_tokens": 4096,
+            "temperature": 0.2,
+            "messages": messages,
+            "tools": tools,
+        }
+        if api_key == "ollama":
+            request_kwargs["reasoning_effort"] = "none"
+        resp = client.chat.completions.create(**request_kwargs)
         choice = resp.choices[0]
         msg = choice.message
         tool_calls = getattr(msg, "tool_calls", None)
