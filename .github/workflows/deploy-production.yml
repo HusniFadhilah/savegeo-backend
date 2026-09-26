@@ -169,6 +169,10 @@ jobs:
               docker compose -f docker-compose.prod.yml logs --tail=150 api
               exit 1
             fi
+            # Check Ollama from inside the same API container that serves the
+            # chatbot. The script is a no-op when another AI provider is set.
+            docker compose -f docker-compose.prod.yml exec -T api \
+              python -m scripts.check_ollama
             # Runtime model files are deliberately excluded from rsync. Refresh
             # the database registry from their sidecar metadata after every
             # deploy so GEDI L4A/L4D and ESA CCI model choices match the files

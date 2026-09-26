@@ -124,6 +124,9 @@ sudo systemctl daemon-reload
 sudo systemctl restart ollama
 curl --fail http://127.0.0.1:11434/api/tags
 ollama ps
+
+# From the deployed backend directory, verify the exact runtime path too:
+python -m scripts.check_ollama
 ```
 
 Keep port `11434` private to the host/VPN. Do not put Ollama credentials or

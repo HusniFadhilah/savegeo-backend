@@ -270,6 +270,9 @@ jobs:
             fi
             sleep 3
           done
+          # Check Ollama from the same Python environment used by the systemd
+          # service. The script is a no-op when another AI provider is set.
+          .venv/bin/python -m scripts.check_ollama
 
           if command -v apache2ctl >/dev/null 2>&1; then
             a2enmod headers proxy proxy_http rewrite >/dev/null

@@ -49,6 +49,8 @@ then deploys:
 
 - backend workflow syncs source while preserving server `.env` and `var/`,
   creates a pre-deploy DB dump, rebuilds containers, and checks `/api/health`;
+- when `AI_PROVIDER=ollama`, the backend deployment probes Ollama from inside
+  the running API runtime and verifies that `AI_MODEL` is installed;
 - frontend workflow builds with `VITE_API_BASE_URL=/api`, syncs only `dist/`,
   and performs an HTTP smoke test.
 
