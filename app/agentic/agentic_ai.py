@@ -1395,9 +1395,20 @@ def _get_ai_config() -> dict:
 
         _db_session = SessionLocal()
 
+        # Keep newly added provider settings available to the admin panel and
+        # make env values usable on first boot without overwriting an existing
+        # admin choice.
+        try:
+            from app.services.config_service import ensure_default_settings
+
+            ensure_default_settings(_db_session)
+        except Exception:  # noqa: BLE001 - provider lookup must still work if DB is unavailable
+            pass
+
         def _db(key: str, fallback: str = "") -> str:
             row = _db_session.query(SystemConfig).filter_by(key=key).first()
-            return (row.value or "").strip() if row else fallback
+            configured = (row.value or "").strip() if row else ""
+            return configured or fallback
 
         try:
             return {

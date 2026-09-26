@@ -76,7 +76,7 @@ DEFAULT_CONFIGS: list[tuple[str, str, str, str, str, str, bool]] = [
 
     # -- AI controller --
     ("ai.provider", os.getenv("AI_PROVIDER", "anthropic"), "string", "ai",
-     "AI Provider", "Provider aktif: anthropic | openai | openrouter | deepseek | gemini", False),
+     "AI Provider", "Provider aktif: anthropic | openai | openrouter | deepseek | gemini | ollama | opencode", False),
 
     ("ai.model", os.getenv("AI_MODEL", ""), "string", "ai",
      "Model", "Nama model (kosong = default provider)", False),
@@ -98,6 +98,12 @@ DEFAULT_CONFIGS: list[tuple[str, str, str, str, str, str, bool]] = [
 
     ("ai.custom_base_url", os.getenv("AI_CUSTOM_BASE_URL", ""), "string", "ai",
      "Custom Base URL", "Override base URL untuk provider openai-compatible lainnya", False),
+
+    ("ai.ollama_base_url", os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434/v1"), "string", "ai",
+     "Ollama Base URL", "URL OpenAI-compatible Ollama lokal; gunakan /v1 pada akhir URL", False),
+
+    ("ai.opencode_base_url", os.getenv("OPENCODE_BASE_URL", "http://localhost:4096/v1"), "string", "ai",
+     "OpenCode Base URL", "URL OpenAI-compatible OpenCode lokal", False),
 
     # -- Rate limiting --
     ("ai.rate_limit_rpm", os.getenv("AI_RATE_LIMIT_RPM", "10"), "int", "ai",

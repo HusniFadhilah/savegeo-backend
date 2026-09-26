@@ -30,6 +30,11 @@ services:
       UPLOAD_DIR: /app/var/uploads
       MODEL_DIR: /app/var/saved_models
       CARBON_TILE_CACHE_DIR: /app/var/carbon_tile_cache
+      # Ollama normally runs on the LEN host (the H100 server). The host-gateway
+      # alias lets the API container reach it without exposing Ollama publicly.
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       db:
         condition: service_healthy

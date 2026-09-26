@@ -100,6 +100,41 @@ zooming into the AOI then requests the detailed, cacheable tiles.
 
 For disaster imagery, database `local_file_path` values must point to the target server. Thumbnail URLs use `/disaster-thumbnails/...` and the web server must proxy that path to FastAPI.
 
+### Local Ollama on the LEN H100 server
+
+The chatbot supports Ollama through its OpenAI-compatible `/v1` API. When the
+production API runs in Docker on the same LEN host as Ollama, configure the
+server `.env` with the exact model name shown by `ollama list`:
+
+```dotenv
+AI_PROVIDER=ollama
+AI_MODEL=<model-from-ollama-list>
+OLLAMA_BASE_URL=http://host.docker.internal:11434/v1
+```
+
+`docker-compose.prod.yml` maps `host.docker.internal` to the Linux host
+gateway. Ollama binds to `127.0.0.1` by default, so allow the Docker bridge
+interface by setting the service environment on the H100 host and restarting
+Ollama:
+
+```bash
+sudo systemctl edit ollama
+# under [Service]: Environment="OLLAMA_HOST=0.0.0.0:11434"
+sudo systemctl daemon-reload
+sudo systemctl restart ollama
+curl --fail http://127.0.0.1:11434/api/tags
+ollama ps
+```
+
+Keep port `11434` private to the host/VPN. Do not put Ollama credentials or
+the VPN/SSH password in Git; the local OpenAI-compatible client uses the
+required but ignored key value `ollama`. If the API and GPU server are
+separate machines, set `OLLAMA_BASE_URL` to a private VPN address or an SSH
+local-forward endpoint instead of exposing Ollama publicly. Select **Ollama
+(lokal)** in Admin → System Config → AI Controller when the database contains
+an existing `ai.provider` value, because database configuration takes
+precedence over the environment fallback.
+
 ## Verification
 
 ```bash
