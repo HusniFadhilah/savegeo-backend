@@ -69,9 +69,11 @@ def process_event(db, event) -> None:
         print(f"  {model_id}: OK, published (result id={result.id})")
 
     if any_published:
-        event.status = "published"
-        db.commit()
-        print(f"  event {event.id} -> status=published")
+        # Keep the event publication flags in sync. Updating only ``status``
+        # leaves ``is_public`` false, so the public /api/disasters catalog
+        # hides otherwise successful flood events.
+        disaster_repo.update_event(db, event, {"status": "published"})
+        print(f"  event {event.id} -> status=published, is_public=true")
     else:
         print(f"  event {event.id}: no analysis succeeded - left as '{event.status}', not published")
 
