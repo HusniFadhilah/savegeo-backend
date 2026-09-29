@@ -61,6 +61,7 @@ dependencies = [
     # needed, tiles are rendered on-demand straight from disk).
     "rio-tiler>=6.0.0",
     "pyproj>=3.6.0",
+    "shapely>=2.0.0",
 
     # --- Geo file handling ---
     "pyshp>=2.3.0",

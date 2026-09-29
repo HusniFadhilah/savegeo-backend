@@ -324,7 +324,7 @@ def load_carbon_reference_to_grid(
     Supported today: HANSEN_TREECOVER_AGB_PROXY, ESA_CCI_BIOMASS_COG,
     ESA_CCI_BIOMASS_V7_COG, and CTREES_AGB_100M.
     """
-    from carbon_dataset_registry import CARBON_EXTERNAL_REGISTRY
+    from app.registries.carbon_dataset_registry import CARBON_EXTERNAL_REGISTRY
 
     meta = CARBON_EXTERNAL_REGISTRY.get(dataset_key)
     if meta is None:

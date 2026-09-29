@@ -870,6 +870,7 @@ def analyze_carbon(db: Session, data: dict) -> dict:
     vis_max = int(data.get("vis_max", config_service.get_analysis_defaults(db)["carbon_vis_max"]))
     vis_palette = data.get("vis_palette", config_service.get_analysis_defaults(db)["carbon_vis_palette"])
     carbon_scale = int(data.get("scale", config_service.get_analysis_defaults(db)["carbon_scale"]))
+    auto_vis = bool(data.get("auto_vis", False))
     match_reference_vis = bool(data.get("match_reference_vis", True))
     cloud_mask_technique = resolve_cloud_mask_technique(data.get("cloud_mask_technique"))
 
@@ -949,6 +950,33 @@ def analyze_carbon(db: Session, data: dict) -> dict:
             load_only=True,
         )
 
+    # A COG reference-only calculation obtains its AOI statistics locally.
+    # Keep it ahead of `geojson_to_ee_geometry()` so this documented fallback
+    # remains operational when the Earth Engine client is unavailable or busy.
+    # The local reader derives its own bbox/geometry from the GeoJSON payload;
+    # none of the EE geometry values below are needed on this branch.
+    if (
+        reference_only
+        and _is_external_ref
+        and _external_ref_meta is not None
+        and _external_ref_meta.get("ingestion_method") == "cog_rasterio"
+    ):
+        return _analyze_local_reference_only(
+            data=data,
+            dataset_info=dataset_info,
+            dataset_meta=_external_ref_meta,
+            dataset_year=dataset_year,
+            roi_original=None,
+            roi_for_calculation=None,
+            roi_for_filtering=None,
+            calculation_mode="clipped_aoi" if clip_to_aoi else "full_tiles",
+            vis_min=vis_min,
+            vis_max=vis_max,
+            vis_palette=vis_palette,
+            db=db,
+            load_only=load_only,
+        )
+
     if "geojson" in data["aoi"]:
         roi_original = geojson_to_ee_geometry(data["aoi"]["geojson"])
         has_geojson = True
@@ -974,28 +1002,6 @@ def analyze_carbon(db: Session, data: dict) -> dict:
         and _external_ref_meta is not None
         and _external_ref_meta.get("ingestion_method") in {"cloud_geotiff_ee", "chloris_downloads_index"}
     )
-    if (
-        reference_only
-        and _is_external_ref
-        and _external_ref_meta is not None
-        and _external_ref_meta.get("ingestion_method") == "cog_rasterio"
-    ):
-        return _analyze_local_reference_only(
-            data=data,
-            dataset_info=dataset_info,
-            dataset_meta=_external_ref_meta,
-            dataset_year=dataset_year,
-            roi_original=roi_original,
-            roi_for_calculation=roi_for_calculation,
-            roi_for_filtering=roi_for_filtering,
-            calculation_mode=calculation_mode,
-            vis_min=vis_min,
-            vis_max=vis_max,
-            vis_palette=vis_palette,
-            db=db,
-            load_only=load_only,
-        )
-
     if not _is_arcgis_ref and not _is_external_ref:
         carbon_reference = load_carbon_reference_ee(reference_dataset, dataset_year=dataset_year, roi=roi_for_calculation)
     elif _is_cloud_geotiff_ee_ref:
@@ -1355,11 +1361,14 @@ def analyze_carbon(db: Session, data: dict) -> dict:
             logger.warning("Carbon statistics reduceRegion failed: %s", type(stats_err).__name__)
             carbon_stats = {}
 
-        _user_pinned_vis = "vis_min" in data or "vis_max" in data
+        # The frontend sends the configured range as a fallback, but that does
+        # not mean the user pinned it. In auto mode use this AOI's observed
+        # range so the full palette, including yellow at the maximum, is used.
+        _user_pinned_vis = ("vis_min" in data or "vis_max" in data) and not auto_vis
         _default_vis = vis_params
-        if not _user_pinned_vis:
-            _est_min = carbon_stats.get("carbon_estimated_p2")
-            _est_max = carbon_stats.get("carbon_estimated_p98")
+        if auto_vis and not _user_pinned_vis:
+            _est_min = carbon_stats.get("carbon_estimated_min")
+            _est_max = carbon_stats.get("carbon_estimated_max")
             if _est_min is not None and _est_max is not None and _est_max > _est_min:
                 _default_vis = {"min": _est_min, "max": _est_max, "palette": vis_palette}
 
@@ -1367,7 +1376,9 @@ def analyze_carbon(db: Session, data: dict) -> dict:
             _default_vis,
             ref_vis_params,
             dataset_info,
-            match_reference=match_reference_vis,
+            # Auto visualization is based on the estimated layer's own range;
+            # matching the reference range here would undo that stretch.
+            match_reference=match_reference_vis and not auto_vis,
         )
 
         mean_carbon = carbon_stats.get("carbon_estimated_mean")
