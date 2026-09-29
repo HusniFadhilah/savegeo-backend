@@ -987,7 +987,6 @@ def analyze_carbon(db: Session, data: dict) -> dict:
         ])
         has_geojson = False
 
-    roi_for_filtering = roi_original
     if clip_to_aoi and has_geojson:
         roi_for_calculation = roi_original
     else:
