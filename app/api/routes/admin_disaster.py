@@ -373,12 +373,17 @@ def admin_update_event(
         raise HTTPException(status_code=400, detail=f"severity harus salah satu dari {SEVERITIES}")
     if "bbox" in changes and changes["bbox"] is not None and len(changes["bbox"]) != 4:
         raise HTTPException(status_code=400, detail="bbox harus berisi [west, south, east, north]")
-    if changes.get("status") == "published" and event.disaster_type == "forest_fire":
+    status_changed = "status" in changes and changes["status"] != event.status
+    if status_changed and changes.get("status") == "published" and event.disaster_type == "forest_fire":
         minimum = (event.slug or changes.get("slug"), event.source, event.start_date or changes.get("start_date"), event.province or changes.get("province"))
         if not all(minimum):
             raise HTTPException(status_code=400, detail="Event karhutla memerlukan slug, periode, cakupan wilayah, dan sumber sebelum dipublikasikan")
 
-    if changes.get("status") == "published":
+    # Revalidate only when an event is actually being published. The edit form
+    # sends the current status along with ordinary metadata changes; rerunning
+    # the publication gate for an already-published event made harmless edits
+    # fail with HTTP 400 when older records lacked newer optional inputs.
+    if status_changed and changes.get("status") == "published":
         import copy
 
         candidate = copy.copy(event)
