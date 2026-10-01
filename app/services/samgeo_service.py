@@ -20,6 +20,7 @@ from rio_tiler.io import Reader
 
 from app.services.gee_common import AnalysisError
 from app.services import imagery_service as imagery
+from app.services.local_imagery_tile_service import resolve_local_raster_path
 
 ROOT = Path(__file__).resolve().parents[2]
 JOB_ROOT = ROOT / "var" / "samgeo"
@@ -49,7 +50,8 @@ def capabilities() -> dict:
         ready = result.returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         ready = False
-    return {"available": ready, "model": "SAM ViT-B", "max_size": 1024,
+    return {"available": ready, "model": "SAM ViT-B / LangSAM", "max_size": 1024,
+            "modes": ["automatic", "prompt_based"], "classes": ["building", "road", "water", "tree", "crop", "bare_land", "custom_prompt"],
             "message": "" if ready else "SamGeo belum tersedia pada server. Pasang extra samgeo atau atur SAMGEO_PYTHON."}
 
 
@@ -81,13 +83,29 @@ def get_job(job_id: str, owner: str | None = None) -> dict:
 
 
 def start_job(data: dict, owner: str = "disaster-viewer") -> dict:
-    if not data.get("item_url") or not data.get("aoi"):
-        raise AnalysisError("Scene COG dan AOI diperlukan untuk segmentasi", 400)
+    if not (data.get("item_url") or data.get("local_file_path")) or not data.get("aoi"):
+        raise AnalysisError("Scene COG/GeoTIFF dan AOI diperlukan untuk segmentasi", 400)
+    mode = str(data.get("mode") or "automatic")
+    if mode not in {"automatic", "prompt_based"}:
+        raise AnalysisError("mode segmentasi harus automatic atau prompt_based", 422)
+    prompt = str(data.get("prompt") or data.get("class_label") or "").strip()
+    if mode == "prompt_based" and not prompt:
+        raise AnalysisError("prompt atau class_label wajib untuk mode prompt_based", 422)
+    if data.get("confidence_threshold") is not None and not 0 <= float(data["confidence_threshold"]) <= 1:
+        raise AnalysisError("confidence_threshold harus berada di antara 0 dan 1", 422)
     provider_key = str(data.get("provider_key") or "")
-    if provider_key in imagery.COMMERCIAL_PROVIDER_KEYS:
-        imagery._readable_stac_asset_href(data["item_url"], data.get("asset_key") or "visual", provider_key)
+    if data.get("item_url"):
+        if provider_key in imagery.COMMERCIAL_PROVIDER_KEYS:
+            imagery._readable_stac_asset_href(data["item_url"], data.get("asset_key") or "visual", provider_key)
+        else:
+            imagery._validate_public_http_url(data["item_url"], "URL scene")
     else:
-        imagery._validate_public_http_url(data["item_url"], "URL scene")
+        if not data.get("_uploaded_local_file"):
+            raise AnalysisError("Gunakan upload GeoTIFF untuk segmentasi lokal; path server tidak boleh dikirim oleh klien", 422)
+        try:
+            data["local_file_path"] = str(resolve_local_raster_path(str(data["local_file_path"])))
+        except Exception as exc:
+            raise AnalysisError("GeoTIFF lokal tidak ditemukan atau berada di luar direktori raster yang diizinkan", 422) from exc
     imagery._aoi_payload_to_bbox(data["aoi"])
     imagery._parse_cog_bands(data.get("bands"))
     imagery._parse_cog_rescale(data.get("rescale"), 3)
@@ -108,7 +126,8 @@ def start_job(data: dict, owner: str = "disaster-viewer") -> dict:
     folder = JOB_ROOT / job_id
     try:
         folder.mkdir()
-        status = {"job_id": job_id, "status": "running", "message": "Membaca COG dan menyiapkan model SAM ViT-B", "owner": owner}
+        status = {"job_id": job_id, "status": "running", "message": "Membaca citra dan menyiapkan model segmentasi", "owner": owner,
+                  "mode": mode, "prompt": prompt or None, "validation_status": "review_required"}
         _write_json(folder / "status.json", status)
         threading.Thread(target=_run_job, args=(folder, data), daemon=True).start()
     except Exception:
@@ -128,10 +147,12 @@ def _run_job(folder: Path, data: dict) -> None:
         for filename in ("input.tif", "mask.tif"):
             (folder / filename).unlink(missing_ok=True)
         (JOB_ROOT / "running.lock").unlink(missing_ok=True)
+        if data.get("cleanup_local_file") and data.get("local_file_path"):
+            Path(data["local_file_path"]).unlink(missing_ok=True)
 
 
 def segment(data: dict, folder: Path) -> dict:
-    href = imagery._readable_stac_asset_href(
+    href = str(resolve_local_raster_path(data["local_file_path"])) if data.get("local_file_path") else imagery._readable_stac_asset_href(
         data["item_url"], data.get("asset_key") or "visual", data.get("provider_key") or None
     )
     bounds = imagery._aoi_payload_to_bbox(data["aoi"])
@@ -166,10 +187,10 @@ def segment(data: dict, folder: Path) -> dict:
                        count=3, dtype="uint8", crs=image.crs, transform=image.transform) as dataset:
         dataset.write(rgb)
     try:
-        completed = subprocess.run(
-            [_python(), str(Path(__file__).with_name("samgeo_worker.py")), str(input_path), str(output_path),
-             str(JOB_ROOT / "checkpoints")], capture_output=True, text=True, timeout=900,
-        )
+        command = [_python(), str(Path(__file__).with_name("samgeo_worker.py")), str(input_path), str(output_path),
+                   str(JOB_ROOT / "checkpoints"), str(data.get("mode") or "automatic"),
+                   str(data.get("prompt") or ""), str(data.get("confidence_threshold") or 0.5)]
+        completed = subprocess.run(command, capture_output=True, text=True, timeout=900)
     except subprocess.TimeoutExpired as exc:
         raise AnalysisError("SamGeo melewati batas 15 menit. Coba AOI yang lebih kecil.", 504) from exc
     if completed.returncode:
@@ -208,11 +229,17 @@ def segment(data: dict, folder: Path) -> dict:
     for geometry, label in shapes(labels, mask=selected_mask, transform=image.transform):
         features.append({"type": "Feature", "geometry": transform_geom(image.crs, "EPSG:4326", geometry),
                          "properties": {"segment_id": int(label), "model": "SAM ViT-B",
+                                        "class_label": data.get("class_label") or data.get("prompt"),
+                                        "confidence": float(data.get("confidence_threshold") or 0.5),
                                         "seeded_by": "MODIS FireMask" if seed_points else "automatic"}})
     return {"type": "FeatureCollection", "features": features,
-            "metadata": {"scene": data["item_url"], "asset": data.get("asset_key"), "width": rgb.shape[2],
+            "metadata": {"scene": data.get("item_url") or data.get("local_file_path"), "asset": data.get("asset_key"), "width": rgb.shape[2],
                          "height": rgb.shape[1], "model": "SAM ViT-B",
                          "automatic_object_count": int(automatic_labels.size),
                          "object_count": int(selected_labels.size),
                          "seed_count": len(seed_points),
-                         "selection_method": "MODIS-seeded SAM" if seed_points else "automatic SAM"}}
+                         "selection_method": "MODIS-seeded SAM" if seed_points else str(data.get("mode") or "automatic"),
+                         "prompt": data.get("prompt") or data.get("class_label"),
+                         "confidence_threshold": float(data.get("confidence_threshold") or 0.5),
+                         "validation_status": "review_required",
+                         "semantics": "building_footprint_candidate" if str(data.get("class_label") or data.get("prompt") or "").casefold() == "building" else "candidate_object"}}

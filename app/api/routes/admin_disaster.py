@@ -171,8 +171,12 @@ class RunStatusUpdateRequest(BaseModel):
 
 class ResultUpdateRequest(BaseModel):
     statistics: dict | None = None
+    features: dict | None = None
     legend: list | None = None
     confidence_summary: dict | None = None
+    coverage: dict | None = None
+    quality_flags: dict | None = None
+    review_reasons: list[str] | None = None
 
 
 class HotspotCreateRequest(BaseModel):
@@ -342,7 +346,7 @@ def admin_get_event(id: int, admin: AdminUser = Depends(require_permission("disa
     run_entries = []
     for run in runs:
         result = disaster_repo.get_result_for_run(db, run.id)
-        run_entries.append({"run": run.to_dict(), "result": result.to_dict() if result else None})
+        run_entries.append({"run": run.to_dict(), "result": result.to_dict(include_features=True) if result else None})
 
     return {
         "event": event.to_dict(),
@@ -673,7 +677,7 @@ def admin_list_analyses(id: int, admin: AdminUser = Depends(require_permission("
     entries = []
     for run in runs:
         result = disaster_repo.get_result_for_run(db, run.id)
-        entries.append({"run": run.to_dict(), "result": result.to_dict() if result else None})
+        entries.append({"run": run.to_dict(), "result": result.to_dict(include_features=True) if result else None})
     return {"runs": entries}
 
 
@@ -733,6 +737,8 @@ def admin_publish_result(
         raise HTTPException(status_code=404, detail="No result exists yet for this run")
     if run.status not in ("completed", "review_required", "published") or not (result.tile_url or result.features):
         raise HTTPException(status_code=400, detail="Hasil gagal/belum selesai tidak dapat dipublikasikan")
+    if run.status == "review_required" and not result.review_reasons and result.validation_status in {"review_required", "candidate_damage"}:
+        raise HTTPException(status_code=400, detail={"message": "Hasil kandidat wajib memiliki alasan review sebelum dipublikasikan", "reasons": ["review_reasons belum tersimpan"]})
     capability = disaster_capability_service.validate_persisted_result(
         db, disaster_repo.get_event(db, run.event_id), run, result, require_published=False
     )
@@ -744,7 +750,7 @@ def admin_publish_result(
         db, admin.id, "disaster_result.publish", "disaster_event", str(run.event_id),
         detail={"run_id": run_id, "result_id": result.id},
     )
-    return result.to_dict()
+    return result.to_dict(include_features=True)
 
 
 @router.post("/analyses/{run_id}/unpublish")
@@ -763,7 +769,7 @@ def admin_unpublish_result(
         db, admin.id, "disaster_result.unpublish", "disaster_event", str(run.event_id),
         detail={"run_id": run_id, "result_id": result.id},
     )
-    return result.to_dict()
+    return result.to_dict(include_features=True)
 
 
 @router.patch("/analyses/{run_id}/result")
@@ -787,7 +793,7 @@ def admin_update_result(
         db, admin.id, "disaster_result.update", "disaster_event", str(run.event_id),
         detail={"run_id": run_id, "result_id": result.id, "fields": list(changes.keys())},
     )
-    return result.to_dict()
+    return result.to_dict(include_features=True)
 
 
 @router.delete("/analyses/{run_id}/result")

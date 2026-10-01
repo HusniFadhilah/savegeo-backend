@@ -9,6 +9,7 @@ product as zero.
 from __future__ import annotations
 
 import datetime as dt
+import math
 
 from app.services import disaster_service, fire_multi_source_service, samgeo_service, wildfire_hotspot_service
 from app.services.gee_common import AnalysisError
@@ -28,13 +29,18 @@ def _date(value: object, fallback: dt.date | None) -> dt.date | None:
 
 
 def _period(event, parameters: dict, *, max_days: int | None = None) -> tuple[dt.date, dt.date]:
+    last_data_at = getattr(event, "last_data_at", None)
+    last_data_date = last_data_at.date() if isinstance(last_data_at, dt.datetime) else last_data_at
     start = _date(
         parameters.get("start_date"),
         getattr(event, "monitoring_from", None) or getattr(event, "start_date", None),
     )
     end = _date(
         parameters.get("end_date"),
-        getattr(event, "monitoring_to", None) or getattr(event, "end_date", None),
+        getattr(event, "monitoring_to", None)
+        or getattr(event, "end_date", None)
+        or last_data_date
+        or dt.datetime.now(dt.UTC).date(),
     )
     if start is None or end is None:
         raise AnalysisError("Periode produk karhutla belum diisi", 400)
@@ -49,6 +55,33 @@ def _period(event, parameters: dict, *, max_days: int | None = None) -> tuple[dt
 
 def _aoi_payload(aoi) -> dict:
     return {"geojson": aoi.geojson}
+
+
+def _primary_burn_product(products: list[dict]) -> dict:
+    """Choose one canonical product; independent products must never be added."""
+    priority = {"mcd64a1": 0, "vnp64a1": 1}
+    return min(products, key=lambda product: priority.get(product.get("id"), 99))
+
+
+def _burn_product_comparison(products: list[dict]) -> dict | None:
+    values = [
+        (product.get("id"), float(product["area_ha"]))
+        for product in products
+        if isinstance(product.get("area_ha"), (int, float))
+        and math.isfinite(float(product["area_ha"]))
+        and float(product["area_ha"]) >= 0
+    ]
+    if len(values) < 2:
+        return None
+    areas = [area for _, area in values]
+    spread_ha = max(areas) - min(areas)
+    relative_difference_pct = (spread_ha / max(areas) * 100) if max(areas) else 0.0
+    return {
+        "products": [{"id": source_id, "area_ha": area} for source_id, area in values],
+        "spread_ha": round(spread_ha, 2),
+        "relative_difference_pct": round(relative_difference_pct, 2),
+        "note": "Perbedaan antarproduk ditampilkan sebagai kontrol kualitas; nilainya tidak dijumlahkan.",
+    }
 
 
 def _hotspot_output(db, event, aoi, parameters: dict) -> dict:
@@ -73,10 +106,14 @@ def _hotspot_output(db, event, aoi, parameters: dict) -> dict:
 
 
 def _burned_area_output(event, aoi, parameters: dict) -> dict:
-    start, end = _period(event, parameters, max_days=30)
+    # Unlike the interactive observation adapter (which is intentionally
+    # bounded to 31 days), the monthly burned-area product can cover a full
+    # fire season. Keep one year as a safe server-side bound.
+    start, end = _period(event, parameters, max_days=365)
     requested = parameters.get("sources") or ["mcd64a1", "vnp64a1"]
     if not isinstance(requested, list) or not requested or any(source not in fire_multi_source_service.BURN_SOURCES for source in requested):
         raise AnalysisError("sources burned-area hanya boleh mcd64a1 atau vnp64a1", 400)
+    requested = list(dict.fromkeys(requested))
     loaded = fire_multi_source_service.load_sources(
         {"aoi": _aoi_payload(aoi), "start_date": start.isoformat(), "end_date": end.isoformat(), "sources": requested},
         ee_available=True,
@@ -85,21 +122,34 @@ def _burned_area_output(event, aoi, parameters: dict) -> dict:
     if not products:
         statuses = [{"id": source.get("id"), "status": source.get("status"), "message": source.get("message")} for source in loaded["sources"]]
         raise AnalysisError(f"Produk burned-area belum tersedia untuk periode/AOI ini: {statuses}", 404)
-    primary = products[0]
+    primary = _primary_burn_product(products)
+    comparison = _burn_product_comparison(products)
+    primary_area = primary.get("area_ha")
+    statistics = {
+        "period": {"start": start.isoformat(), "end": end.isoformat()},
+        "products": [
+            {key: value for key, value in product.items() if key not in {"tile_url"}}
+            for product in products
+        ],
+        "area_ha": primary_area,
+        "unit": "ha",
+        "product": primary.get("source"),
+        "primary_source_id": primary.get("id"),
+        "dataset_id": primary.get("dataset_id"),
+        "resolution_m": primary.get("resolution_m", 500),
+        "coverage": primary.get("coverage", "unknown"),
+        "area_method": primary.get("area_method"),
+        "qa_bits": primary.get("qa_bits"),
+        "cross_source_comparison": comparison,
+        "note": "Ini adalah luas piksel burned-area yang terpetakan, bukan luas hotspot dan bukan hasil penjumlahan MCD64A1+VNP64A1.",
+    }
     return {
         "tile_url": primary.get("tile_url"),
-        "statistics": {
-            "period": {"start": start.isoformat(), "end": end.isoformat()},
-            "products": [
-                {key: value for key, value in product.items() if key not in {"tile_url"}}
-                for product in products
-            ],
-            "area_ha": primary.get("area_ha"),
-            "product": primary.get("source"),
-        },
+        "statistics": statistics,
         "features": None,
         "legend": [],
         "confidence_summary": None,
+        "requires_review": any(product.get("coverage") == "partial" for product in products),
     }
 
 

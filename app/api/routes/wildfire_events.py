@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import math
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
@@ -13,7 +14,9 @@ from app.db.models.disaster_event import DisasterEvent
 from app.db.models.hotspot import Hotspot
 from app.db.models.wildfire_hotspot import WildfireHotspot
 from app.db.session import get_db
-from app.services import firms_service, wildfire_hotspot_service
+from app.registries import disaster_model_registry
+from app.repositories import disaster_repo
+from app.services import disaster_capability_service, firms_service, wildfire_hotspot_service
 
 router = APIRouter(prefix="/disasters/wildfires", tags=["wildfires"])
 MAX_MAP_FEATURES = 5000
@@ -49,6 +52,48 @@ def _event(db: Session, slug: str) -> DisasterEvent:
     if event is None:
         raise HTTPException(status_code=404, detail="Wildfire event not found")
     return event
+
+
+def _published_burned_area(db: Session, event: DisasterEvent) -> dict | None:
+    """Read only a compatible, published burned-area AnalysisResult.
+
+    Hotspot observations and a legacy event field are deliberately not used as
+    an area fallback. Missing or stale analysis remains ``None`` instead of
+    being presented as a precise-looking estimate.
+    """
+    model = disaster_model_registry.get_model("fire_burned_area_v1")
+    if not model or not model.get("enabled"):
+        return None
+    for run, result in disaster_repo.list_published_analyses(db, event.id):
+        if run.model_id != "fire_burned_area_v1":
+            continue
+        capability = disaster_capability_service.validate_persisted_result(db, event, run, result)
+        if not capability.allowed:
+            continue
+        statistics = result.statistics or {}
+        area_ha = statistics.get("area_ha")
+        if not isinstance(area_ha, (int, float)) or not math.isfinite(float(area_ha)) or area_ha < 0:
+            continue
+        published_at = getattr(result, "published_at", None) or getattr(run, "completed_at", None)
+        return {
+            "area_ha": round(float(area_ha), 2),
+            "source": statistics.get("product") or statistics.get("primary_source_id"),
+            "dataset_id": statistics.get("dataset_id"),
+            "period": statistics.get("period"),
+            "coverage": statistics.get("coverage"),
+            "unit": statistics.get("unit", "ha"),
+            "publication_date": published_at.isoformat() if published_at else None,
+            "resolution_m": statistics.get("resolution_m"),
+            "area_method": statistics.get("area_method"),
+        }
+    return None
+
+
+def _burned_area_summary_fields(area: dict | None) -> dict:
+    return {
+        "burned_area_ha": area.get("area_ha") if area else None,
+        "burned_area_source": area.get("source") if area else None,
+    }
 
 
 def _summary(hotspots: list[Hotspot], event: DisasterEvent) -> dict:
@@ -172,11 +217,11 @@ def _stored_wildfire_data(
 
     if has_persisted_rows:
         summary = wildfire_hotspot_service.summarize(features)
+        burned_area = _published_burned_area(db, event)
         summary.update(
             {
                 "affected_regions": len(event.province_codes or event.province or []),
-                "burned_area_ha": None,
-                "burned_area_source": None,
+                **_burned_area_summary_fields(burned_area),
                 "previous_period_change_pct": None,
             }
         )
@@ -199,9 +244,12 @@ def _stored_wildfire_data(
             select(Hotspot).where(Hotspot.event_id == event.id, Hotspot.is_published.is_(True))
         ).scalars()
     )
+    burned_area = _published_burned_area(db, event)
+    summary = _summary(hotspots, event)
+    summary.update(_burned_area_summary_fields(burned_area))
     return (
         [feature for hotspot in hotspots if (feature := _feature(hotspot))],
-        _summary(hotspots, event),
+        summary,
         {
             "source": "curated",
             "storage": "database",
@@ -265,6 +313,7 @@ def list_wildfire_events(
             )
             count = len(curated_rows.scalars().all())
         data = event.to_dict()
+        burned_area = _published_burned_area(db, event)
         data.update(
             {
                 "title": data["name"],
@@ -272,8 +321,7 @@ def list_wildfire_events(
                 "status": _public_status(event),
                 "hotspot_count": count,
                 "high_confidence_count": high_confidence_count,
-                "burned_area_ha": None,
-                "burned_area_source": None,
+                **_burned_area_summary_fields(burned_area),
             }
         )
         items.append(data)
@@ -292,9 +340,11 @@ def list_wildfire_events(
 def get_wildfire_event(slug: str, viewer=Depends(get_current_disaster_viewer), db: Session = Depends(get_db)):
     event = _event(db, slug)
     data = event.to_dict()
+    burned_area = _published_burned_area(db, event)
     data["status"] = _public_status(event)
     data["title"] = data["name"]
     data["provinces"] = data.get("province", [])
+    data.update(_burned_area_summary_fields(burned_area))
     return {"event": data}
 
 
@@ -372,7 +422,10 @@ def get_wildfire_regions(
 def get_wildfire_burned_area(
     slug: str, viewer=Depends(get_current_disaster_viewer), db: Session = Depends(get_db)
 ):
-    _event(db, slug)
+    event = _event(db, slug)
+    area = _published_burned_area(db, event)
+    if area:
+        return {"available": True, **area, "note": "Luas hasil produk burned-area terpublikasi; bukan jumlah hotspot."}
     return {
         "available": False,
         "area_ha": None,

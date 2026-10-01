@@ -24,6 +24,12 @@ from app.services.gee_common import (
     create_geometry_from_payload,
     get_tile_url,
 )
+from app.services.disaster_exposure_service import (
+    compute_building_segmentation_candidate,
+    compute_building_exposure,
+    compute_landcover_impact,
+    compute_road_exposure,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +117,86 @@ def _compute_flood_change(aoi, pre_date: dt.date, post_date: dt.date, scale: int
     }
 
 
+def _s1_composite_v2(aoi, center: dt.date):
+    """Build a deterministic VV/VH SAR composite on the same AOI grid."""
+    start, end = _window(center)
+    base = (
+        ee.ImageCollection("COPERNICUS/S1_GRD")
+        .filterBounds(aoi)
+        .filterDate(start, end)
+        .filter(ee.Filter.eq("instrumentMode", "IW"))
+    )
+    vv = base.filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VV")).select("VV")
+    vh = base.filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VH")).select("VH")
+    # Prefer VV, but use VH when VV is unavailable. Both branches use the same
+    # median + focal-median speckle treatment and are clipped to the AOI.
+    if vv.size().getInfo() > 0:
+        return vv.median().focal_median(30, "circle", "meters").clip(aoi), "VV"
+    if vh.size().getInfo() > 0:
+        return vh.median().focal_median(30, "circle", "meters").clip(aoi), "VH"
+    return None, None
+
+
+def _compute_flood_change_v2(aoi, pre_date: dt.date, post_date: dt.date, scale: int = 10) -> dict:
+    before, pre_band = _s1_composite_v2(aoi, pre_date)
+    after, post_band = _s1_composite_v2(aoi, post_date)
+    if before is None or after is None:
+        raise AnalysisError("Data Sentinel-1 SAR GRD IW tidak tersedia untuk pre/post", 404)
+    threshold = -16.0
+    pre_water = before.lt(threshold)
+    post_water = after.lt(threshold)
+    valid = before.mask().And(after.mask()).clip(aoi)
+    aoi_area = float(aoi.area(1).divide(10000).getInfo() or 0)
+    valid_area = _event_area_ha(valid, aoi, scale, best_effort=False)
+    if aoi_area <= 0 or valid_area <= 0:
+        raise AnalysisError("Tidak ada area SAR valid di dalam AOI", 404)
+    new_inundation = post_water.And(pre_water.Not()).updateMask(valid)
+    existing_water = post_water.And(pre_water).updateMask(valid)
+    receded = pre_water.And(post_water.Not()).updateMask(valid)
+    new_ha = _event_area_ha(new_inundation, aoi, scale, best_effort=False)
+    existing_ha = _event_area_ha(existing_water, aoi, scale, best_effort=False)
+    receded_ha = _event_area_ha(receded, aoi, scale, best_effort=False)
+    no_data_ha = max(0.0, aoi_area - valid_area)
+    class_img = (
+        ee.Image(0).where(existing_water, 1).where(new_inundation, 2).where(receded, 3)
+        .updateMask(valid).unmask(0).rename("flood_class")
+    )
+    tile = get_tile_url(
+        class_img,
+        {"min": 0, "max": 3, "palette": ["#00000000", "#1565c0", "#e53935", "#90a4ae"]},
+        "Flood Inundation Change v2",
+    )
+    if not tile or not tile.get("tile_url"):
+        raise AnalysisError("Tile Flood Inundation Change gagal dibuat", 502)
+    return {
+        "tile_url": tile["tile_url"],
+        "statistics": {
+            "aoi_area_ha": round(aoi_area, 2),
+            "valid_area_ha": valid_area,
+            "no_data_area_ha": no_data_ha,
+            "coverage_pct": round(valid_area / aoi_area * 100, 2),
+            "new_inundation_ha": new_ha,
+            "existing_water_ha": existing_ha,
+            "receded_water_ha": receded_ha,
+            "total_impacted_area_ha": round(new_ha + receded_ha, 2),
+            "changed_area_ha": round(new_ha + receded_ha, 2),
+            "threshold": threshold,
+            "pre_band": pre_band,
+            "post_band": post_band,
+        },
+        "coverage": {"valid_area_ha": valid_area, "no_data_area_ha": no_data_ha, "coverage_pct": round(valid_area / aoi_area * 100, 2)},
+        "quality_flags": {"aoi_clipped": True, "common_grid": True, "speckle_filter": "focal_median_30m", "best_effort": False},
+        "legend": [
+            {"label": "No data", "color": "#00000000", "value": "no_data"},
+            {"label": "Existing water", "color": "#1565c0", "value": "existing_water"},
+            {"label": "New inundation", "color": "#e53935", "value": "new_inundation"},
+            {"label": "Receded water", "color": "#90a4ae", "value": "receded_water"},
+        ],
+        "confidence_summary": None,
+        "features": None,
+    }
+
+
 # --- water_segmentation_v1 ---------------------------------------------------
 
 
@@ -159,6 +245,64 @@ def _compute_water_segmentation(aoi, pre_date: dt.date | None, post_date: dt.dat
         "legend": [{"label": "Water", "color": "#1565c0"}],
         "confidence_summary": None,
         "features": None,
+    }
+
+
+def _compute_water_segmentation_v2(
+    aoi, pre_date: dt.date | None, post_date: dt.date | None, scale: int = 10,
+    pre_image=None, post_image=None,
+) -> dict:
+    if post_date is None:
+        raise AnalysisError("Post-disaster imagery date wajib dipilih untuk Water Extent v2", 400)
+    ndwi_post = _s2_ndwi(aoi, post_date)
+    if ndwi_post is None:
+        raise AnalysisError("Data Sentinel-2 SR bebas awan tidak cukup untuk post", 404)
+    ndwi_pre = _s2_ndwi(aoi, pre_date) if pre_date else None
+    post_valid = ndwi_post.mask().clip(aoi)
+    valid = post_valid
+    if pre_date and ndwi_pre is None:
+        raise AnalysisError("Data Sentinel-2 SR bebas awan tidak cukup untuk pre", 404)
+    if ndwi_pre is not None:
+        valid = valid.And(ndwi_pre.mask()).clip(aoi)
+    aoi_area = float(aoi.area(1).divide(10000).getInfo() or 0)
+    valid_area = _event_area_ha(valid, aoi, scale, best_effort=False)
+    if aoi_area <= 0 or valid_area <= 0:
+        raise AnalysisError("Tidak ada area Sentinel-2 valid di dalam AOI", 404)
+    threshold = 0.0
+    post_water = ndwi_post.gt(threshold).updateMask(valid)
+    post_ha = _event_area_ha(post_water, aoi, scale, best_effort=False)
+    pre_ha = None
+    change_ha = None
+    change_tile = None
+    if ndwi_pre is not None:
+        pre_water = ndwi_pre.gt(threshold).updateMask(valid)
+        pre_ha = _event_area_ha(pre_water, aoi, scale, best_effort=False)
+        change_ha = round(post_ha - pre_ha, 2)
+        change_img = post_water.subtract(pre_water).selfMask().rename("water_change")
+        change_tile = get_tile_url(change_img, {"min": -1, "max": 1, "palette": ["#90a4ae", "#ffffff", "#1565c0"]}, "Water Change v2")
+    post_tile = get_tile_url(post_water, {"min": 0, "max": 1, "palette": ["#1565c0"]}, "Water Extent v2")
+    if not post_tile or not post_tile.get("tile_url"):
+        raise AnalysisError("Tile Water Extent v2 gagal dibuat", 502)
+    no_data_ha = max(0.0, aoi_area - valid_area)
+    return {
+        "tile_url": post_tile["tile_url"],
+        "statistics": {
+            "aoi_area_ha": round(aoi_area, 2),
+            "valid_area_ha": valid_area,
+            "no_data_area_ha": no_data_ha,
+            "coverage_pct": round(valid_area / aoi_area * 100, 2),
+            "pre_water_area_ha": pre_ha,
+            "post_water_area_ha": post_ha,
+            "water_area_change_ha": change_ha,
+            "threshold": threshold,
+            "cloud_coverage_pct": getattr(post_image, "cloud_coverage_pct", None),
+        },
+        "coverage": {"valid_area_ha": valid_area, "no_data_area_ha": no_data_ha, "coverage_pct": round(valid_area / aoi_area * 100, 2)},
+        "quality_flags": {"aoi_clipped": True, "common_grid": bool(ndwi_pre is not None), "cloud_mask": "SCL", "best_effort": False},
+        "legend": [{"label": "Water", "color": "#1565c0", "value": "water"}, {"label": "No data", "color": "#00000000", "value": "no_data"}],
+        "confidence_summary": None,
+        "features": None,
+        "comparison": {"pre_tile_url": None, "post_tile_url": post_tile["tile_url"], "change_tile_url": change_tile["tile_url"] if change_tile else None},
     }
 
 
@@ -344,16 +488,51 @@ def run_analysis(db: Session, run_id: int, force: bool = False) -> dict:
         aoi = create_geometry_from_payload({"geojson": aoi_row.geojson})
         pre_date = pre_img.acquisition_date if pre_img else None
         post_date = post_img.acquisition_date if post_img else None
+        parameters = getattr(run, "parameters", None) or {}
         if run.model_id in {"fire_hotspot_observation_v1", "fire_burned_area_v1", "fire_dnbr_v1"}:
             output = compute_persisted_product(
-                    db, event, aoi_row, pre_img, post_img, run.model_id, getattr(run, "parameters", None) or {}
+                    db, event, aoi_row, pre_img, post_img, run.model_id, parameters
             )
         elif run.model_id == "dynamic_world_v1":
             output = compute_segmentation(aoi, pre_date, post_date)
         elif run.model_id == "flood_change_v1":
             output = _compute_flood_change(aoi, pre_date, post_date)
+        elif run.model_id == "flood_change_v2":
+            output = _compute_flood_change_v2(aoi, pre_date, post_date)
         elif run.model_id == "water_segmentation_v1":
             output = _compute_water_segmentation(aoi, pre_date, post_date)
+        elif run.model_id == "water_segmentation_v2":
+            output = _compute_water_segmentation_v2(aoi, pre_date, post_date, pre_image=pre_img, post_image=post_img)
+        elif run.model_id == "flood_building_exposure_v1":
+            output = compute_building_exposure(aoi_row.geojson, parameters)
+        elif run.model_id == "flood_road_exposure_v1":
+            output = compute_road_exposure(aoi_row.geojson, parameters)
+        elif run.model_id == "earthquake_building_segmentation_v1":
+            output = compute_building_segmentation_candidate(aoi_row.geojson, parameters)
+        elif run.model_id == "earthquake_road_impact_v1":
+            output = compute_road_exposure(aoi_row.geojson, parameters)
+        elif run.model_id == "flood_landcover_impact_v1":
+            if parameters.get("landcover_features"):
+                output = compute_landcover_impact(aoi_row.geojson, parameters)
+            else:
+                comparison = compute_segmentation(aoi, pre_date, post_date)
+                dynamic = (comparison.get("statistics") or {}).get("comparison") or {}
+                output = {
+                    "tile_url": comparison.get("tile_url"),
+                    "legend": comparison.get("legend", []),
+                    "confidence_summary": comparison.get("confidence_summary"),
+                    "statistics": {
+                        "aoi_area_ha": dynamic.get("aoi_area_ha"),
+                        "valid_area_ha": dynamic.get("valid_area_ha"),
+                        "no_data_area_ha": dynamic.get("no_data_area_ha"),
+                        "coverage_pct": round(dynamic.get("valid_area_ha", 0) / dynamic.get("aoi_area_ha", 1) * 100, 2) if dynamic.get("aoi_area_ha") else None,
+                        "affected_area_ha": dynamic.get("changed_area_ha"),
+                        "classes": dynamic.get("classes", []),
+                        "transitions": dynamic.get("transitions", []),
+                    },
+                    "coverage": {"valid_area_ha": dynamic.get("valid_area_ha"), "no_data_area_ha": dynamic.get("no_data_area_ha"), "coverage_pct": round(dynamic.get("valid_area_ha", 0) / dynamic.get("aoi_area_ha", 1) * 100, 2) if dynamic.get("aoi_area_ha") else None},
+                    "quality_flags": {"aoi_clipped": True, "common_grid": True, "economic_damage_not_inferred": True},
+                }
         elif run.model_id == "forest_change_v1":
             output = _compute_forest_change(aoi, pre_date, post_date)
         else:
@@ -364,9 +543,20 @@ def run_analysis(db: Session, run_id: int, force: bool = False) -> dict:
         ):
             raise AnalysisError("Model tidak menghasilkan output dan statistik yang valid", 422)
         output["statistics"]["cache_key"] = key
+        output.setdefault("review_reasons", [])
+        comparison = output["statistics"].get("comparison")
+        if comparison:
+            output["review_reasons"].extend(comparison.get("review_reasons", []))
+        if run.model_id in {"flood_building_exposure_v1", "flood_road_exposure_v1", "flood_landcover_impact_v1", "earthquake_building_segmentation_v1", "earthquake_road_impact_v1"}:
+            output["review_reasons"].append("Hasil memerlukan review manual atas sumber dataset dan geometri")
         output["provenance"] = build_provenance(
-                event, aoi_row, pre_img, post_img, model, parameters=getattr(run, "parameters", None) or {}
+            event, aoi_row, pre_img, post_img, model, parameters=parameters,
         )
+        output["provenance"]["quality_flags"] = output.get("quality_flags", {})
+        if output.get("provenance_source"):
+            output["provenance"]["source_datasets"] = [output["provenance_source"]]
+            output["provenance"]["source_date"] = output["provenance_source"].get("source_date")
+            output["provenance"]["source_kind"] = output["provenance_source"].get("source_kind")
         output["validation_status"] = model_state(model)
         output["limitations"] = list(model.get("limitations", []))
         comparison = output["statistics"].get("comparison")
@@ -374,7 +564,7 @@ def run_analysis(db: Session, run_id: int, force: bool = False) -> dict:
             comparison.update(event_id=run.event_id, aoi_id=run.aoi_id,
                 pre_imagery_id=run.pre_imagery_id, post_imagery_id=run.post_imagery_id)
         result = disaster_repo.upsert_result(db, run.id, output)
-        run.status = "review_required" if requires_review or (comparison and comparison.get("review_reasons")) else "completed"
+        run.status = "review_required" if requires_review or output.get("review_reasons") or (comparison and comparison.get("review_reasons")) else "completed"
         run.completed_at = dt.datetime.now(dt.UTC)
         db.commit()
         return {"run": run.to_dict(), "result": result.to_dict(include_features=True)}

@@ -9,14 +9,18 @@ app.services.imagery_service for the full rationale.
 from __future__ import annotations
 
 import logging
+import json
+from pathlib import Path
+from uuid import uuid4
 
 import ee
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, UploadFile
 from fastapi.responses import RedirectResponse
 from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import require_ee
 from app.core.security import get_current_app_viewer
+from app.core.config import get_settings
 from app.db.models.user import User
 from app.services import copernicus_geosave_service
 from app.services import imagery_service
@@ -35,8 +39,33 @@ def imagery_samgeo_status():
 
 
 @router.post("/imagery/samgeo/jobs", status_code=202)
-def imagery_samgeo_start(data: dict, viewer=Depends(get_current_app_viewer)):
+async def imagery_samgeo_start(request: Request, viewer=Depends(get_current_app_viewer)):
     try:
+        if request.headers.get("content-type", "").startswith("multipart/"):
+            form = await request.form()
+            upload = form.get("file")
+            data = json.loads(str(form.get("payload") or "{}"))
+            if not isinstance(upload, UploadFile):
+                raise AnalysisError("File GeoTIFF wajib diisi untuk upload segmentasi", 422)
+            suffix = Path(upload.filename or "").suffix.casefold()
+            if suffix not in {".tif", ".tiff"}:
+                raise AnalysisError("Upload segmentasi hanya menerima GeoTIFF/COG", 422)
+            upload_root = get_settings().disaster_raster_path / "samgeo_uploads"
+            upload_root.mkdir(parents=True, exist_ok=True)
+            stored = upload_root / f"{uuid4().hex}{suffix}"
+            size = 0
+            with stored.open("wb") as target:
+                while chunk := await upload.read(1024 * 1024):
+                    size += len(chunk)
+                    if size > 2 * 1024 * 1024 * 1024:
+                        stored.unlink(missing_ok=True)
+                        raise AnalysisError("File GeoTIFF terlalu besar (maksimum 2 GB)", 413)
+                    target.write(chunk)
+            data["local_file_path"] = str(stored)
+            data["_uploaded_local_file"] = True
+            data["cleanup_local_file"] = True
+        else:
+            data = await request.json()
         owner = f"user:{viewer.id}" if isinstance(viewer, User) else f"admin:{viewer.id}"
         return samgeo_service.start_job(data, owner=owner)
     except AnalysisError as exc:

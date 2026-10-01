@@ -330,7 +330,15 @@ def _mask_s2_sr_clouds(image):
     return image.updateMask(mask).divide(10000)
 
 
-def _event_area_ha(mask_image, aoi, scale) -> float:
+def _event_area_ha(mask_image, aoi, scale, *, best_effort: bool = True) -> float:
+    """Sum the physical area of a masked raster in hectares.
+
+    Most legacy indicators keep ``bestEffort`` enabled so a very large AOI can
+    still return a quick overview. Products that report a measured area must
+    be able to opt out: Earth Engine otherwise silently increases the working
+    scale when the pixel budget is exceeded, making the reported area depend on
+    server-side approximation rather than the product resolution.
+    """
     settings = get_settings()
     area_img = ee.Image.pixelArea().divide(10000).updateMask(mask_image)
     stats = area_img.reduceRegion(
@@ -338,7 +346,7 @@ def _event_area_ha(mask_image, aoi, scale) -> float:
         geometry=aoi,
         scale=scale,
         maxPixels=int(settings.max_pixels),
-        bestEffort=True,
+        bestEffort=best_effort,
         tileScale=4,
     ).getInfo()
     return round(float(stats.get("area", 0) or 0), 2)

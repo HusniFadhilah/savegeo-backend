@@ -343,6 +343,36 @@ def _fetch_cdse(bbox: list, start: date, end: date) -> dict:
     }
 
 
+def _month_keys(start: date, end: date) -> list[str]:
+    """Return every calendar month touched by an inclusive date range."""
+    cursor = start.replace(day=1)
+    last_month = end.replace(day=1)
+    months = []
+    while cursor <= last_month:
+        months.append(cursor.strftime("%Y-%m"))
+        cursor = (cursor.replace(day=28) + timedelta(days=4)).replace(day=1)
+    return months
+
+
+def _calendar_year_segments(start: date, end: date) -> list[tuple[int, date, date]]:
+    """Split an inclusive period so ordinal BurnDate values use the right year."""
+    segments = []
+    cursor = start
+    while cursor <= end:
+        year_end = date(cursor.year, 12, 31)
+        segment_end = min(end, year_end)
+        segments.append((cursor.year, cursor, segment_end))
+        cursor = segment_end + timedelta(days=1)
+    return segments
+
+
+def _month_key_from_timestamp(value) -> str | None:
+    try:
+        return datetime.fromtimestamp(float(value) / 1000, UTC).strftime("%Y-%m")
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
 def _fetch_burn(source_id: str, aoi: dict, start: date, end: date, ee_available: bool) -> dict:
     if not ee_available:
         return {"id": source_id, "status": "unavailable", "message": "Earth Engine belum aktif."}
@@ -359,45 +389,70 @@ def _fetch_burn(source_id: str, aoi: dict, start: date, end: date, ee_available:
         }
     available_months = sorted(
         {
-            datetime.fromtimestamp(value / 1000, UTC).strftime("%Y-%m")
+            month
             for value in collection.aggregate_array("system:time_start").getInfo()
+            if (month := _month_key_from_timestamp(value)) is not None
         }
     )
-    requested_months = []
-    cursor = month_start
-    while cursor < next_month:
-        requested_months.append(cursor.strftime("%Y-%m"))
-        cursor = (cursor.replace(day=28) + timedelta(days=4)).replace(day=1)
+    requested_months = _month_keys(start, end)
     missing_months = sorted(set(requested_months) - set(available_months))
     geometry = create_geometry_from_payload(aoi)
 
-    def burn_mask(image):
-        burn_date = image.select(band)
-        year = ee.Date(image.get("system:time_start")).get("year")
-        jan1 = ee.Date.fromYMD(year, 1, 1)
-        first_day = ee.Date(start.isoformat()).difference(jan1, "day").add(1)
-        last_day = ee.Date(end.isoformat()).difference(jan1, "day").add(1)
-        qa = image.select("QA")
-        return (
-            burn_date.gte(first_day)
-            .And(burn_date.lte(last_day))
-            .And(burn_date.gt(0))
-            .And(qa.bitwiseAnd(2).neq(0))
+    # BurnDate is an ordinal day-of-year, not a day-of-month. Build one mask
+    # per calendar year so a period such as 2025-12-28..2026-01-05 cannot
+    # accidentally compare 2026 pixels with 2025 ordinals (or vice versa).
+    year_masks = []
+    for year, segment_start, segment_end in _calendar_year_segments(start, end):
+        segment_months = _month_keys(segment_start, segment_end)
+        if not any(month in available_months for month in segment_months):
+            continue
+        year_collection = collection.filterDate(
+            date(year, 1, 1).isoformat(), date(year + 1, 1, 1).isoformat()
         )
+        first_day = segment_start.timetuple().tm_yday
+        last_day = segment_end.timetuple().tm_yday
 
-    mask = collection.map(burn_mask).max().selfMask().rename("area").clip(geometry)
+        def burn_mask(image, first_day=first_day, last_day=last_day):
+            burn_date = image.select(band)
+            qa = image.select("QA")
+            # QA bit 0 = land, bit 1 = valid data. Bits 2/3 are quality
+            # flags (shortened/relabelled mapping), not reasons to discard an
+            # otherwise valid burned pixel.
+            qa_valid = qa.bitwiseAnd(1).eq(1).And(qa.bitwiseAnd(2).eq(2))
+            return (
+                burn_date.gte(first_day)
+                .And(burn_date.lte(last_day))
+                .And(burn_date.gt(0))
+                .And(qa_valid)
+            )
+
+        year_masks.append(year_collection.map(burn_mask).max())
+
+    if not year_masks:
+        return {
+            "id": source_id,
+            "status": "no_data",
+            "message": "Produk bulanan periode ini belum memiliki citra tahun yang sesuai.",
+        }
+
+    mask = ee.ImageCollection.fromImages(year_masks).max().gt(0).selfMask().rename("area").clip(geometry)
     tile = get_tile_url(mask, {"min": 1, "max": 1, "palette": [color]}, label)
+    coverage = "complete" if not missing_months else "partial"
     return {
         "id": source_id,
         "status": "ok",
         "kind": "burned_area",
         "tile_url": tile["tile_url"] if tile else None,
-        "area_ha": _event_area_ha(mask, geometry, 500),
+        "area_ha": _event_area_ha(mask, geometry, 500, best_effort=False),
         "resolution_m": 500,
         "source": label,
+        "dataset_id": collection_id,
         "available_months": available_months,
         "missing_months": missing_months,
-        "message": "Validasi area bulanan 500m; tidak dijumlahkan dengan luas dNBR atau antarproduk."
+        "coverage": coverage,
+        "area_method": "Jumlah ee.Image.pixelArea() pada piksel burned QA-valid, skala 500m, tanpa bestEffort.",
+        "qa_bits": {"land": 0, "valid_data": 1, "shortened_mapping": 2, "relabelled": 3},
+        "message": "Luas dihitung dari piksel burned QA-valid pada resolusi 500m; produk berbeda tidak dijumlahkan."
         + (f" Data sebagian: bulan {', '.join(missing_months)} belum terbit." if missing_months else ""),
     }
 

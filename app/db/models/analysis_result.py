@@ -24,6 +24,9 @@ class AnalysisResult(Base):
     features: Mapped[dict | None] = mapped_column(JSONB)  # GeoJSON FeatureCollection, nullable
     legend: Mapped[list | None] = mapped_column(JSONB)  # [{"label": .., "color": ..}, ...]
     confidence_summary: Mapped[dict | None] = mapped_column(JSONB)  # {"mean": .., "high_pct": .., ...}, nullable
+    coverage: Mapped[dict | None] = mapped_column(JSONB)  # valid_area_ha/no_data_area_ha/coverage_pct
+    quality_flags: Mapped[dict | None] = mapped_column(JSONB)
+    review_reasons: Mapped[list | None] = mapped_column(JSONB)
     provenance: Mapped[dict | None] = mapped_column(JSONB)
     validation_status: Mapped[str | None] = mapped_column(String(30))
     limitations: Mapped[list | None] = mapped_column(JSONB)
@@ -43,6 +46,9 @@ class AnalysisResult(Base):
             "comparison": (self.statistics or {}).get("comparison"),
             "legend": self.legend or [],
             "confidence_summary": self.confidence_summary,
+            "coverage": self.coverage,
+            "quality_flags": self.quality_flags or {},
+            "review_reasons": self.review_reasons or [],
             "provenance": self.provenance,
             "validation_status": self.validation_status,
             "limitations": self.limitations or [],
@@ -50,6 +56,7 @@ class AnalysisResult(Base):
             "is_published": self.is_published,
             "published_at": self.published_at.isoformat() if self.published_at else None,
             "publication_version": self.publication_version,
+            "publication_status": "published" if self.is_published else "unpublished",
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
         if include_features:

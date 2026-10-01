@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import UTC, date, datetime
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -36,6 +36,14 @@ def test_hotspot_product_persists_feature_collection_without_area():
     assert output["features"]["features"] == features
 
 
+def test_burned_area_period_uses_latest_observation_for_open_event():
+    event = _event()
+    event.monitoring_to = None
+    event.end_date = None
+    event.last_data_at = datetime(2026, 1, 12, tzinfo=UTC)
+    assert wildfire._period(event, {}) == (date(2026, 1, 1), date(2026, 1, 12))
+
+
 def test_burned_area_product_keeps_source_products_separate():
     loaded = {
         "sources": [
@@ -50,6 +58,21 @@ def test_burned_area_product_keeps_source_products_separate():
     assert output["tile_url"] == "tile"
     assert output["statistics"]["area_ha"] == 12.5
     load.assert_called_once()
+
+
+def test_burned_area_primary_product_is_stable_and_comparison_is_not_a_sum():
+    products = [
+        {"id": "vnp64a1", "area_ha": 140.0},
+        {"id": "mcd64a1", "area_ha": 100.0},
+    ]
+    assert wildfire._primary_burn_product(products)["id"] == "mcd64a1"
+    comparison = wildfire._burn_product_comparison(products)
+    assert comparison["spread_ha"] == 40.0
+    assert comparison["relative_difference_pct"] == 28.57
+    assert comparison["products"] == [
+        {"id": "vnp64a1", "area_ha": 140.0},
+        {"id": "mcd64a1", "area_ha": 100.0},
+    ]
 
 
 def test_dnbr_and_sam_outputs_are_reviewable_products():

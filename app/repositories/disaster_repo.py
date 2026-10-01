@@ -347,6 +347,9 @@ def upsert_result(db: Session, run_id: int, data: dict) -> AnalysisResult:
     result.features = data.get("features")
     result.legend = data.get("legend")
     result.confidence_summary = data.get("confidence_summary")
+    result.coverage = data.get("coverage")
+    result.quality_flags = data.get("quality_flags")
+    result.review_reasons = data.get("review_reasons") or []
     result.provenance = data.get("provenance")
     result.validation_status = data.get("validation_status")
     result.limitations = data.get("limitations")

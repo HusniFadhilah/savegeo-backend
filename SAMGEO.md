@@ -1,10 +1,12 @@
 # SamGeo scene segmentation
 
-The imagery viewer runs automatic SAM ViT-B segmentation on the selected STAC
-COG asset, cropped and masked to the AOI. Results are geographic GeoJSON polygons,
-not semantic land-cover classes. Band indices and rescale values follow the COG
-render controls. Without explicit rescale, non-byte data uses a 2-98 percentile
-stretch. Processing is limited to 1024 pixels on the longest side.
+The imagery viewer runs automatic or text-prompt SamGeo segmentation on the
+selected STAC COG or uploaded GeoTIFF, cropped and masked to the AOI. Results
+are geographic GeoJSON polygons and are always marked `review_required`; they
+are candidate footprints/objects, not confirmed damage. Band indices and
+rescale values follow the COG render controls. Without explicit rescale,
+non-byte data uses a 2-98 percentile stretch. Processing is limited to 1024
+pixels on the longest side.
 
 Install in a dedicated Python environment to keep the existing inference models'
 NumPy/scikit-learn versions unchanged:
@@ -31,8 +33,13 @@ job finishes. Administrators can remove old completed job directories as needed.
 Endpoints:
 
 - `GET /api/imagery/samgeo/status`: dependency availability.
-- `POST /api/imagery/samgeo/jobs`: `{item_url, asset_key, aoi, bands?, rescale?}`.
+- `POST /api/imagery/samgeo/jobs`: JSON `{item_url, asset_key, aoi, mode?, class_label?, prompt?, confidence_threshold?, bands?, rescale?}` or multipart `{file: GeoTIFF, payload: JSON}`.
 - `GET /api/imagery/samgeo/jobs/{uuid}`: running, failed, or complete with GeoJSON.
+
+For persistence, an administrator can create an earthquake building
+segmentation AnalysisRun and pass the completed GeoJSON in `parameters.features`.
+The result remains a candidate until manual review and the normal publication
+gate succeeds.
 
 Verification from the backend directory:
 

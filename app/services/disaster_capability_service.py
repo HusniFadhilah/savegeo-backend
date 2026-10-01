@@ -8,6 +8,7 @@ catalog audits and unit tests.
 """
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import json
 from collections.abc import Iterable
@@ -152,6 +153,8 @@ def build_input_fingerprint(
     payload = {
         "event_id": getattr(event, "id", None),
         "aoi_id": getattr(aoi, "id", None),
+        "pre_imagery_id": getattr(pre_imagery, "id", None),
+        "post_imagery_id": getattr(post_imagery, "id", None),
         "aoi_geojson": getattr(aoi, "geojson", None),
         "model_id": model.get("model_id"),
         "model_version": model.get("version"),
@@ -185,9 +188,17 @@ def build_provenance(
     validation_status: str | None = None,
 ) -> dict[str, Any]:
     images = [image for image in (pre_imagery, post_imagery) if image is not None]
+    params = parameters or {}
+    resolutions = [getattr(image, "resolution_m", None) for image in images if getattr(image, "resolution_m", None) is not None]
+    acquisition_dates = {
+        getattr(image, "phase", "image"): getattr(getattr(image, "acquisition_date", None), "isoformat", lambda: None)()
+        for image in images
+    }
     return {
         "event_id": getattr(event, "id", None),
         "aoi_id": getattr(aoi, "id", None),
+        "pre_imagery_id": getattr(pre_imagery, "id", None),
+        "post_imagery_id": getattr(post_imagery, "id", None),
         "aoi_fingerprint": build_input_fingerprint(event, aoi, None, None, model, parameters),
         "imagery": [
             {
@@ -210,8 +221,15 @@ def build_provenance(
         "sensor": sorted({_sensor_text(image) for image in images}),
         "model_id": model.get("model_id"),
         "model_version": model.get("version"),
-        "parameters": parameters or {},
-        "input_fingerprint": build_input_fingerprint(event, aoi, pre_imagery, post_imagery, model, parameters),
+        "parameters": params,
+        "threshold": params.get("threshold", model.get("data_threshold")),
+        "resolution": params.get("resolution_m") or model.get("resolution_m") or (max(resolutions) if resolutions else None),
+        "crs": params.get("crs") or "sensor-native-grid",
+        "source_datasets": list(model.get("data_dependencies", [])),
+        "acquisition_dates": acquisition_dates,
+        "generated_at": dt.datetime.now(dt.UTC).isoformat(),
+        "quality_flags": params.get("quality_flags", {}),
+        "input_fingerprint": build_input_fingerprint(event, aoi, pre_imagery, post_imagery, model, params),
         "validation_status": validation_status or model_state(model),
         "limitations": list(model.get("limitations", [])),
     }
@@ -235,7 +253,11 @@ def validate_persisted_result(
     if not has_statistics or not has_output:
         return CapabilityCheck(False, "not_available", ("Output atau statistik hasil belum lengkap",))
     provenance = getattr(result, "provenance", None) or {}
-    required = {"event_id", "aoi_id", "imagery", "model_id", "model_version", "input_fingerprint"}
+    required = {
+        "event_id", "aoi_id", "pre_imagery_id", "post_imagery_id", "imagery", "model_id", "model_version", "input_fingerprint",
+        "source_datasets", "acquisition_dates", "parameters", "threshold", "resolution", "crs",
+        "generated_at", "quality_flags", "limitations",
+    }
     missing = sorted(required.difference(provenance))
     if missing:
         return CapabilityCheck(False, "stale", (f"Provenance tidak lengkap: {', '.join(missing)}",))
@@ -257,6 +279,11 @@ def validate_persisted_result(
     )
     if provenance.get("input_fingerprint") != current_fingerprint:
         return CapabilityCheck(False, "stale", ("Input imagery atau AOI berubah; hasil harus dihitung ulang",))
+    coverage = getattr(result, "coverage", None) or (getattr(result, "statistics", None) or {}).get("coverage")
+    if coverage is not None:
+        coverage_pct = coverage.get("coverage_pct")
+        if coverage_pct is not None and (not isinstance(coverage_pct, (int, float)) or coverage_pct <= 0):
+            return CapabilityCheck(False, "review_required", ("Coverage valid tidak tersedia; hasil tidak dapat dipublikasikan",))
     return CapabilityCheck(True, inputs.status, ())
 
 
