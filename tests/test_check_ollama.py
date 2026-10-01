@@ -40,3 +40,20 @@ def test_check_ollama_rejects_missing_model(monkeypatch, capsys):
 
     assert check_ollama.check_ollama() == 1
     assert "not installed" in capsys.readouterr().err
+
+
+def test_check_ollama_can_probe_openai_compatible_inference(monkeypatch, capsys):
+    monkeypatch.setenv("AI_PROVIDER", "ollama")
+    monkeypatch.setenv("AI_MODEL", "qwen3:8b")
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434/v1")
+    monkeypatch.setenv("OLLAMA_PREFLIGHT_INFERENCE", "true")
+    responses = iter(
+        [
+            _Response(json.dumps({"models": [{"name": "qwen3:8b"}]}).encode()),
+            _Response(json.dumps({"choices": [{"message": {"content": "OK"}}]}).encode()),
+        ]
+    )
+    monkeypatch.setattr(check_ollama, "urlopen", lambda request, timeout: next(responses))
+
+    assert check_ollama.check_ollama() == 0
+    assert "inference probe passed" in capsys.readouterr().out

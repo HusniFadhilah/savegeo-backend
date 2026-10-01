@@ -172,6 +172,7 @@ jobs:
             # Check Ollama from inside the same API container that serves the
             # chatbot. The script is a no-op when another AI provider is set.
             docker compose -f docker-compose.prod.yml exec -T api \
+              env OLLAMA_PREFLIGHT_INFERENCE=true OLLAMA_PREFLIGHT_TIMEOUT_SECONDS=120 \
               python -m scripts.check_ollama
             # Runtime model files are deliberately excluded from rsync. Refresh
             # the database registry from their sidecar metadata after every

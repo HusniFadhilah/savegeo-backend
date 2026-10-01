@@ -1,8 +1,9 @@
 """Verify that the configured local Ollama model is reachable from the API runtime.
 
-This is intentionally a small deployment preflight. It does not send a prompt
-or load a model; it only reads Ollama's local ``/api/tags`` catalogue and
-checks that the configured model is installed.
+This is intentionally a small deployment preflight. It always reads Ollama's
+local ``/api/tags`` catalogue and checks that the configured model is installed.
+Deploy workflows additionally enable a short OpenAI-compatible inference probe
+so a deployment verifies that the model can answer, not only that it exists.
 """
 from __future__ import annotations
 
@@ -26,6 +27,14 @@ def _tags_url(base_url: str) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, f"{path}/api/tags", "", ""))
 
 
+def _chat_url(base_url: str) -> str:
+    parsed = urlsplit(base_url.strip())
+    path = parsed.path.rstrip("/")
+    if not path.endswith("/v1"):
+        path = f"{path}/v1" if path else "/v1"
+    return urlunsplit((parsed.scheme, parsed.netloc, f"{path}/chat/completions", "", ""))
+
+
 def check_ollama() -> int:
     if load_dotenv:
         load_dotenv()
@@ -46,10 +55,10 @@ def check_ollama() -> int:
 
     url = _tags_url(base_url)
     try:
+        import json
+
         request = Request(url, headers={"Accept": "application/json"})
         with urlopen(request, timeout=10) as response:  # noqa: S310 - URL is deployment configuration
-            import json
-
             payload = json.load(response)
     except (HTTPError, URLError, TimeoutError, OSError, ValueError) as exc:
         print(f"Ollama is not reachable at {base_url}: {exc}", file=sys.stderr)
@@ -66,7 +75,42 @@ def check_ollama() -> int:
         print(f"Ollama is reachable, but model '{model}' is not installed. Available: {available}", file=sys.stderr)
         return 1
 
-    print(f"Ollama preflight passed: {model} reachable via {base_url}.")
+    probe_enabled = os.getenv("OLLAMA_PREFLIGHT_INFERENCE", "").strip().lower() in {"1", "true", "yes", "on"}
+    if probe_enabled:
+        try:
+            timeout_raw = os.getenv("OLLAMA_PREFLIGHT_TIMEOUT_SECONDS", "120").strip()
+            timeout = max(5, float(timeout_raw))
+        except ValueError:
+            timeout = 120
+        try:
+            probe_payload = json.dumps(
+                {
+                    "model": model,
+                    "messages": [{"role": "user", "content": "Reply with exactly OK."}],
+                    "stream": False,
+                    "max_tokens": 8,
+                    "temperature": 0,
+                }
+            ).encode("utf-8")
+            request = Request(
+                _chat_url(base_url),
+                data=probe_payload,
+                headers={"Accept": "application/json", "Content-Type": "application/json"},
+                method="POST",
+            )
+            with urlopen(request, timeout=timeout) as response:  # noqa: S310 - URL is deployment configuration
+                completion = json.load(response)
+            choices = completion.get("choices") if isinstance(completion, dict) else None
+            content = ((choices or [{}])[0].get("message") or {}).get("content") if choices else None
+            if not isinstance(content, str) or not content.strip():
+                print(f"Ollama model '{model}' returned no assistant content.", file=sys.stderr)
+                return 1
+        except (HTTPError, URLError, TimeoutError, OSError, ValueError) as exc:
+            print(f"Ollama model '{model}' is installed but inference failed: {exc}", file=sys.stderr)
+            return 1
+        print(f"Ollama inference probe passed: {model} returned assistant content.")
+    else:
+        print(f"Ollama preflight passed: {model} reachable via {base_url}.")
     return 0
 
 
