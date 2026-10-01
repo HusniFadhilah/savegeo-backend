@@ -960,22 +960,35 @@ def list_scenes(data: dict, request=None) -> dict:
     )
     if cloud_prop and max_cloud_cover is not None:
         col = col.filter(ee.Filter.lte(cloud_prop, float(max_cloud_cover)))
-    col = col.limit(_MAX_SCENES)
+    # Keep the response bounded, but allow callers that need a smaller page to
+    # avoid asking Earth Engine to materialize the full safety ceiling.  The
+    # frontend still paginates the returned scenes; ``truncated`` tells it
+    # when the server-side ceiling was reached.
+    requested_limit = data.get("scene_limit", _MAX_SCENES)
+    try:
+        scene_limit = max(1, min(_MAX_SCENES, int(requested_limit)))
+    except (TypeError, ValueError):
+        scene_limit = _MAX_SCENES
+    col = col.limit(scene_limit)
 
-    total_size = col.size().getInfo()
+    # Evaluate the count and scene arrays in one Earth Engine request.  The
+    # previous two getInfo() calls made broad AOI/date searches needlessly
+    # vulnerable to upstream timeouts and proxy 502s.
+    to_aggregate = {
+        "count": col.size(),
+        "ids": col.aggregate_array("system:index"),
+        "times": col.aggregate_array("system:time_start"),
+    }
+    if cloud_prop:
+        to_aggregate["clouds"] = col.aggregate_array(cloud_prop)
+    bundle = ee.Dictionary(to_aggregate).getInfo() or {}
+    total_size = int(bundle.get("count") or 0)
     if total_size == 0:
         return {"scenes": [], "count": 0, "satellite": meta, "truncated": False}
 
-    # Single round-trip: bundle all per-scene arrays into one server-side
-    # dict so this is one getInfo() call, not one per scene.
-    to_aggregate = {"ids": col.aggregate_array("system:index"), "times": col.aggregate_array("system:time_start")}
-    if cloud_prop:
-        to_aggregate["clouds"] = col.aggregate_array(cloud_prop)
-    bundle = ee.Dictionary(to_aggregate).getInfo()
-
-    ids = bundle["ids"]
-    times = bundle["times"]
-    clouds = bundle.get("clouds") if cloud_prop else [None] * len(ids)
+    ids = bundle.get("ids") or []
+    times = bundle.get("times") or []
+    clouds = (bundle.get("clouds") or [None] * len(ids)) if cloud_prop else [None] * len(ids)
 
     scenes = []
     for scene_id, ts, cloud in zip(ids, times, clouds):
@@ -995,7 +1008,7 @@ def list_scenes(data: dict, request=None) -> dict:
         "scenes": scenes,
         "count": len(scenes),
         "satellite": meta,
-        "truncated": total_size >= _MAX_SCENES,
+        "truncated": total_size >= scene_limit,
     }
 
 

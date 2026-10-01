@@ -143,20 +143,24 @@ def _requires_ee(data: dict) -> bool:
 @router.post("/imagery/scenes", dependencies=[Depends(get_current_app_viewer)])
 async def imagery_scenes(request: Request):
     data = await request.json()
+    request_id = getattr(request.state, "request_id", "unknown")
     try:
         if _requires_ee(data):
             require_ee(request)
         return await run_in_threadpool(imagery_service.list_scenes, data, request)
     except CopernicusAnalysisError as e:
+        logger.warning("Imagery scenes provider error request_id=%s status=%s provider=%s", request_id, e.status_code, data.get("satellite"))
         raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
     except AnalysisError as e:
+        logger.warning("Imagery scenes analysis error request_id=%s status=%s provider=%s", request_id, e.status_code, data.get("satellite"))
         raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
     except ee.EEException as e:
+        logger.warning("Imagery scenes Earth Engine error request_id=%s provider=%s: %s", request_id, data.get("satellite"), e)
         raise HTTPException(status_code=400, detail="Earth Engine rejected the imagery parameters") from e
     except HTTPException:
         raise
     except Exception as e:  # noqa: BLE001
-        logger.error("Imagery scenes error (%s)", type(e).__name__)
+        logger.exception("Imagery scenes error request_id=%s provider=%s", request_id, data.get("satellite"))
         raise HTTPException(status_code=500, detail="Imagery analysis failed") from e
 
 
