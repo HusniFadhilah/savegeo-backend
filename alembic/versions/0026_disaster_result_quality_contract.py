@@ -6,7 +6,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0026_disaster_result_quality_contract"
+# Alembic's default version_num column is VARCHAR(32); keep revision IDs within it.
+revision: str = "0026_disaster_quality"
 down_revision: str | None = "0025_repair_public_visibility"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
