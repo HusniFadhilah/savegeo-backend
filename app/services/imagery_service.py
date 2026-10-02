@@ -888,6 +888,9 @@ def render_big_ctsrt_tile(z: int, x: int, y: int, service_name: str | None = Non
 
 
 def list_scenes(data: dict, request=None) -> dict:
+    if data.get("satellite") == "himawari":
+        raise AnalysisError("Himawari menyediakan frame waktu JMA, bukan katalog scene AOI", 400)
+
     if data.get("satellite") == _BIG_CTSRT_PROVIDER_KEY:
         return _list_big_ctsrt_scenes(data)
 
@@ -1162,6 +1165,9 @@ def _apply_super_resolution(img: ee.Image, meta: dict, mode: str | None) -> tupl
 
 
 def get_scene_tile(data: dict, request=None) -> dict:
+    if data.get("satellite") == "himawari":
+        raise AnalysisError("Himawari dimuat sebagai layer tile JMA langsung dari pemilih waktu", 400)
+
     if data.get("satellite") == _BIG_CTSRT_PROVIDER_KEY:
         if not data.get("scene_id"):
             raise AnalysisError("scene_id is required", 400)

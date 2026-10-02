@@ -38,6 +38,22 @@ from typing import Any
 _GAS_PALETTE = ["black", "blue", "purple", "cyan", "green", "yellow", "red"]
 
 IMAGERY_PROVIDERS: dict[str, dict[str, Any]] = {
+    "himawari": {
+        "key": "himawari",
+        "name": "Himawari-9 - Cuaca Asia-Pasifik",
+        "provider": "Japan Meteorological Agency (JMA)",
+        "group": "Cuaca Geostasioner",
+        "gee_collection": "",
+        "source_kind": "himawari",
+        "visualization": "rgb",
+        "color_mode": "natural",
+        "resolution_m": 2000,
+        "revisit_days": 0.007,
+        "start_year": 2015,
+        "cloud_property": None,
+        "cloud_mask_techniques": None,
+        "description": "Citra cuaca full-disk Asia-Pasifik berbasis frame JMA. Pilih waktu UTC untuk melihat awan dan sistem cuaca; resolusi kilometer dan bukan scene detail untuk analisis tutupan lahan.",
+    },
     "big_ctsrt": {
         "key": "big_ctsrt",
         "name": "BIG / CTSRT - Citra Satelit Resolusi Tinggi",
@@ -210,7 +226,7 @@ IMAGERY_PROVIDERS: dict[str, dict[str, Any]] = {
         "key": "landsat8",
         "name": "Landsat 8 (OLI/TIRS)",
         "provider": "USGS / NASA",
-        "group": "Landsat",
+        "group": "USGS / Landsat",
         "gee_collection": "LANDSAT/LC08/C02/T1_L2",
         "visualization": "rgb",
         "color_mode": "natural",
@@ -226,7 +242,7 @@ IMAGERY_PROVIDERS: dict[str, dict[str, Any]] = {
         "key": "landsat9",
         "name": "Landsat 9 (OLI-2/TIRS-2)",
         "provider": "USGS / NASA",
-        "group": "Landsat",
+        "group": "USGS / Landsat",
         "gee_collection": "LANDSAT/LC09/C02/T1_L2",
         "visualization": "rgb",
         "color_mode": "natural",
@@ -237,6 +253,54 @@ IMAGERY_PROVIDERS: dict[str, dict[str, Any]] = {
         "cloud_mask_techniques": None,
         "resolution_m": 30, "revisit_days": 16, "start_year": 2021,
         "description": "Optik 30m - penerus Landsat 8, sejak 2021.",
+    },
+    "landsat4": {
+        "key": "landsat4",
+        "name": "Landsat 4 TM - Surface Reflectance",
+        "provider": "USGS / NASA",
+        "group": "USGS / Landsat",
+        "gee_collection": "LANDSAT/LT04/C02/T1_L2",
+        "visualization": "rgb",
+        "color_mode": "natural",
+        "band_role_map": {"red": "SR_B3", "green": "SR_B2", "blue": "SR_B1"},
+        "reflectance_scale": 0.0000275, "reflectance_offset": -0.2,
+        "vis_min": 0, "vis_max": 0.3,
+        "cloud_property": "CLOUD_COVER",
+        "cloud_mask_techniques": None,
+        "resolution_m": 30, "revisit_days": 16, "start_year": 1982,
+        "description": "USGS Landsat 4 TM Collection 2 Level 2: arsip surface reflectance 30m dari Agustus 1982 hingga Juni 1993.",
+    },
+    "landsat5": {
+        "key": "landsat5",
+        "name": "Landsat 5 TM - Surface Reflectance",
+        "provider": "USGS / NASA",
+        "group": "USGS / Landsat",
+        "gee_collection": "LANDSAT/LT05/C02/T1_L2",
+        "visualization": "rgb",
+        "color_mode": "natural",
+        "band_role_map": {"red": "SR_B3", "green": "SR_B2", "blue": "SR_B1"},
+        "reflectance_scale": 0.0000275, "reflectance_offset": -0.2,
+        "vis_min": 0, "vis_max": 0.3,
+        "cloud_property": "CLOUD_COVER",
+        "cloud_mask_techniques": None,
+        "resolution_m": 30, "revisit_days": 16, "start_year": 1984,
+        "description": "USGS Landsat 5 TM Collection 2 Level 2: arsip surface reflectance 30m dari Maret 1984 hingga Mei 2012.",
+    },
+    "landsat7": {
+        "key": "landsat7",
+        "name": "Landsat 7 ETM+ - Surface Reflectance",
+        "provider": "USGS / NASA",
+        "group": "USGS / Landsat",
+        "gee_collection": "LANDSAT/LE07/C02/T1_L2",
+        "visualization": "rgb",
+        "color_mode": "natural",
+        "band_role_map": {"red": "SR_B3", "green": "SR_B2", "blue": "SR_B1"},
+        "reflectance_scale": 0.0000275, "reflectance_offset": -0.2,
+        "vis_min": 0, "vis_max": 0.3,
+        "cloud_property": "CLOUD_COVER",
+        "cloud_mask_techniques": None,
+        "resolution_m": 30, "revisit_days": 16, "start_year": 1999,
+        "description": "USGS Landsat 7 ETM+ Collection 2 Level 2: arsip surface reflectance 30m dari Mei 1999 hingga Januari 2024. Setelah Mei 2003, beberapa scene memiliki celah SLC-off.",
     },
     "sentinel1": {
         "key": "sentinel1",
@@ -405,11 +469,11 @@ def provider_capabilities(meta: dict[str, Any]) -> dict[str, bool]:
     """Normalize provider capabilities for the imagery catalog response."""
     source_kind = str(meta.get("source_kind") or "gee")
     visualization = str(meta.get("visualization") or "rgb")
-    visualization_only = source_kind in {"esri_wayback", "google_basemap", "apple_basemap"}
+    visualization_only = source_kind in {"esri_wayback", "google_basemap", "apple_basemap", "himawari"}
     commercial = source_kind in {"planet", "maxar", "commercial", "planet_stac", "vantor_stac", "iceye_stac"}
     open_data = bool(meta.get("open_data", not commercial))
     return {
-        "searchable": True,
+        "searchable": source_kind != "himawari",
         "downloadable": bool(meta.get("gee_collection") or "stac" in source_kind),
         "analytical": not visualization_only,
         "visualization_only": visualization_only,
