@@ -24,9 +24,10 @@ def temp_admin(db_available):
         admin = AdminUser(username=username, password_hash=hash_password("pytest_password_123"), is_active=True)
         db.add(admin)
         db.commit()
+        admin_id = admin.id
         yield username, "pytest_password_123"
     finally:
-        db.query(AdminUser).filter_by(username=username).delete()
+        db.query(AdminUser).filter_by(id=admin_id).delete()
         db.commit()
         db.close()
 
@@ -50,6 +51,26 @@ def test_login_wrong_password(client, temp_admin):
     username, _ = temp_admin
     resp = client.post("/api/admin/auth/login", json={"username": username, "password": "wrong"})
     assert resp.status_code == 401
+
+
+def test_admin_can_update_own_profile(client, temp_admin):
+    username, password = temp_admin
+    login = client.post("/api/admin/auth/login", json={"username": username, "password": password})
+    assert login.status_code == 200
+
+    updated_username = f"{username}_updated"
+    updated_email = f"{username}@example.test"
+    response = client.put(
+        "/api/admin/auth/profile",
+        json={"username": updated_username, "email": updated_email},
+    )
+    assert response.status_code == 200
+    assert response.json()["user"]["username"] == updated_username
+    assert response.json()["user"]["email"] == updated_email
+
+    me = client.get("/api/admin/auth/me")
+    assert me.status_code == 200
+    assert me.json()["username"] == updated_username
 
 
 def test_viewer_is_denied_admin_panel_access():

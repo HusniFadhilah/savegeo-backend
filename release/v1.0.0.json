@@ -1,0 +1,42 @@
+{
+  "manifest_version": 1,
+  "product_version": "1.0.0",
+  "status": "candidate",
+  "validation_status": "not_verified",
+  "frontend": {
+    "version": "1.0.0",
+    "build_number": 1,
+    "run_attempt": null,
+    "commit_sha": null,
+    "workflow_name": "Build and deploy SAVEGEO frontend",
+    "workflow_run_id": null,
+    "workflow_run_url": null,
+    "environment": "unknown",
+    "built_at_utc": null,
+    "deployed_at_utc": null,
+    "observed_local_commit_sha": "26545af1c5395b19e5b177a69d396dcfab9050ea"
+  },
+  "backend": {
+    "version": "1.0.0",
+    "build_number": 1,
+    "run_attempt": null,
+    "commit_sha": null,
+    "workflow_name": "Test and deploy SAVEGEO backend",
+    "workflow_run_id": null,
+    "workflow_run_url": null,
+    "environment": "unknown",
+    "built_at_utc": null,
+    "deployed_at_utc": null,
+    "observed_local_commit_sha": "48997cf2f324559576f345067d37f5eb77dc78cc"
+  },
+  "compatibility": {
+    "status": "not_verified",
+    "criteria": "The product versions must match and both successful production deployment records must identify their own workflow, run attempt, full commit SHA, and health-check time."
+  },
+  "notes": [
+    "Build number 1 is a bootstrap record because GitHub Actions history could not be read with the available credentials; it is not a historical workflow claim.",
+    "The local HEAD SHAs are observations only and are not substituted for workflow-built commit SHAs.",
+    "Local uncommitted changes were preserved and are excluded from this candidate manifest.",
+    "Do not mark this manifest deployed or validation_status passed until both production workflows succeed and their records are paired."
+  ]
+}

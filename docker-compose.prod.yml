@@ -20,6 +20,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        SAVEGEO_PRODUCT_VERSION: ${SAVEGEO_PRODUCT_VERSION:-}
+        SAVEGEO_COMMIT_SHA: ${SAVEGEO_COMMIT_SHA:-}
+        SAVEGEO_BUILD_NUMBER: ${SAVEGEO_BUILD_NUMBER:-}
     restart: unless-stopped
     env_file:
       - .env
@@ -33,6 +37,14 @@ services:
       # Ollama normally runs on the LEN host (the H100 server). The host-gateway
       # alias lets the API container reach it without exposing Ollama publicly.
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
+      SAVEGEO_RUN_ATTEMPT: ${SAVEGEO_RUN_ATTEMPT:-}
+      SAVEGEO_REF: ${SAVEGEO_REF:-}
+      SAVEGEO_BUILD_TIME_UTC: ${SAVEGEO_BUILD_TIME_UTC:-}
+      SAVEGEO_WORKFLOW_NAME: ${SAVEGEO_WORKFLOW_NAME:-}
+      SAVEGEO_WORKFLOW_RUN_ID: ${SAVEGEO_WORKFLOW_RUN_ID:-}
+      SAVEGEO_WORKFLOW_RUN_URL: ${SAVEGEO_WORKFLOW_RUN_URL:-}
+      SAVEGEO_DEPLOYMENT_ENVIRONMENT: ${SAVEGEO_DEPLOYMENT_ENVIRONMENT:-}
+      SAVEGEO_DEPLOYMENT_METADATA_FILE: /app/var/deployment-metadata.json
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -50,14 +62,8 @@ services:
       # The LEN public reverse proxy reaches the backend on the server LAN IP.
       - "8086:8086"
     volumes:
-      - ./var/uploads:/app/var/uploads
-      - ./var/saved_models:/app/var/saved_models
-      - ./var/disaster_rasters:/app/var/disaster_rasters
-      - ./var/samgeo:/app/var/samgeo
-      # Persistent rendered COG tiles. Keep this outside source sync so cache
-      # survives deploy/restart and can be shared by all API workers.
-      - ./var/carbon_tile_cache:/app/var/carbon_tile_cache
-      - ./var/gee-credentials:/app/var/gee-credentials
+      # Runtime data and deployment metadata persist outside source sync.
+      - ./var:/app/var
 
 volumes:
   savegeo_pgdata:

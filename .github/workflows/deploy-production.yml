@@ -28,7 +28,10 @@ jobs:
       - name: Install, lint, typecheck, security audit, and test
         env:
           DEBUG: "false"
+          SAVEGEO_DEPLOYMENT_ENVIRONMENT: production
         run: |
+          python scripts/write_build_metadata.py --output build-metadata.json
+          python scripts/validate_build_metadata.py build-metadata.json --expected-environment production --require-workflow
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
           ruff check . --ignore E501 --ignore B904 --ignore B905
@@ -37,6 +40,12 @@ jobs:
           # scikit-learn is pinned for existing pickle model compatibility; remove this ignore after retraining.
           pip-audit . --ignore-vuln PYSEC-2024-110
           pytest
+      - name: Upload production build metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: savegeo-backend-production-build-metadata
+          path: build-metadata.json
+          if-no-files-found: error
 
   deploy:
     runs-on: ubuntu-latest
@@ -50,10 +59,33 @@ jobs:
       DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
       BACKEND_REMOTE_DIR: ${{ secrets.BACKEND_REMOTE_DIR }}
       BACKEND_HEALTH_URL: ${{ secrets.BACKEND_HEALTH_URL }}
+      SAVEGEO_BUILD_NUMBER: ${{ github.run_number }}
+      SAVEGEO_RUN_ATTEMPT: ${{ github.run_attempt }}
+      SAVEGEO_COMMIT_SHA: ${{ github.sha }}
+      SAVEGEO_REF: ${{ github.ref }}
+      SAVEGEO_BUILD_TIME_UTC: ${{ github.run_started_at }}
+      SAVEGEO_WORKFLOW_NAME: ${{ github.workflow }}
+      SAVEGEO_WORKFLOW_RUN_ID: ${{ github.run_id }}
+      SAVEGEO_WORKFLOW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      SAVEGEO_DEPLOYMENT_ENVIRONMENT: production
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Download and validate build metadata
+        uses: actions/download-artifact@v4
+        with:
+          name: savegeo-backend-production-build-metadata
+          path: build-metadata-artifact
+
+      - name: Load product version for image label
+        run: echo "SAVEGEO_PRODUCT_VERSION=$(python3 -c 'import json; print(json.load(open("build-metadata-artifact/build-metadata.json"))["product_version"])')" >> "$GITHUB_ENV"
+
+      - name: Validate deployment metadata matches this commit
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+        run: python3 scripts/validate_build_metadata.py build-metadata-artifact/build-metadata.json --expected-sha "$GITHUB_SHA" --expected-environment production --require-workflow
 
       - name: Validate production deployment secrets
         env:
@@ -138,6 +170,7 @@ jobs:
             --exclude 'var/' \
             --exclude '__pycache__/' \
             --exclude '.pytest_cache/' \
+            --exclude 'build-metadata-artifact/' \
             -e "sshpass -e ssh -p $DEPLOY_SSH_PORT" \
             ./ "$DEPLOY_USER@$DEPLOY_HOST:$BACKEND_REMOTE_DIR/"
 
@@ -146,11 +179,12 @@ jobs:
           SSHPASS: ${{ secrets.SSH_PASSWORD }}
         run: |
           sshpass -e ssh -p "$DEPLOY_SSH_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
-            "BACKEND_REMOTE_DIR='$BACKEND_REMOTE_DIR' BACKEND_HEALTH_URL='$BACKEND_HEALTH_URL' bash -s" <<'REMOTE_DEPLOY'
+            "BACKEND_REMOTE_DIR='$BACKEND_REMOTE_DIR' BACKEND_HEALTH_URL='$BACKEND_HEALTH_URL' SAVEGEO_PRODUCT_VERSION='$SAVEGEO_PRODUCT_VERSION' SAVEGEO_BUILD_NUMBER='$SAVEGEO_BUILD_NUMBER' SAVEGEO_RUN_ATTEMPT='$SAVEGEO_RUN_ATTEMPT' SAVEGEO_COMMIT_SHA='$SAVEGEO_COMMIT_SHA' SAVEGEO_REF='$SAVEGEO_REF' SAVEGEO_BUILD_TIME_UTC='$SAVEGEO_BUILD_TIME_UTC' SAVEGEO_WORKFLOW_NAME='$SAVEGEO_WORKFLOW_NAME' SAVEGEO_WORKFLOW_RUN_ID='$SAVEGEO_WORKFLOW_RUN_ID' SAVEGEO_WORKFLOW_RUN_URL='$SAVEGEO_WORKFLOW_RUN_URL' SAVEGEO_DEPLOYMENT_ENVIRONMENT='$SAVEGEO_DEPLOYMENT_ENVIRONMENT' bash -s" <<'REMOTE_DEPLOY'
             set -euo pipefail
             cd "$BACKEND_REMOTE_DIR"
             test -s .env
             mkdir -p var/exports var/uploads var/saved_models var/disaster_rasters var/samgeo var/gee-credentials
+            test -e var/deployment-metadata.json || printf '{}\n' > var/deployment-metadata.json
             if docker compose -f docker-compose.prod.yml ps --status running db | grep -q db; then
               docker compose -f docker-compose.prod.yml exec -T db \
                 pg_dump -U savegeo -Fc savegeo \
@@ -181,7 +215,20 @@ jobs:
             docker compose -f docker-compose.prod.yml exec -T api \
               python -m scripts.import_legacy_models /app/var/saved_models
             curl --fail --silent "$BACKEND_HEALTH_URL" >/dev/null
+            deployment_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+            python3 scripts/write_build_metadata.py --output var/deployment-metadata.json --deployment-time-utc "$deployment_time" --deployment-environment production
+            curl --fail --silent "${BACKEND_HEALTH_URL%/health}/version" >/dev/null
           REMOTE_DEPLOY
+
+      - name: Record production deployment
+        run: python3 scripts/write_deployment_record.py --metadata build-metadata-artifact/build-metadata.json --output backend-production-deployment-record.json --environment production
+
+      - name: Upload production deployment record
+        uses: actions/upload-artifact@v4
+        with:
+          name: savegeo-backend-production-deployment-record
+          path: backend-production-deployment-record.json
+          if-no-files-found: error
 
   gitleaks:
     runs-on: ubuntu-latest

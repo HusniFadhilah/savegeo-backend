@@ -11,6 +11,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.core.security import USER_SESSION_COOKIE, _credential_or_cookie, decode_access_token, get_current_user
+from app.core.version import get_product_version
 from app.db.models.user import User
 from app.db.models.workflow import Workflow, WorkflowRun
 from app.db.session import get_db
@@ -162,7 +163,7 @@ def run_workflow(workflow_id: str, payload: WorkflowRunRequest, user: User = Dep
         raise HTTPException(status_code=403, detail="WORKFLOW_PERMISSION_DENIED")
     now = dt.datetime.now(dt.UTC)
     node_statuses = {node["id"]: "completed" for node in workflow.workflow_json.get("nodes", [])}
-    provenance = {"workflowVersion": workflow.version, "executionLocation": "backend", "applicationVersion": "0.1.0", "startedAt": now.isoformat(), "completedAt": now.isoformat(), "nodeStatuses": node_statuses}
+    provenance = {"workflowVersion": workflow.version, "executionLocation": "backend", "applicationVersion": get_product_version(), "startedAt": now.isoformat(), "completedAt": now.isoformat(), "nodeStatuses": node_statuses}
     run = WorkflowRun(workflow_id=workflow.id, owner_id=user.id, status="completed", execution_location="backend" if payload.executionLocation == "auto" else payload.executionLocation, node_statuses=node_statuses, provenance=provenance, started_at=now, completed_at=now)
     db.add(run)
     workflow.last_run = {"runId": str(run.id) if run.id else None, "status": "completed", "completedAt": now.isoformat()}

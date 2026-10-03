@@ -43,8 +43,20 @@ FROM debian:bookworm-slim AS runtime
 
 WORKDIR /app
 
+ARG SAVEGEO_PRODUCT_VERSION
+ARG SAVEGEO_COMMIT_SHA
+ARG SAVEGEO_BUILD_NUMBER
+LABEL org.opencontainers.image.title="SAVEGEO backend" \
+      org.opencontainers.image.version="$SAVEGEO_PRODUCT_VERSION" \
+      org.opencontainers.image.revision="$SAVEGEO_COMMIT_SHA" \
+      org.opencontainers.image.source="https://github.com/HusniFadhilah/savegeo-backend"
+
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+ENV SAVEGEO_BUILD_NUMBER="${SAVEGEO_BUILD_NUMBER}" \
+    SAVEGEO_COMMIT_SHA="${SAVEGEO_COMMIT_SHA}" \
+    SAVEGEO_PRODUCT_VERSION="${SAVEGEO_PRODUCT_VERSION}" \
+    SAVEGEO_DEPLOYMENT_METADATA_FILE="/app/var/deployment-metadata.json"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates libbz2-1.0 libexpat1 libffi8 libgomp1 liblzma5 \

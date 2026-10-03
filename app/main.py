@@ -26,6 +26,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.router import api_router
 from app.core.config import get_settings
+from app.core.version import get_product_version
 from app.core.cors import setup_cors
 from app.core.http import SecurityHeadersMiddleware
 from app.db.session import SessionLocal
@@ -58,7 +59,7 @@ settings = get_settings()
 app = FastAPI(
     title="SAVEGEO / GEOMOKA API",
     description="Carbon stock, vegetation, land cover, and disaster analysis platform - FastAPI + Supabase Postgres backend.",
-    version="0.1.0",
+    version=get_product_version(),
     lifespan=lifespan,
 )
 

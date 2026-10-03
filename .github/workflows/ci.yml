@@ -27,7 +27,11 @@ jobs:
       - name: Install, lint, typecheck, security audit, and test
         env:
           DEBUG: "false"
+          SAVEGEO_DEPLOYMENT_ENVIRONMENT: ci
         run: |
+          python scripts/write_build_metadata.py --output build-metadata.json
+          python scripts/validate_build_metadata.py build-metadata.json --expected-environment ci
+          python scripts/validate_release_manifest.py release/v1.0.0.json
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
           ruff check . --ignore E501 --ignore B904 --ignore B905

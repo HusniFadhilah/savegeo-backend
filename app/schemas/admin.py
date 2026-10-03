@@ -15,6 +15,11 @@ class ChangePasswordRequest(BaseModel):
     new_password: str
 
 
+class AdminProfileUpdateRequest(BaseModel):
+    username: str
+    email: str | None = None
+
+
 class PasswordForgotRequest(BaseModel):
     identifier: str
 

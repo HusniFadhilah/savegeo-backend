@@ -38,7 +38,10 @@ jobs:
         working-directory: backend
         env:
           DEBUG: "false"
+          SAVEGEO_DEPLOYMENT_ENVIRONMENT: beta
         run: |
+          python scripts/write_build_metadata.py --output build-metadata.json
+          python scripts/validate_build_metadata.py build-metadata.json --expected-environment beta --require-workflow
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
           ruff check . --ignore E501 --ignore B904 --ignore B905
@@ -47,6 +50,12 @@ jobs:
           # scikit-learn is pinned for existing pickle model compatibility; remove this ignore after retraining.
           pip-audit . --ignore-vuln PYSEC-2024-110
           pytest
+      - name: Upload beta build metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: savegeo-backend-beta-build-metadata
+          path: backend/build-metadata.json
+          if-no-files-found: error
 
   gitleaks:
     runs-on: ubuntu-latest
@@ -138,12 +147,36 @@ jobs:
       DOLTINUKU_USERNAME: ${{ secrets.SFTP_DOLTINUKU_USERNAME }}
       DOLTINUKU_PASSWORD: ${{ secrets.SFTP_DOLTINUKU_PASSWORD }}
       DOLTINUKU_SSH_PORT: ${{ secrets.SFTP_DOLTINUKU_PORT }}
+      SAVEGEO_BUILD_NUMBER: ${{ github.run_number }}
+      SAVEGEO_RUN_ATTEMPT: ${{ github.run_attempt }}
+      SAVEGEO_COMMIT_SHA: ${{ github.sha }}
+      SAVEGEO_REF: ${{ github.ref }}
+      SAVEGEO_BUILD_TIME_UTC: ${{ github.run_started_at }}
+      SAVEGEO_WORKFLOW_NAME: ${{ github.workflow }}
+      SAVEGEO_WORKFLOW_RUN_ID: ${{ github.run_id }}
+      SAVEGEO_WORKFLOW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      SAVEGEO_DEPLOYMENT_ENVIRONMENT: beta
 
     steps:
       - name: Checkout backend
         uses: actions/checkout@v4
         with:
           path: backend
+
+      - name: Download and validate build metadata
+        uses: actions/download-artifact@v4
+        with:
+          name: savegeo-backend-beta-build-metadata
+          path: backend/build-metadata-artifact
+
+      - name: Load product version for deployment metadata
+        run: echo "SAVEGEO_PRODUCT_VERSION=$(python3 -c 'import json; print(json.load(open("backend/build-metadata-artifact/build-metadata.json"))["product_version"])')" >> "$GITHUB_ENV"
+
+      - name: Validate deployment metadata matches this commit
+        working-directory: backend
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+        run: python scripts/validate_build_metadata.py build-metadata-artifact/build-metadata.json --expected-sha "$GITHUB_SHA" --expected-environment beta --require-workflow
 
       - name: Install deployment tools
         run: |
@@ -174,6 +207,7 @@ jobs:
             --exclude='./__pycache__' \
             --exclude='./savegeo_backend.egg-info' \
             --exclude='./var' \
+            --exclude='./build-metadata-artifact' \
             --exclude='./.env' \
             .
           sshpass -e scp \
@@ -195,6 +229,8 @@ jobs:
           test -d "$BACKEND_REMOTE_DIR"
           test -d "$FRONTEND_REMOTE_DIR/dist"
           test -s "$BACKEND_REMOTE_DIR/.env"
+          mkdir -p "$BACKEND_REMOTE_DIR/var"
+          test -e "$BACKEND_REMOTE_DIR/var/deployment-metadata.json" || printf '{}\n' > "$BACKEND_REMOTE_DIR/var/deployment-metadata.json"
 
           upload_archive=/tmp/savegeo-backend-source.tar.gz
           test -s "$upload_archive"
@@ -274,6 +310,12 @@ jobs:
           # service. The script is a no-op when another AI provider is set.
           OLLAMA_PREFLIGHT_INFERENCE=true OLLAMA_PREFLIGHT_TIMEOUT_SECONDS=120 \
             .venv/bin/python -m scripts.check_ollama
+
+          deployment_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          .venv/bin/python scripts/write_build_metadata.py \
+            --output "$BACKEND_REMOTE_DIR/var/deployment-metadata.json" \
+            --deployment-time-utc "$deployment_time" \
+            --deployment-environment beta
 
           if command -v apache2ctl >/dev/null 2>&1; then
             a2enmod headers proxy proxy_http rewrite >/dev/null
@@ -439,10 +481,21 @@ jobs:
             -p "${DOLTINUKU_SSH_PORT:-22}" \
             -o StrictHostKeyChecking=accept-new \
             "$DOLTINUKU_USERNAME@$DOLTINUKU_SERVER" \
-            "sudo -S -p '' env BACKEND_REMOTE_DIR='$BACKEND_REMOTE_DIR' FRONTEND_REMOTE_DIR='$FRONTEND_REMOTE_DIR' SAVEGEO_DOMAIN='$SAVEGEO_DOMAIN' BEGEO_DOMAIN='$BEGEO_DOMAIN' bash -s"
+            "sudo -S -p '' env BACKEND_REMOTE_DIR='$BACKEND_REMOTE_DIR' FRONTEND_REMOTE_DIR='$FRONTEND_REMOTE_DIR' SAVEGEO_DOMAIN='$SAVEGEO_DOMAIN' BEGEO_DOMAIN='$BEGEO_DOMAIN' SAVEGEO_PRODUCT_VERSION='$SAVEGEO_PRODUCT_VERSION' SAVEGEO_BUILD_NUMBER='$SAVEGEO_BUILD_NUMBER' SAVEGEO_RUN_ATTEMPT='$SAVEGEO_RUN_ATTEMPT' SAVEGEO_COMMIT_SHA='$SAVEGEO_COMMIT_SHA' SAVEGEO_REF='$SAVEGEO_REF' SAVEGEO_BUILD_TIME_UTC='$SAVEGEO_BUILD_TIME_UTC' SAVEGEO_WORKFLOW_NAME='$SAVEGEO_WORKFLOW_NAME' SAVEGEO_WORKFLOW_RUN_ID='$SAVEGEO_WORKFLOW_RUN_ID' SAVEGEO_WORKFLOW_RUN_URL='$SAVEGEO_WORKFLOW_RUN_URL' SAVEGEO_DEPLOYMENT_ENVIRONMENT='$SAVEGEO_DEPLOYMENT_ENVIRONMENT' bash -s"
 
       - name: Verify public domains
         run: |
           set -euo pipefail
           curl --fail --silent --show-error --max-time 30 "https://$SAVEGEO_DOMAIN/" >/dev/null
           curl --fail --silent --show-error --max-time 30 "https://$BEGEO_DOMAIN/api/health" >/dev/null
+
+      - name: Record beta deployment
+        working-directory: backend
+        run: python scripts/write_deployment_record.py --metadata build-metadata-artifact/build-metadata.json --output backend-beta-deployment-record.json --environment beta
+
+      - name: Upload beta deployment record
+        uses: actions/upload-artifact@v4
+        with:
+          name: savegeo-backend-beta-deployment-record
+          path: backend/backend-beta-deployment-record.json
+          if-no-files-found: error

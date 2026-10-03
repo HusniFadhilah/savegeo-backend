@@ -30,7 +30,7 @@ def _metadata(**overrides):
         "processing_level": "L2A",
         "cloud_cover_percent": 20,
         "lineage": ["provider catalog", "cloud mask"],
-        "processing_software": "savegeo/0.1.0",
+        "processing_software": "savegeo/1.0.0",
         "model_version": None,
         "quality_statement": "Sample only; not for operational decisions.",
         "known_limitations": ["Example dataset"],

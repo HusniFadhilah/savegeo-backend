@@ -1,6 +1,6 @@
 [project]
 name = "savegeo-backend"
-version = "0.1.0"
+version = "1.0.0"
 description = "GEOMOKA/SAVEGEO backend — FastAPI + Supabase Postgres rebuild of the legacy Flask API"
 requires-python = ">=3.11"
 readme = "README.md"

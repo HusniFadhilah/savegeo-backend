@@ -6,6 +6,8 @@ from __future__ import annotations
 import datetime as dt
 import os
 
+from app.core.version import get_product_version
+
 DEFAULT_CONFIGS: list[tuple[str, str, str, str, str, str, bool]] = [
     ("analysis.cloud_threshold", os.getenv("DEFAULT_CLOUD_THRESHOLD", "10"), "int", "analysis",
      "Cloud threshold (%)", "Max cloud cover for Sentinel-2 filtering", False),
@@ -67,7 +69,7 @@ DEFAULT_CONFIGS: list[tuple[str, str, str, str, str, str, bool]] = [
     ("app.name", os.getenv("APP_NAME", "GeoMoka Platform"), "string", "app",
      "Platform name", "Shown in UI", True),
 
-    ("app.version", os.getenv("APP_VERSION", "1.0.0"), "string", "app",
+    ("app.version", get_product_version(), "string", "app",
      "Platform version", "", True),
 
     # -- ArcGIS connection --

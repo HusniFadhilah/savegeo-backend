@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 import requests
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.concurrency import run_in_threadpool
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -46,6 +47,7 @@ from app.registries.satellite_provider_registry import SATELLITE_PROVIDERS
 from app.repositories.satellite_provider_repo import apply_override, get_overrides_by_key
 from app.repositories.uploaded_model_repo import ALLOWED_MODEL_EXTS, import_legacy_models
 from app.schemas.admin import (
+    AdminProfileUpdateRequest,
     AdminUserCreateRequest,
     AdminUserUpdateRequest,
     ChangePasswordRequest,
@@ -122,6 +124,37 @@ def logout(response: Response):
 @router.get("/auth/me")
 def me(admin: AdminUser = Depends(get_current_admin)):
     return admin.to_dict()
+
+
+@router.put("/auth/profile")
+def update_admin_profile(
+    payload: AdminProfileUpdateRequest,
+    admin: AdminUser = Depends(get_current_admin_panel),
+    db: Session = Depends(get_db),
+):
+    username = payload.username.strip()
+    email = (payload.email or "").strip() or None
+    if not username:
+        raise HTTPException(status_code=400, detail="Nama pengguna wajib diisi")
+    if len(username) > 64:
+        raise HTTPException(status_code=400, detail="Nama pengguna maksimal 64 karakter")
+    if email and (len(email) > 128 or "@" not in email or any(char.isspace() for char in email)):
+        raise HTTPException(status_code=400, detail="Alamat email tidak valid")
+
+    if db.query(AdminUser).filter(AdminUser.username == username, AdminUser.id != admin.id).first():
+        raise HTTPException(status_code=409, detail="Nama pengguna sudah digunakan")
+    if email and db.query(AdminUser).filter(AdminUser.email == email, AdminUser.id != admin.id).first():
+        raise HTTPException(status_code=409, detail="Alamat email sudah digunakan")
+
+    admin.username = username
+    admin.email = email
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Nama pengguna atau email sudah digunakan") from exc
+    db.refresh(admin)
+    return {"message": "Profil berhasil diperbarui", "user": admin.to_dict()}
 
 
 @router.put("/auth/change-password")
