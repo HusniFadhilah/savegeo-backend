@@ -160,8 +160,7 @@ def arcgis_tile_proxy(
     elif year and ds_meta.get("time_aware", True) and not _is_carbon_tile:
         params["time"] = _year_ms_range(year)
 
-    if ds_meta.get("requires_auth", False):
-        params.update(client._get_auth_params())
+    params.update(client._get_auth_params())
 
     try:
         # POST avoids URL length limits when renderingRule contains a complex polygon

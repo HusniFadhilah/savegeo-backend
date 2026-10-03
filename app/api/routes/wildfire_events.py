@@ -4,22 +4,118 @@ from __future__ import annotations
 
 import datetime as dt
 import math
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.security import get_current_disaster_viewer
+import app.api.routes.regions as regions_route
 from app.db.models.disaster_event import DisasterEvent
 from app.db.models.hotspot import Hotspot
 from app.db.models.wildfire_hotspot import WildfireHotspot
 from app.db.session import get_db
 from app.registries import disaster_model_registry
 from app.repositories import disaster_repo
-from app.services import disaster_capability_service, firms_service, wildfire_hotspot_service
+from app.services import disaster_capability_service, firms_service, wildfire_hotspot_service, wildfire_region_service
 
 router = APIRouter(prefix="/disasters/wildfires", tags=["wildfires"])
 MAX_MAP_FEATURES = 5000
+ADMIN_REGION_LEVELS = {"province", "city", "district", "village"}
+_ADMIN_GEOMETRY_CACHE: dict[tuple[str, str], tuple[float, dict]] = {}
+_ADMIN_GEOMETRY_CACHE_LOCK = threading.RLock()
+_ADMIN_GEOMETRY_CACHE_TTL = 86400
+
+
+def _admin_geometry(level: str, code: str) -> dict:
+    key = (level, code)
+    with _ADMIN_GEOMETRY_CACHE_LOCK:
+        cached = _ADMIN_GEOMETRY_CACHE.get(key)
+        if cached and time.time() - cached[0] <= _ADMIN_GEOMETRY_CACHE_TTL:
+            return cached[1]
+    geometry = (
+        regions_route.get_province_geometry(code)
+        if level == "province"
+        else regions_route.get_region_geometry(endpoint=level, code=code)
+    )
+    with _ADMIN_GEOMETRY_CACHE_LOCK:
+        _ADMIN_GEOMETRY_CACHE[key] = (time.time(), geometry)
+    return geometry
+
+
+def _filter_by_admin_region(
+    event: DisasterEvent,
+    features: list[dict],
+    region_level: str | None,
+    region_code: str | None,
+) -> list[dict]:
+    if not region_level and not region_code:
+        return features
+    if region_level not in ADMIN_REGION_LEVELS or not region_code:
+        raise HTTPException(status_code=400, detail="region_level dan region_code harus diisi")
+    if region_level == "province" and region_code not in (event.province_codes or []):
+        raise HTTPException(status_code=400, detail="Provinsi berada di luar cakupan event")
+    try:
+        return wildfire_region_service.filter_features_by_boundary(
+            features, _admin_geometry(region_level, region_code)
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="Hotspot tidak dapat difilter berdasarkan batas wilayah") from exc
+
+
+def _as_region_features(geometry: dict, name: str, code: str, level: str) -> list[dict]:
+    if geometry.get("type") == "FeatureCollection":
+        features = list(geometry.get("features") or [])
+    elif geometry.get("type") == "Feature":
+        features = [geometry]
+    else:
+        features = [{"type": "Feature", "geometry": geometry, "properties": {}}]
+    for feature in features:
+        properties = feature.get("properties")
+        if not isinstance(properties, dict):
+            properties = {}
+            feature["properties"] = properties
+        properties.update({"name": name, "code": code, "level": level})
+    return features
+
+
+def _admin_child_features(event: DisasterEvent, level: str, parent_code: str | None) -> list[dict]:
+    if level == "province":
+        if parent_code:
+            raise HTTPException(status_code=400, detail="Provinsi tidak memiliki wilayah induk")
+        codes = event.province_codes or []
+        names = event.province or []
+        if not codes:
+            raise HTTPException(status_code=422, detail="Kode provinsi event belum tersedia")
+        def fetch_province(index_code: tuple[int, str]):
+            index, code = index_code
+            name = names[index] if index < len(names) else code
+            return _as_region_features(_admin_geometry("province", code), name, code, level)
+        with ThreadPoolExecutor(max_workers=min(5, len(codes))) as executor:
+            return [feature for batch in executor.map(fetch_province, enumerate(codes)) for feature in batch]
+
+    if not parent_code:
+        raise HTTPException(status_code=400, detail="Pilih wilayah induk terlebih dahulu")
+    parent_level = {"city": "province", "district": "city", "village": "district"}.get(level)
+    if parent_level is None:
+        raise HTTPException(status_code=400, detail="Tingkat wilayah tidak valid")
+    if level == "city" and parent_code not in (event.province_codes or []):
+        raise HTTPException(status_code=400, detail="Provinsi berada di luar cakupan event")
+    result = regions_route.get_region_children_geometries(
+        parent_code=parent_code,
+        child_endpoint=level,
+        parent_endpoint=parent_level,
+        limit=10000,
+    )
+    features = result.get("features", []) if isinstance(result, dict) else []
+    if not features:
+        raise HTTPException(status_code=502, detail="Batas wilayah turunan tidak tersedia")
+    return features
 
 
 def _map_features(features: list[dict]) -> tuple[list[dict], bool]:
@@ -354,11 +450,17 @@ def get_wildfire_summary(
     from_date: str | None = Query(None, alias="from"),
     to: str | None = None,
     confidence: str | None = None,
+    region_level: str | None = None,
+    region_code: str | None = None,
     viewer=Depends(get_current_disaster_viewer),
     db: Session = Depends(get_db),
 ):
     event = _event(db, slug)
-    _, summary, _ = _stored_wildfire_data(db, event, from_date, to, confidence=confidence)
+    features, summary, _ = _stored_wildfire_data(db, event, from_date, to, confidence=confidence)
+    if region_level or region_code:
+        features = _filter_by_admin_region(event, features, region_level, region_code)
+        summary = wildfire_hotspot_service.summarize(features)
+        summary.update({"affected_regions": 1, "burned_area_ha": None, "burned_area_source": None})
     return summary
 
 
@@ -369,11 +471,18 @@ def get_wildfire_hotspots(
     to: str | None = None,
     sensor: str | None = None,
     confidence: str | None = None,
+    region_level: str | None = None,
+    region_code: str | None = None,
     viewer=Depends(get_current_disaster_viewer),
     db: Session = Depends(get_db),
 ):
     event = _event(db, slug)
     features, summary, metadata = _stored_wildfire_data(db, event, from_date, to, sensor, confidence)
+    if region_level or region_code:
+        features = _filter_by_admin_region(event, features, region_level, region_code)
+        summary = wildfire_hotspot_service.summarize(features)
+        summary.update({"affected_regions": 1, "burned_area_ha": None, "burned_area_source": None})
+        metadata = {**metadata, "region_level": region_level, "region_code": region_code}
     map_features, truncated = _map_features(features)
     metadata = {
         **metadata,
@@ -389,9 +498,11 @@ def get_wildfire_hotspots(
     }
 
 
-@router.get("/events/{slug}/timeline")
-def get_wildfire_timeline(
+@router.get("/events/{slug}/region-statistics")
+def get_wildfire_region_statistics(
     slug: str,
+    level: str = Query(..., pattern="^(province|city|district|village)$"),
+    parent_code: str | None = None,
     from_date: str | None = Query(None, alias="from"),
     to: str | None = None,
     sensor: str | None = None,
@@ -400,7 +511,40 @@ def get_wildfire_timeline(
     db: Session = Depends(get_db),
 ):
     event = _event(db, slug)
-    _, summary, _ = _stored_wildfire_data(db, event, from_date, to, sensor, confidence)
+    features, _, _ = _stored_wildfire_data(db, event, from_date, to, sensor, confidence)
+    try:
+        regions = _admin_child_features(event, level, parent_code)
+        statistics = wildfire_region_service.summarize_by_region(features, regions)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="Statistik hotspot per wilayah tidak dapat dimuat") from exc
+    return {
+        "level": level,
+        "parent_code": parent_code,
+        "total_hotspots": len(features),
+        "regions": statistics,
+        "attribution": "NASA FIRMS / NASA EOSDIS LANCE; batas administratif SP3STAB",
+    }
+
+
+@router.get("/events/{slug}/timeline")
+def get_wildfire_timeline(
+    slug: str,
+    from_date: str | None = Query(None, alias="from"),
+    to: str | None = None,
+    sensor: str | None = None,
+    confidence: str | None = None,
+    region_level: str | None = None,
+    region_code: str | None = None,
+    viewer=Depends(get_current_disaster_viewer),
+    db: Session = Depends(get_db),
+):
+    event = _event(db, slug)
+    features, summary, _ = _stored_wildfire_data(db, event, from_date, to, sensor, confidence)
+    if region_level or region_code:
+        features = _filter_by_admin_region(event, features, region_level, region_code)
+        summary = wildfire_hotspot_service.summarize(features)
     return {"timeline": summary.get("by_day", [])}
 
 

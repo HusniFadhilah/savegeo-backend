@@ -182,8 +182,7 @@ def compute_arcgis_landcover_summary(dataset_key: str, ds_meta: dict, aoi_payloa
     # only add time filter for time-aware services
     elif ds_meta.get("time_aware", True):
         params["time"] = _year_ms_range(year_clamped)
-    if ds_meta.get("requires_auth", False):
-        params.update(client._get_auth_params())
+    params.update(client._get_auth_params())
 
     resp = requests.post(f"{service_url}/computeHistograms", data=params, timeout=client._timeout)
     resp.raise_for_status()
@@ -255,6 +254,7 @@ def _arcgis_carbon_reference_stats(arcgis_meta: dict, aoi_geojson: dict) -> dict
     Uses computeHistograms endpoint. Some services only support envelope geometry -
     controlled by arcgis_meta["histogram_geom_type"].
     """
+    client = get_arcgis_client()
     service_url = arcgis_meta["arcgis_service_url"].rstrip("/")
     geom_type = arcgis_meta.get("histogram_geom_type", "esriGeometryPolygon")
 
@@ -294,15 +294,17 @@ def _arcgis_carbon_reference_stats(arcgis_meta: dict, aoi_geojson: dict) -> dict
             rings = aoi_geojson.get("coordinates", [[]])
         geom_payload = {"rings": rings}
 
+    params = {
+        "geometry": json.dumps(geom_payload),
+        "geometryType": geom_type,
+        "spatialReference": json.dumps({"wkid": 4326}),
+        "f": "json",
+    }
+    params.update(client._get_auth_params())
     resp = requests.post(
         f"{service_url}/computeHistograms",
-        data={
-            "geometry": json.dumps(geom_payload),
-            "geometryType": geom_type,
-            "spatialReference": json.dumps({"wkid": 4326}),
-            "f": "json",
-        },
-        timeout=45,
+        data=params,
+        timeout=client._timeout,
     )
     resp.raise_for_status()
     data = resp.json()

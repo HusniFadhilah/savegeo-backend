@@ -58,6 +58,22 @@ class ArcGISClient:
         self._api_key = os.getenv("ARCGIS_API_KEY", "")
         self._timeout = int(os.getenv("ARCGIS_REQUEST_TIMEOUT", "30"))
 
+    def configure(
+        self,
+        *,
+        enabled: bool,
+        portal_url: str,
+        auth_mode: str,
+        api_key: str,
+        timeout: int,
+    ) -> None:
+        """Apply persisted server configuration without exposing its API key."""
+        self._enabled = bool(enabled)
+        self._portal_url = portal_url.rstrip("/")
+        self._auth_mode = auth_mode.lower()
+        self._api_key = api_key
+        self._timeout = int(timeout)
+
     # ── Public interface ─────────────────────────────────────────────────
 
     def is_enabled(self) -> bool:
@@ -70,15 +86,16 @@ class ArcGISClient:
             "portal_url": self._portal_url,
             "auth_mode": self._auth_mode,
             "configured": self._is_configured(),
+            "request_timeout": self._timeout,
             "checked_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         }
 
         if not self._enabled:
-            status["message"] = "ArcGIS integration is disabled. Set ARCGIS_ENABLED=true to enable."
+            status["message"] = "ArcGIS integration is disabled. Enable it in ArcGIS settings or set ARCGIS_ENABLED=true."
             return status
 
         if not self._is_configured():
-            status["message"] = "ArcGIS enabled but no credential configured. Set ARCGIS_API_KEY or other auth env vars."
+            status["message"] = "ArcGIS is enabled but no API key is configured. Add one in ArcGIS settings or set ARCGIS_API_KEY."
             return status
 
         # Try a lightweight connectivity check against the portal
@@ -89,7 +106,9 @@ class ArcGISClient:
             status["can_reach_portal"] = True
         except Exception as exc:  # noqa: BLE001 - connectivity check; any failure surfaces in the status response
             status["can_reach_portal"] = False
-            status["portal_error"] = str(exc)
+            # The upstream URL may contain an API key in its query string.
+            # Expose only the exception class, never request/response text.
+            status["portal_error"] = f"Portal check failed ({type(exc).__name__})"
 
         return status
 
@@ -185,7 +204,10 @@ class ArcGISClient:
         params.update(self._get_auth_params())
         resp = requests.get(url, params=params, timeout=self._timeout)
         resp.raise_for_status()
-        return resp.json()
+        data = resp.json()
+        if isinstance(data, dict) and "error" in data:
+            raise RuntimeError("ArcGIS portal rejected the configured access")
+        return data
 
 
 # ── Module-level singleton ───────────────────────────────────────────────

@@ -11,6 +11,7 @@ import logging
 import re
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
@@ -55,7 +56,7 @@ from app.schemas.admin import (
     SatelliteProviderUpdateRequest,
 )
 from app.services import audit_service, config_service, gee_service, storage_service
-from app.services.arcgis_service import get_arcgis_client
+from app.services.arcgis_service import configure_arcgis_from_db, get_arcgis_client
 from app.services.datatable_service import datatables_response, is_datatables_request
 from app.services.email_service import EmailDeliveryError, send_password_reset_email
 from app.services.geo_utils import estimate_area_ha
@@ -73,10 +74,16 @@ def _is_sensitive_config_key(key: str) -> bool:
     return is_sensitive_config_key(key)
 
 
+def _requires_full_access_config(key: str) -> bool:
+    # ArcGIS portal settings can redirect privileged server-side requests, so
+    # manage the whole integration alongside its API key.
+    return _is_sensitive_config_key(key) or key.startswith("arcgis.")
+
+
 def _visible_config_rows(rows: list[SystemConfig], admin: AdminUser) -> list[SystemConfig]:
     if admin_has_permission(admin, "secret.read"):
         return rows
-    return [row for row in rows if not _is_sensitive_config_key(row.key)]
+    return [row for row in rows if not _requires_full_access_config(row.key)]
 
 
 def _ensure_user_role_scope(admin: AdminUser, role: Role | None) -> None:
@@ -295,8 +302,63 @@ def gee_reinitialize(request: Request, admin: AdminUser = Depends(require_permis
 
 # -- ArcGIS --
 @router.get("/arcgis/status")
-def arcgis_status(admin: AdminUser = Depends(require_permission("credential.read"))):
-    return get_arcgis_client().get_status()
+def arcgis_status(admin: AdminUser = Depends(require_permission("credential.read")), db: Session = Depends(get_db)):
+    return configure_arcgis_from_db(db).get_status()
+
+
+@router.put("/arcgis/config")
+async def update_arcgis_config(
+    request: Request,
+    admin: AdminUser = Depends(require_permission("secret.write")),
+    db: Session = Depends(get_db),
+):
+    """Save ArcGIS connection options and an optional write-only API key."""
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="ArcGIS settings must be a JSON object")
+
+    enabled = body.get("enabled")
+    if not isinstance(enabled, bool):
+        raise HTTPException(status_code=400, detail="enabled must be true or false")
+
+    portal_url = str(body.get("portal_url", "")).strip().rstrip("/")
+    parsed_url = urlparse(portal_url)
+    if parsed_url.scheme not in {"https", "http"} or not parsed_url.netloc or parsed_url.username or parsed_url.password or parsed_url.query or parsed_url.fragment:
+        raise HTTPException(status_code=400, detail="portal_url must be an HTTP(S) portal base URL without credentials or query parameters")
+
+    auth_mode = str(body.get("auth_mode", "")).strip().lower()
+    if auth_mode not in {"none", "api_key"}:
+        raise HTTPException(status_code=400, detail="auth_mode must be 'none' or 'api_key'")
+
+    try:
+        timeout = int(body.get("request_timeout", 30))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="request_timeout must be an integer")
+    if not 1 <= timeout <= 120:
+        raise HTTPException(status_code=400, detail="request_timeout must be between 1 and 120 seconds")
+
+    current_api_key = config_service.get_setting(db, "arcgis.api_key", get_settings().arcgis_api_key) or ""
+    api_key = body.get("api_key")
+    if api_key is not None and not isinstance(api_key, str):
+        raise HTTPException(status_code=400, detail="api_key must be a string")
+    api_key = api_key.strip() if isinstance(api_key, str) else ""
+    if auth_mode == "api_key" and not (api_key or current_api_key):
+        raise HTTPException(status_code=400, detail="Enter an ArcGIS API key before selecting API key authentication")
+
+    updates = [
+        ("arcgis.enabled", enabled),
+        ("arcgis.portal_url", portal_url),
+        ("arcgis.auth_mode", auth_mode),
+        ("arcgis.request_timeout", timeout),
+    ]
+    if api_key:
+        updates.append(("arcgis.api_key", api_key))
+    for key, value in updates:
+        config_service.upsert_setting(db, key, value, updated_by=admin.id)
+
+    client = configure_arcgis_from_db(db)
+    audit_service.log_audit(db, admin.id, "arcgis.config.update", "arcgis_config", detail={"updated_keys": [key for key, _ in updates]})
+    return {"message": "ArcGIS settings saved", "status": client.get_status()}
 
 
 # -- System config --
@@ -342,7 +404,7 @@ async def config_update(request: Request, admin: AdminUser = Depends(require_per
     updated = []
     errors = []
     for key, value in items:
-        if _is_sensitive_config_key(key) and not admin_has_permission(admin, "secret.write"):
+        if _requires_full_access_config(key) and not admin_has_permission(admin, "secret.write"):
             errors.append({"key": key, "error": "Secret configuration is restricted to full-access administrators"})
             continue
         try:
@@ -353,6 +415,8 @@ async def config_update(request: Request, admin: AdminUser = Depends(require_per
 
     if updated:
         audit_service.log_audit(db, admin.id, "config.update", "system_config", detail={"updated_keys": updated})
+        if any(key.startswith("arcgis.") for key in updated):
+            configure_arcgis_from_db(db)
     return {"message": "Config updated", "updated": updated, "errors": errors}
 
 
@@ -364,9 +428,11 @@ def config_reset(
 ):
     key = (payload or {}).get("key")
     can_write_secrets = admin_has_permission(admin, "secret.write")
-    if key is not None and _is_sensitive_config_key(key) and not can_write_secrets:
+    if key is not None and _requires_full_access_config(key) and not can_write_secrets:
         raise HTTPException(status_code=403, detail="Secret configuration is restricted to full-access administrators")
     count = config_service.reset_setting(db, key, include_secrets=can_write_secrets)
+    if key is None or key.startswith("arcgis."):
+        configure_arcgis_from_db(db)
     return {"message": f"Reset {count} config value(s) to defaults"}
 
 

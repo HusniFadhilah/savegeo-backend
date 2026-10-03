@@ -70,6 +70,22 @@ DEFAULT_CONFIGS: list[tuple[str, str, str, str, str, str, bool]] = [
     ("app.version", os.getenv("APP_VERSION", "1.0.0"), "string", "app",
      "Platform version", "", True),
 
+    # -- ArcGIS connection --
+    ("arcgis.enabled", os.getenv("ARCGIS_ENABLED", "false"), "bool", "arcgis",
+     "Enable ArcGIS", "Allow ArcGIS REST services in the application", False),
+
+    ("arcgis.portal_url", os.getenv("ARCGIS_PORTAL_URL", "https://www.arcgis.com"), "string", "arcgis",
+     "ArcGIS portal URL", "ArcGIS Online or organization portal base URL", False),
+
+    ("arcgis.auth_mode", os.getenv("ARCGIS_AUTH_MODE", "none"), "string", "arcgis",
+     "ArcGIS authentication mode", "Use public access or an API key", False),
+
+    ("arcgis.api_key", os.getenv("ARCGIS_API_KEY", ""), "string", "arcgis",
+     "ArcGIS API key", "Write-only ArcGIS API key used by server-side REST requests", False),
+
+    ("arcgis.request_timeout", os.getenv("ARCGIS_REQUEST_TIMEOUT", "30"), "int", "arcgis",
+     "ArcGIS request timeout", "Maximum ArcGIS REST request time in seconds", False),
+
     # -- Map providers --
     ("maps.carto_api_key", os.getenv("CARTO_API_KEY", ""), "string", "maps",
      "CARTO Basemaps API Key", "Key CARTO untuk tile basemap Positron dan Dark Matter", False),
@@ -138,7 +154,7 @@ DEFAULT_CONFIGS: list[tuple[str, str, str, str, str, str, bool]] = [
 
 # Keys with these suffixes are treated as secrets: masked on GET, write-only on PUT
 # (empty-value PUT is a no-op so a masked GET->PUT roundtrip can't accidentally wipe them).
-SECRET_KEY_SUFFIXES = ("_api_key", "_secret", "_password", "_token", "_private_key", "_secret_key", "_api_secret")
+SECRET_KEY_SUFFIXES = ("_api_key", ".api_key", "_secret", "_password", "_token", "_private_key", "_secret_key", "_api_secret")
 
 
 def is_secret_key(key: str) -> bool:

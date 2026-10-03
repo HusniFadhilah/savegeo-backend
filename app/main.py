@@ -30,6 +30,7 @@ from app.core.cors import setup_cors
 from app.core.http import SecurityHeadersMiddleware
 from app.db.session import SessionLocal
 from app.services import gee_service
+from app.services.arcgis_service import configure_arcgis_from_db
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -40,6 +41,10 @@ async def lifespan(app: FastAPI):
     app.state.ee_initialized = False
     db = SessionLocal()
     try:
+        try:
+            configure_arcgis_from_db(db)
+        except Exception as exc:  # noqa: BLE001 - retain env defaults if DB config is unavailable
+            logger.warning("ArcGIS database configuration skipped at startup: %s", exc)
         app.state.ee_initialized = gee_service.initialize_ee(db)
     except Exception as exc:  # noqa: BLE001 - startup must not crash the app if GEE/DB is unreachable
         logger.warning("GEE initialization skipped at startup: %s", exc)
