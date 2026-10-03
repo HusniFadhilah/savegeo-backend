@@ -36,3 +36,8 @@ saved_models_local/
 .DS_Store
 Thumbs.db
 .venv-py312-test
+
+# Local agent configuration and generated disaster/flood reports
+.claude/
+.tmp-disaster*
+.tmp-flood*
