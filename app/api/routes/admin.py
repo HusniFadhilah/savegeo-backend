@@ -56,7 +56,7 @@ from app.schemas.admin import (
     SatelliteProviderUpdateRequest,
 )
 from app.services import audit_service, config_service, gee_service, storage_service
-from app.services.arcgis_service import configure_arcgis_from_db, get_arcgis_client
+from app.services.arcgis_service import configure_arcgis_from_db
 from app.services.datatable_service import datatables_response, is_datatables_request
 from app.services.email_service import EmailDeliveryError, send_password_reset_email
 from app.services.geo_utils import estimate_area_ha
