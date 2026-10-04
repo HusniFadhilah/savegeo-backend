@@ -15,6 +15,42 @@ def test_sentinel_rgb_catalog_uses_harmonized_ten_metre_bands():
     assert meta["resolution_m"] == 10
 
 
+def test_jaxa_alos_and_palsar_catalog_entries_use_official_collections():
+    avnir = get_imagery_provider_meta("alos_avnir2")
+    assert avnir["gee_collection"] == "JAXA/ALOS/AVNIR-2/ORI"
+    assert [avnir["band_role_map"][role] for role in ("red", "green", "blue")] == ["B3", "B2", "B1"]
+
+    palsar = get_imagery_provider_meta("alos_palsar_yearly")
+    assert palsar["gee_collection"] == "JAXA/ALOS/PALSAR/YEARLY/SAR_EPOCH"
+    assert palsar["visualization"] == "sar"
+    assert palsar["sar_value_mode"] == "dn"
+
+    palsar2 = get_imagery_provider_meta("alos2_palsar2_scansar")
+    assert palsar2["gee_collection"] == "JAXA/ALOS/PALSAR-2/Level2_2/ScanSAR"
+    assert palsar2["required_polarizations"] == ["HH", "HV"]
+
+
+def test_requested_gee_providers_expose_aoi_mosaic_capability():
+    for provider in (
+        "landsat8",
+        "landsat9",
+        "landsat7",
+        "landsat5",
+        "landsat4",
+        "sentinel3",
+        "aster",
+        "alos2_palsar2_scansar",
+        "sentinel1",
+        "sentinel5p_no2",
+        "sentinel5p_co",
+        "sentinel5p_ch4",
+        "sentinel5p_o3",
+        "sentinel5p_aerosol",
+        "viirs_dnb",
+    ):
+        assert get_imagery_provider_meta(provider)["supports_mosaic"] is True
+
+
 def test_provider_capabilities_describe_single_band_and_stac_access():
     gas = provider_capabilities(get_imagery_provider_meta("sentinel5p_no2"))
     assert gas["supports_bands"] is True
@@ -141,6 +177,34 @@ def test_forced_sentinel_mosaic_bypasses_footprint_size_check():
     mosaic.assert_called_once()
     assert result["tile_url"] == "forced-mosaic-url"
     assert result["render_mode"] == "mosaic"
+
+
+def test_forced_non_sentinel_mosaic_uses_generic_renderer():
+    metadata = get_imagery_provider_meta("landsat8")
+    with patch.object(imagery_service, "ee") as ee, \
+         patch.object(imagery_service, "create_geometry_from_payload", return_value=MagicMock(name="aoi")), \
+         patch.object(imagery_service, "_get_imagery_mosaic_tile", return_value={
+             "tile_url": "landsat-mosaic-url",
+             "scene_count": 3,
+             "super_resolution": None,
+             "cloud_mask_technique": None,
+             "visualization_bands": ["SR_B4", "SR_B3", "SR_B2"],
+         }) as mosaic:
+        matches = ee.ImageCollection.return_value.filter.return_value
+        matches.size.return_value.getInfo.return_value = 1
+        result = imagery_service.get_scene_tile({
+            "satellite": "landsat8",
+            "scene_id": "scene",
+            "aoi": {"geojson": {}},
+            "force_mosaic": True,
+            "start_date": "2025-01-01",
+            "end_date": "2025-02-01",
+        })
+    mosaic.assert_called_once()
+    assert result["tile_url"] == "landsat-mosaic-url"
+    assert result["render_mode"] == "mosaic"
+    assert result["scene_count"] == 3
+    assert result["satellite"] == metadata
 
 
 def test_cog_renderer_reads_requested_high_zoom_without_thumbnail_resize():

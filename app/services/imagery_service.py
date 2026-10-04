@@ -1,8 +1,8 @@
 """Raw satellite imagery browser - list individual scenes with their real
 acquisition date+time and view any single one visualized appropriately for
-its sensor type. Sentinel-2 uses a date-range mosaic automatically when one
-granule cannot cover the requested AOI; no land-cover/vegetation/carbon
-analysis is involved.
+its sensor type. Providers that expose supports_mosaic can also render a
+date-range AOI mosaic when one granule cannot cover the requested AOI; no
+land-cover/vegetation/carbon analysis is involved.
 
 User request: "bagaimana bisa melihat citra satelit utk tanggal beserta jam
 tertentu, tanpa harus land cover?" - every existing analysis module
@@ -60,6 +60,7 @@ from app.services.gee_common import (
     AnalysisError,
     create_geometry_from_payload,
     get_tile_url,
+    mask_landsat_clouds,
     resolve_cloud_mask_technique,
 )
 from app.services.commercial_imagery_service import (
@@ -961,6 +962,7 @@ def list_scenes(data: dict, request=None) -> dict:
         .filterDate(start_date, end_date)
         .sort("system:time_start")
     )
+    col = _filter_required_polarizations(col, meta)
     if cloud_prop and max_cloud_cover is not None:
         col = col.filter(ee.Filter.lte(cloud_prop, float(max_cloud_cover)))
     # Keep the response bounded, but allow callers that need a smaller page to
@@ -1048,37 +1050,50 @@ def _apply_s2_single_scene_mask(img: ee.Image, technique: str) -> ee.Image:
 
 
 def _aoi_exceeds_scene_footprint(aoi: ee.Geometry, scene: ee.Image) -> bool:
-    """Return whether the requested AOI is larger than one Sentinel-2 granule.
+    """Return whether the requested AOI is larger than one scene footprint.
 
-    Sentinel-2 tiles are roughly 100 km wide, while users often draw an AOI
-    spanning an entire province.  Keep this check server-side and bundle both
-    area requests into one ``getInfo`` call.  If Earth Engine cannot evaluate
-    the footprint for an unusual image, retain the safe single-scene behavior.
+    Keep this check server-side and bundle both area requests into one
+    ``getInfo`` call. If Earth Engine cannot evaluate the footprint for an
+    unusual image, retain the safe single-scene behavior.
     """
     try:
         areas = ee.Dictionary({
             "aoi": aoi.area(maxError=1),
             # The Python Earth Engine Image wrapper does not expose the
-            # JavaScript ``image.geometry()`` helper.  Sentinel-2 publishes
-            # the equivalent footprint as the system:footprint property.
+            # JavaScript ``image.geometry()`` helper. Use the published
+            # system:footprint property instead.
             "scene": ee.Geometry(scene.get("system:footprint")).area(maxError=1),
         }).getInfo()
         aoi_area = float((areas or {}).get("aoi") or 0)
         scene_area = float((areas or {}).get("scene") or 0)
         return aoi_area > 0 and scene_area > 0 and aoi_area > scene_area
     except Exception:  # noqa: BLE001
-        logger.warning("Could not compare AOI and Sentinel-2 scene footprint; using single scene")
+        logger.warning("Could not compare AOI and scene footprint; using single scene")
         return False
 
 
 def _get_sentinel2_mosaic_tile(data: dict, aoi: ee.Geometry, meta: dict) -> dict | None:
-    """Build one cloud-masked RGB mosaic for a Sentinel-2 date range.
+    """Backward-compatible Sentinel-2 entry point for the generic mosaic renderer."""
+    return _get_imagery_mosaic_tile(data, aoi, meta)
 
-    The scene browser still returns and identifies exact acquisitions. This
-    helper is used automatically when the selected granule cannot cover the
-    requested AOI, or explicitly when the user selects the mosaic group, so
-    the map can fill the AOI from all matching granules without changing the
-    scene table semantics.
+
+def _filter_required_polarizations(collection, meta: dict):
+    """Keep heterogeneous SAR collections compatible with their renderer."""
+    for polarization in meta.get("required_polarizations", []):
+        collection = collection.filter(ee.Filter.listContains("Polarizations", polarization))
+    return collection
+
+
+def _get_imagery_mosaic_tile(data: dict, aoi: ee.Geometry, meta: dict) -> dict | None:
+    """Build a date-range AOI mosaic for any GEE imagery provider.
+
+    The scene table remains scene-level and keeps its exact acquisition times.
+    This renderer is only used for the map layer when the user requests an
+    AOI mosaic (or when the selected scene footprint cannot cover the AOI).
+    Each visualization family is prepared in its native semantics before the
+    collection is mosaicked: scaled reflectance for Landsat, dB conversion
+    for PALSAR DN, and the provider's configured single band for atmospheric
+    and night-light products.
     """
     start_date = data.get("start_date")
     end_date = data.get("end_date")
@@ -1091,6 +1106,7 @@ def _get_sentinel2_mosaic_tile(data: dict, aoi: ee.Geometry, meta: dict) -> dict
         .filterDate(start_date, end_date)
         .sort("system:time_start")
     )
+    collection = _filter_required_polarizations(collection, meta)
     cloud_prop = meta.get("cloud_property")
     max_cloud_cover = data.get("max_cloud_cover")
     if cloud_prop and max_cloud_cover is not None:
@@ -1100,38 +1116,81 @@ def _get_sentinel2_mosaic_tile(data: dict, aoi: ee.Geometry, meta: dict) -> dict
     if scene_count == 0:
         return None
 
+    visualization = meta["visualization"]
+    band_role_map = meta.get("band_role_map") or {}
+    sar_mode = data.get("sar_mode", "grayscale")
+    applied_cloud_mask = None
     available_techniques = meta.get("cloud_mask_techniques") or []
     requested_technique = data.get("cloud_mask_technique")
-    applied_cloud_mask = None
     if available_techniques and requested_technique:
         technique = resolve_cloud_mask_technique(requested_technique)
         if technique not in available_techniques:
             technique = available_techniques[0]
         applied_cloud_mask = technique
 
-    band_role_map = meta["band_role_map"]
-    bands = list(band_role_map.values())
-
     def prepare_image(image):
-        if applied_cloud_mask:
-            image = _apply_s2_single_scene_mask(image, applied_cloud_mask)
-        return image.select(bands).multiply(meta["reflectance_scale"]).add(meta.get("reflectance_offset", 0))
+        if visualization == "rgb":
+            bands = list(band_role_map.values())
+            is_landsat = str(meta.get("gee_collection") or "").startswith("LANDSAT/")
+            if is_landsat:
+                # Landsat Collection 2 Level-2 has QA_PIXEL and scaled SR_B*
+                # bands; mask before selecting the display channels.
+                image = mask_landsat_clouds(image)
+            elif applied_cloud_mask:
+                image = _apply_s2_single_scene_mask(image, applied_cloud_mask)
+            image = image.select(bands)
+            if not is_landsat and "reflectance_scale" in meta:
+                image = image.multiply(meta["reflectance_scale"]).add(meta.get("reflectance_offset", 0))
+            return image
+
+        if visualization == "sar":
+            vv_band = meta["sar_bands"]["vv"]
+            vh_band = meta["sar_bands"]["vh"]
+            if meta.get("sar_value_mode") == "dn":
+                db_offset = float(meta.get("sar_db_offset", -83.0))
+                vv_image = image.select(vv_band).max(1).log10().multiply(20).add(db_offset).rename(vv_band)
+                vh_image = image.select(vh_band).max(1).log10().multiply(20).add(db_offset).rename(vh_band)
+            else:
+                vv_image = image.select(vv_band)
+                vh_image = image.select(vh_band)
+            if sar_mode == "composite":
+                ratio = vv_image.subtract(vh_image).rename("ratio")
+                return ee.Image.cat([vv_image, vh_image, ratio])
+            return vv_image
+
+        if visualization == "single_band":
+            return image.select([meta["band"]])
+
+        raise AnalysisError(f"Unknown visualization strategy '{visualization}' for {meta['name']}", 500)
 
     mosaic = collection.map(prepare_image).mosaic().clip(aoi)
-    vis = {
-        "bands": [band_role_map["red"], band_role_map["green"], band_role_map["blue"]],
-        "min": meta["vis_min"],
-        "max": meta["vis_max"],
-    }
+    if visualization == "rgb":
+        vis = {
+            "bands": [band_role_map["red"], band_role_map["green"], band_role_map["blue"]],
+            "min": meta["vis_min"],
+            "max": meta["vis_max"],
+        }
+    elif visualization == "sar":
+        if sar_mode == "composite":
+            cv = meta["sar_composite_vis"]
+            vv_band = meta["sar_bands"]["vv"]
+            vh_band = meta["sar_bands"]["vh"]
+            vis = {"bands": [vv_band, vh_band, "ratio"], "min": cv["min"], "max": cv["max"]}
+        else:
+            gv = meta["sar_grayscale_vis"]
+            vis = {"bands": [gv["band"]], "min": gv["min"], "max": gv["max"]}
+    else:
+        vis = {"bands": [meta["band"]], "min": meta["vis_min"], "max": meta["vis_max"], "palette": meta["palette"]}
     mosaic, super_resolution = _apply_super_resolution(mosaic, meta, data.get("super_resolution"))
     tile = get_tile_url(mosaic, vis, f"{meta['name']} mosaic")
     if not tile:
-        raise AnalysisError("Gagal membuat tile mosaik Sentinel-2", 500)
+        raise AnalysisError(f"Gagal membuat tile mosaik {meta['name']}", 500)
     return {
         "tile_url": tile["tile_url"],
         "scene_count": scene_count,
         "super_resolution": super_resolution,
         "cloud_mask_technique": applied_cloud_mask,
+        "visualization_bands": vis.get("bands"),
     }
 
 
@@ -1283,20 +1342,26 @@ def get_scene_tile(data: dict, request=None) -> dict:
     img = matches.first()
     aoi = None
 
-    # A Sentinel-2 granule cannot cover a province-sized AOI.  Keep the
-    # selected scene as the provenance anchor, but automatically render a
-    # date-range mosaic when the AOI is larger than that granule footprint.
+    # Keep the selected scene as the provenance anchor, but automatically
+    # render a date-range mosaic when a supported provider's AOI is larger
+    # than that granule footprint. The explicit mosaic button bypasses the
+    # footprint check and always fills the requested AOI from the date range.
     if (
         not data.get("force_scene")
         and (data.get("force_mosaic") or data.get("auto_mosaic"))
-        and provider_key in _SENTINEL2_MOSAIC_PROVIDER_KEYS
+        and meta.get("supports_mosaic")
         and data.get("aoi")
         and data.get("start_date")
         and data.get("end_date")
     ):
         aoi = create_geometry_from_payload(data["aoi"])
         if data.get("force_mosaic") or _aoi_exceeds_scene_footprint(aoi, img):
-            mosaic = _get_sentinel2_mosaic_tile(data, aoi, meta)
+            mosaic_builder = (
+                _get_sentinel2_mosaic_tile
+                if provider_key in _SENTINEL2_MOSAIC_PROVIDER_KEYS
+                else _get_imagery_mosaic_tile
+            )
+            mosaic = mosaic_builder(data, aoi, meta)
             if mosaic:
                 return {
                     "scene_id": scene_id,
@@ -1306,11 +1371,7 @@ def get_scene_tile(data: dict, request=None) -> dict:
                     "resolution_m": meta.get("resolution_m"),
                     "native_scale_m": meta.get("resolution_m"),
                     "dataset": meta.get("gee_collection"),
-                    "visualization_bands": [
-                        meta["band_role_map"]["red"],
-                        meta["band_role_map"]["green"],
-                        meta["band_role_map"]["blue"],
-                    ],
+                    "visualization_bands": mosaic.get("visualization_bands"),
                     "scene_count": mosaic["scene_count"],
                     "render_mode": "mosaic",
                     "aoi_larger_than_scene": True,
@@ -1348,13 +1409,24 @@ def get_scene_tile(data: dict, request=None) -> dict:
         sar_mode = data.get("sar_mode", "grayscale")  # "grayscale" | "composite"
         vv_band = meta["sar_bands"]["vv"]
         vh_band = meta["sar_bands"]["vh"]
+        if meta.get("sar_value_mode") == "dn":
+            # JAXA PALSAR products store polarization as 16-bit DN. Convert
+            # to gamma-naught dB using the equation published in the EE
+            # catalog before applying the standard SAR stretch.
+            db_offset = float(meta.get("sar_db_offset", -83.0))
+            vv_image = img.select(vv_band).max(1).log10().multiply(20).add(db_offset).rename(vv_band)
+            vh_image = img.select(vh_band).max(1).log10().multiply(20).add(db_offset).rename(vh_band)
+        else:
+            vv_image = img.select(vv_band)
+            vh_image = img.select(vh_band)
         if sar_mode == "composite":
-            ratio = img.select(vv_band).subtract(img.select(vh_band)).rename("ratio")
-            img = ee.Image.cat([img.select(vv_band), img.select(vh_band), ratio])
+            ratio = vv_image.subtract(vh_image).rename("ratio")
+            img = ee.Image.cat([vv_image, vh_image, ratio])
             cv = meta["sar_composite_vis"]
             vis = {"bands": [vv_band, vh_band, "ratio"], "min": cv["min"], "max": cv["max"]}
         else:
             gv = meta["sar_grayscale_vis"]
+            img = vv_image
             vis = {"bands": [gv["band"]], "min": gv["min"], "max": gv["max"]}
     elif visualization == "single_band":
         vis = {"bands": [meta["band"]], "min": meta["vis_min"], "max": meta["vis_max"], "palette": meta["palette"]}
