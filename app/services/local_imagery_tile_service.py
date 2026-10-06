@@ -108,8 +108,11 @@ def _stretch_bounds(path: str) -> tuple[tuple[float, float], ...]:
 
 
 def render_tile(local_file_path: str, z: int, x: int, y: int) -> bytes | None:
-    """Returns PNG bytes for one XYZ tile, or None if the tile doesn't
-    overlap the raster's coverage at all (caller should 404)."""
+    """Return PNG bytes for an XYZ tile, or None when it is outside coverage.
+
+    Unexpected raster/decoding errors propagate so callers can return a 5xx
+    instead of confusing a broken source with a normal empty map tile.
+    """
     resolved_path = resolve_local_raster_path(local_file_path)
     try:
         with Reader(resolved_path) as reader:
@@ -118,7 +121,7 @@ def render_tile(local_file_path: str, z: int, x: int, y: int) -> bytes | None:
         return None
     except Exception:
         logger.exception(f"render_tile: failed for '{resolved_path}' z={z} x={x} y={y}")
-        return None
+        raise
 
     in_range = _stretch_bounds(resolved_path)[: img.data.shape[0]]
     img.rescale(in_range=in_range)

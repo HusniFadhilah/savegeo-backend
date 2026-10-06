@@ -16,11 +16,16 @@ from app.services import firms_service
 from app.services.wildfire_geometry import is_feature_in_event_scope
 
 _INITIAL_SYNC_LOCK = threading.RLock()
-# FIRMS area queries return at most ``limit`` rows after all requested date
-# chunks are combined. Keep sync chunks aligned with FIRMS' five-day request
-# window so a busy period cannot discard the older dates before persistence.
+# Start with FIRMS' five-day request window, then subdivide any response that
+# reaches the server-side row limit so older observations are not discarded.
 MAX_SYNC_SPAN_DAYS = 4
-MAX_RETURNED_FEATURES = 2000
+MAX_RETURNED_FEATURES = 50_000
+MAX_SPATIAL_SPLIT_DEPTH = 6
+EXISTING_ID_QUERY_BATCH_SIZE = 10_000
+
+
+class IncompleteFirmsSyncError(firms_service.FirmsRequestError):
+    """Raised when an upstream result remains truncated after subdivision."""
 
 
 def _utc_datetime(value: object) -> dt.datetime | None:
@@ -102,6 +107,81 @@ def _event_bbox(event: DisasterEvent) -> tuple[float, float, float, float]:
         raise firms_service.FirmsRequestError("Bounding box event wildfire tidak valid", 422) from exc
 
 
+def _existing_rows_by_external_id(db: Session, event_id: int, external_ids: list[str]) -> dict[str, WildfireHotspot]:
+    """Look up existing observations without exceeding PostgreSQL's bind limit."""
+    existing: dict[str, WildfireHotspot] = {}
+    for offset in range(0, len(external_ids), EXISTING_ID_QUERY_BATCH_SIZE):
+        id_batch = external_ids[offset : offset + EXISTING_ID_QUERY_BATCH_SIZE]
+        rows = db.execute(
+            select(WildfireHotspot).where(
+                WildfireHotspot.event_id == event_id,
+                WildfireHotspot.external_id.in_(id_batch),
+            )
+        ).scalars()
+        existing.update({row.external_id: row for row in rows})
+    return existing
+
+
+def _split_date_range(start: dt.date, end: dt.date) -> tuple[tuple[dt.date, dt.date], tuple[dt.date, dt.date]]:
+    first_span = (end - start).days + 1
+    midpoint = start + dt.timedelta(days=first_span // 2 - 1)
+    return (start, midpoint), (midpoint + dt.timedelta(days=1), end)
+
+
+def _split_bbox(
+    bbox: tuple[float, float, float, float],
+) -> tuple[tuple[float, float, float, float], ...]:
+    west, south, east, north = bbox
+    mid_lon = (west + east) / 2
+    mid_lat = (south + north) / 2
+    return (
+        (west, south, mid_lon, mid_lat),
+        (mid_lon, south, east, mid_lat),
+        (west, mid_lat, mid_lon, north),
+        (mid_lon, mid_lat, east, north),
+    )
+
+
+def _fetch_complete_period(
+    source: str,
+    start: dt.date,
+    end: dt.date,
+    bbox: tuple[float, float, float, float],
+    spatial_depth: int = 0,
+) -> list[dict]:
+    """Fetch all rows by recursively splitting periods/areas that hit the API cap."""
+    result = firms_service.get_fires_for_period(
+        source=source,
+        from_date=start.isoformat(),
+        to_date=end.isoformat(),
+        bbox=bbox,
+        confidence_categories=None,
+        sensor=None,
+        min_frp=None,
+        limit=MAX_RETURNED_FEATURES,
+    )
+    if not result.get("metadata", {}).get("truncated", False):
+        return result.get("features", [])
+
+    if start < end:
+        first, second = _split_date_range(start, end)
+        return [
+            *_fetch_complete_period(source, *first, bbox, spatial_depth),
+            *_fetch_complete_period(source, *second, bbox, spatial_depth),
+        ]
+
+    if spatial_depth < MAX_SPATIAL_SPLIT_DEPTH:
+        features: list[dict] = []
+        for sub_bbox in _split_bbox(bbox):
+            features.extend(_fetch_complete_period(source, start, end, sub_bbox, spatial_depth + 1))
+        return features
+
+    raise IncompleteFirmsSyncError(
+        "NASA FIRMS masih mengembalikan data terpotong setelah pembagian area; sinkronisasi dibatalkan agar statistik tidak parsial.",
+        502,
+    )
+
+
 def sync_event_hotspots(
     db: Session,
     event: DisasterEvent,
@@ -118,40 +198,23 @@ def sync_event_hotspots(
     fetched: list[dict] = []
     errors: list[dict] = []
     for chunk_start, chunk_end in _date_chunks(start, end):
-        # Query each catalog source separately so the per-request FIRMS limit
-        # cannot truncate a multi-sensor sync before the observations reach DB.
+        # Query each catalog source separately and recursively split saturated
+        # results, avoiding partial counts during high-activity periods.
         for source in firms_service.FIRMS_SOURCE_CATALOG:
             try:
-                result = firms_service.get_fires_for_period(
-                    source=source,
-                    from_date=chunk_start.isoformat(),
-                    to_date=chunk_end.isoformat(),
-                    bbox=bbox,
-                    confidence_categories=None,
-                    sensor=None,
-                    min_frp=None,
-                    limit=MAX_RETURNED_FEATURES,
-                )
+                fetched.extend(_fetch_complete_period(source, chunk_start, chunk_end, bbox))
+            except IncompleteFirmsSyncError:
+                raise
             except firms_service.FirmsRequestError as exc:
                 if not fetched:
                     raise
                 errors.append({"source": source, "message": str(exc), "status": exc.status_code})
                 continue
-            fetched.extend(result.get("features", []))
-            errors.extend(result.get("metadata", {}).get("errors", []))
 
     scoped_features = [feature for feature in fetched if is_feature_in_event_scope(event, feature)]
     features = _feature_map(scoped_features)
     external_ids = list(features)
-    existing = {
-        row.external_id: row
-        for row in db.execute(
-            select(WildfireHotspot).where(
-                WildfireHotspot.event_id == event.id,
-                WildfireHotspot.external_id.in_(external_ids),
-            )
-        ).scalars()
-    } if external_ids else {}
+    existing = _existing_rows_by_external_id(db, event.id, external_ids)
 
     now = dt.datetime.now(dt.UTC)
     for external_id, feature in features.items():

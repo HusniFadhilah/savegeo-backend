@@ -38,6 +38,9 @@ WMS_LAYERS = {
 MAX_BBOX_SPAN = 60.0
 MAX_BBOX_AREA = 2500.0
 MAX_LIMIT = 2000
+# Larger bounded limit for trusted server-side archive synchronization. Public
+# interactive queries remain capped by MAX_LIMIT through validate_query().
+MAX_PERIOD_LIMIT = 50_000
 _CACHE: dict[tuple[object, ...], tuple[float, list[dict]]] = {}
 _CACHE_LOCK = threading.RLock()
 
@@ -339,14 +342,15 @@ def _collect_fires(
     limit: int,
     confidence_categories: set[str] | None = None,
     sensor: str | None = None,
+    max_limit: int = MAX_LIMIT,
 ) -> dict:
     settings = get_settings()
     if not settings.nasa_firms_map_key:
         raise FirmsRequestError("NASA FIRMS belum dikonfigurasi di server", 503)
     if source != "ALL" and source not in FIRMS_SOURCE_CATALOG:
         raise FirmsRequestError("Source FIRMS tidak valid", 400)
-    if not 1 <= limit <= MAX_LIMIT:
-        raise FirmsRequestError(f"limit harus berada pada 1-{MAX_LIMIT}", 400)
+    if not 1 <= limit <= max_limit:
+        raise FirmsRequestError(f"limit harus berada pada 1-{max_limit}", 400)
     bbox = validate_bbox(bbox)
     sources = (
         [
@@ -452,6 +456,7 @@ def get_fires_for_period(
         limit=limit,
         confidence_categories=confidence_categories,
         sensor=sensor,
+        max_limit=MAX_PERIOD_LIMIT,
     )
 
 

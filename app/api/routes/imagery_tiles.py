@@ -15,6 +15,7 @@ checking imagery before publish.
 """
 from __future__ import annotations
 
+import base64
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Response
@@ -34,6 +35,9 @@ router = APIRouter(
 logger = logging.getLogger(__name__)
 
 _CACHE_CONTROL = "public, max-age=86400"
+_TRANSPARENT_TILE_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgAAIAAAUAAXpeqz8AAAAASUVORK5CYII="
+)
 
 
 @router.get("/disasters/imagery-tiles/{imagery_id}/{z}/{x}/{y}.png")
@@ -58,6 +62,9 @@ def imagery_tile(
         logger.error("imagery_tile error (imagery_id=%s %s/%s/%s)", imagery_id, z, x, y)
         raise HTTPException(status_code=500, detail="Unable to render imagery tile") from e
 
+    # A valid raster often covers only a small part of the map. XYZ clients
+    # still request neighboring tiles while panning; return a transparent
+    # image for those expected gaps instead of surfacing noisy 404s.
     if png_bytes is None:
-        raise HTTPException(status_code=404, detail="Tile di luar cakupan raster")
+        png_bytes = _TRANSPARENT_TILE_PNG
     return Response(content=png_bytes, media_type="image/png", headers={"Cache-Control": _CACHE_CONTROL})

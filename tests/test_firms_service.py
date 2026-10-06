@@ -45,6 +45,8 @@ def test_validation_rejects_global_or_invalid_queries():
         firms_service.validate_query("unknown", 1, None, None, None, 100)
     with pytest.raises(firms_service.FirmsRequestError):
         firms_service.validate_query("all", 5, None, None, None, 100)
+    with pytest.raises(firms_service.FirmsRequestError):
+        firms_service.validate_query("VIIRS_NOAA20_NRT", 1, None, None, None, firms_service.MAX_PERIOD_LIMIT)
 
 
 def test_get_fires_uses_cache_and_never_returns_map_key(monkeypatch):
@@ -139,7 +141,7 @@ def test_get_fires_for_period_filters_sensor_and_confidence(monkeypatch):
         confidence_categories={"high"},
         sensor="viirs",
         min_frp=None,
-        limit=100,
+        limit=firms_service.MAX_PERIOD_LIMIT,
     )
 
     assert result["metadata"]["count"] == 1

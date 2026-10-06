@@ -31,6 +31,66 @@ def test_date_chunks_cover_period_without_gaps():
     ]
 
 
+def test_fetch_complete_period_splits_truncated_days_into_smaller_areas():
+    requests = []
+
+    def fake_fetch(source, from_date, to_date, bbox, **kwargs):
+        requests.append((from_date, to_date, bbox))
+        truncated = from_date != to_date or bbox[2] - bbox[0] > 6
+        features = [] if truncated else [{"id": f"{from_date}:{bbox[0]}:{bbox[1]}", "properties": {}}]
+        return {"features": features, "metadata": {"truncated": truncated}}
+
+    with patch.object(wildfire.firms_service, "get_fires_for_period", side_effect=fake_fetch):
+        features = wildfire._fetch_complete_period(
+            "VIIRS_NOAA20_NRT",
+            date(2026, 10, 1),
+            date(2026, 10, 2),
+            (108.8, -4.6, 119.4, 4.4),
+        )
+
+    assert len(features) == 8
+    assert len(requests) == 11
+    assert all(request[0] == request[1] for request in requests[1:])
+
+
+def test_fetch_complete_period_fails_instead_of_accepting_truncated_leaf():
+    with patch.object(
+        wildfire.firms_service,
+        "get_fires_for_period",
+        return_value={"features": [], "metadata": {"truncated": True}},
+    ):
+        try:
+            wildfire._fetch_complete_period(
+                "VIIRS_NOAA20_NRT",
+                date(2026, 10, 1),
+                date(2026, 10, 1),
+                (108.8, -4.6, 119.4, 4.4),
+                spatial_depth=wildfire.MAX_SPATIAL_SPLIT_DEPTH,
+            )
+        except wildfire.IncompleteFirmsSyncError as exc:
+            assert exc.status_code == 502
+        else:
+            raise AssertionError("Truncated leaf must abort sync")
+
+
+def test_existing_row_lookup_chunks_large_id_lists():
+    db = MagicMock()
+    batches = []
+
+    def fake_execute(statement):
+        batches.append(statement.whereclause.clauses[1].right.value)
+        result = MagicMock()
+        result.scalars.return_value = []
+        return result
+
+    db.execute.side_effect = fake_execute
+    with patch.object(wildfire, "EXISTING_ID_QUERY_BATCH_SIZE", 2):
+        rows = wildfire._existing_rows_by_external_id(db, 7, [f"id-{index}" for index in range(5)])
+
+    assert rows == {}
+    assert [len(batch) for batch in batches] == [2, 2, 1]
+
+
 def test_sync_fetches_each_firms_source_and_deduplicates_in_db():
     db = _db_for_sync()
     event = SimpleNamespace(
