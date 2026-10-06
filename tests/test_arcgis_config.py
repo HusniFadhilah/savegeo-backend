@@ -28,5 +28,8 @@ def test_arcgis_api_key_is_write_only_and_used_by_rest_requests():
 def test_arcgis_api_key_config_is_marked_secret():
     defaults = {key: value for key, value, *_ in DEFAULT_CONFIGS}
 
-    assert defaults["arcgis.api_key"] == ""
+    # Keep assertion diagnostics value-free if a developer's environment has
+    # an API key configured.
+    has_default_key = bool(defaults["arcgis.api_key"])
+    assert has_default_key is False
     assert is_sensitive_config_key("arcgis.api_key")

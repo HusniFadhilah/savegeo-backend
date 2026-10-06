@@ -26,7 +26,9 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.temporal import format_rfc3339, utc_now
 from app.core.security import get_current_app_viewer
+from app.core.viewer_features import ensure_job_feature_access
 from app.db.models.user import User
+from app.db.models.analysis_provenance import AnalysisProvenance
 from app.db.session import get_db
 from app.db.session import SessionLocal
 from app.services import (
@@ -53,6 +55,7 @@ _ALLOWED_JOB_TYPES = {
     "geotiff",
     "vegetation",
     "landcover",
+    "landcover_change",
     "landcover_transition",
     "landcover_change_map",
     "landcover_hotspots",
@@ -127,7 +130,7 @@ def _run_job(job_id: str, job_type: str, payload: dict[str, Any]) -> None:
             result = download_service.download_geotiff(db, payload)
         elif job_type == "vegetation":
             result = vegetation_service.analyze_vegetation(db, payload)
-        elif job_type == "landcover":
+        elif job_type in {"landcover", "landcover_change"}:
             result = landcover_service.analyze_landcover(payload)
         elif job_type == "landcover_transition":
             result = landcover_service.analyze_landcover_transition(payload)
@@ -240,6 +243,7 @@ def create_analysis_job(
         raise HTTPException(status_code=400, detail=f"Unsupported analysis job type: {job_type}")
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Missing required field: payload")
+    ensure_job_feature_access(viewer, job_type, db, payload)
 
     # Pure local/reference jobs do not need an Earth Engine session. Keep the
     # gate for all GEE workflows, but allow COG/SoilGrids references to work
@@ -290,11 +294,22 @@ def create_analysis_job(
 
 
 @router.get("/analysis-jobs/{job_id}")
-def get_analysis_job(job_id: str, viewer: object = Depends(get_current_app_viewer)):
+def get_analysis_job(
+    job_id: str,
+    viewer: object = Depends(get_current_app_viewer),
+    db: Session = Depends(get_db),
+):
     job = _read_job(job_id)
     owner = f"user:{viewer.id}" if isinstance(viewer, User) else f"admin:{viewer.id}"
     if job.get("owner") != owner:
         raise HTTPException(status_code=404, detail="Job not found")
+    provenance = db.get(AnalysisProvenance, job_id)
+    ensure_job_feature_access(
+        viewer,
+        str(job.get("type") or ""),
+        db,
+        provenance.parameters if provenance is not None else None,
+    )
     job = {key: value for key, value in job.items() if key != "owner"}
     if job.get("status") == "failed":
         status_code = int(job.get("status_code") or 500)

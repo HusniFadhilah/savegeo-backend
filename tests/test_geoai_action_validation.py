@@ -64,3 +64,42 @@ def test_direct_carbon_can_run_without_aoi_after_mode_is_set():
     ], {"has_aoi": False}, {})
     assert [action["action"] for action in accepted] == ["set_parameter", "run_analysis"]
     assert warnings == []
+
+
+def test_legacy_result_actions_require_their_viewer_feature():
+    actions = [
+        {"type": "open_analysis_result", "kind": "carbon"},
+        {"type": "open_analysis_result", "kind": "vegetation"},
+        {"type": "open_analysis_result", "kind": "landcover_transition"},
+    ]
+    accepted, warnings = validate_geoai_actions(
+        actions,
+        {},
+        {},
+        {"app.feature.vegetation_indices"},
+    )
+    assert accepted == [{"type": "open_analysis_result", "kind": "vegetation"}]
+    assert len(warnings) == 2
+
+
+def test_hotspot_actions_require_server_attributed_permitted_feature():
+    actions = [
+        {"type": "highlight_hotspot", "hotspot_id": "h1"},
+        {"type": "show_before_after", "hotspot_id": "h2"},
+        {"type": "highlight_hotspot", "hotspot_id": "h3"},
+    ]
+    server_context = {
+        "_server_hotspot_features": {
+            "h1": "app.feature.vegetation_indices",
+            "h2": "app.feature.land_cover_change",
+            "h3": "unknown",
+        }
+    }
+    accepted, warnings = validate_geoai_actions(
+        actions,
+        {},
+        server_context,
+        {"app.feature.vegetation_indices"},
+    )
+    assert accepted == [{"type": "highlight_hotspot", "hotspot_id": "h1"}]
+    assert len(warnings) == 2

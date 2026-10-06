@@ -16,6 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.security import get_current_disaster_viewer
+from app.core.viewer_features import require_feature
 from app.db.models.disaster_event import DisasterEvent
 from app.db.models.hotspot import Hotspot
 from app.db.models.wildfire_hotspot import WildfireHotspot
@@ -25,7 +26,11 @@ from app.repositories import disaster_repo
 from app.services.disaster_cross_layer_service import get_available_cross_layer_stats
 from app.services import disaster_capability_service, firms_service, wildfire_hotspot_service
 
-router = APIRouter(prefix="/disasters", tags=["disasters"])
+router = APIRouter(
+    prefix="/disasters",
+    tags=["disasters"],
+    dependencies=[Depends(require_feature("app.feature.disaster_mapping"))],
+)
 
 
 def _viewer_imagery_dict(img) -> dict:

@@ -19,10 +19,15 @@ from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import require_ee
 from app.core.security import get_current_disaster_viewer
+from app.core.viewer_features import require_feature
 from app.services import disaster_service, fire_multi_source_service, firms_service, wind_service
 from app.services.gee_common import AnalysisError, public_analysis_error
 
-router = APIRouter(prefix="/disaster", tags=["disaster"])
+router = APIRouter(
+    prefix="/disaster",
+    tags=["disaster"],
+    dependencies=[Depends(require_feature("app.feature.disaster_mapping"))],
+)
 logger = logging.getLogger(__name__)
 
 

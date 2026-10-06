@@ -15,13 +15,14 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import require_ee
 from app.core.security import get_current_app_viewer
+from app.core.viewer_features import require_feature
 from app.db.session import get_db
 from app.registries.crop_registry import get_catalog_payload
 from app.registries.weather_provider_registry import get_catalog_payload as get_weather_catalog_payload
 from app.services import crop_monitoring_service
 from app.services.gee_common import AnalysisError, public_analysis_error
 
-router = APIRouter(tags=["crop-monitoring"])
+router = APIRouter(tags=["crop-monitoring"], dependencies=[Depends(require_feature("app.feature.crop_monitoring"))])
 logger = logging.getLogger(__name__)
 
 

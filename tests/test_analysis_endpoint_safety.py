@@ -9,17 +9,27 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app.api.routes import analysis_jobs
-from app.api.routes import carbon, landcover, regions
+from app.api.routes import carbon, crop_monitoring, landcover, regions, vegetation
 from app.api.deps import require_ee
 from app.main import app
 from app.core.security import get_current_app_viewer
 from app.db.session import get_db
+from app.db.models.admin_user import AdminUser
 from app.services import carbon_service
 from app.registries.carbon_dataset_registry import CARBON_EXTERNAL_REGISTRY
 from app.services import crop_monitoring_service, landcover_service, vegetation_service
 from app.services import samgeo_service
 from app.services import gee_common
 from app.services.gee_common import AnalysisError
+
+
+def _feature_dependency(router, route_path: str):
+    route = next(route for route in router.routes if getattr(route, "path", None) == route_path)
+    return next(
+        dependency.dependency
+        for dependency in [*router.dependencies, *route.dependencies]
+        if getattr(dependency.dependency, "__name__", None) == "_dependency"
+    )
 
 
 def test_samgeo_jobs_require_login():
@@ -57,6 +67,12 @@ def test_analysis_routes_hide_internal_errors(monkeypatch, path, service, method
     app.dependency_overrides[require_ee] = lambda: None
     app.dependency_overrides[get_current_app_viewer] = lambda: object()
     app.dependency_overrides[get_db] = lambda: object()
+    router, route_path = {
+        "/api/analyze/landcover": (landcover.router, "/analyze/landcover"),
+        "/api/analyze/vegetation": (vegetation.router, "/analyze/vegetation"),
+        "/api/analyze/crop-monitoring": (crop_monitoring.router, "/analyze/crop-monitoring"),
+    }[path]
+    app.dependency_overrides[_feature_dependency(router, route_path)] = lambda: None
     try:
         with TestClient(app) as client:
             response = client.post(path, json={})
@@ -207,7 +223,7 @@ def test_analysis_job_queue_rejects_overload(monkeypatch):
         analysis_jobs.create_analysis_job(
             request=SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(ee_initialized=False))),
             data={"type": "carbon_local", "payload": {}},
-            viewer=SimpleNamespace(id=1),
+            viewer=AdminUser(id=1, username="test-admin", password_hash="", role_id=None),
             db=object(),
         )
     assert error.value.status_code == 429
@@ -227,7 +243,7 @@ def test_analysis_job_slot_released_after_invalid_provenance(monkeypatch):
         analysis_jobs.create_analysis_job(
             request=SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(ee_initialized=False))),
             data={"type": "carbon_local", "payload": {}},
-            viewer=SimpleNamespace(id=1),
+            viewer=AdminUser(id=1, username="test-admin", password_hash="", role_id=None),
             db=db,
         )
     assert error.value.status_code == 422
@@ -241,6 +257,7 @@ def test_carbon_local_internal_error_does_not_expose_exception(monkeypatch):
     monkeypatch.setattr(carbon_service, "analyze_carbon_local", fail)
     app.dependency_overrides[get_current_app_viewer] = lambda: object()
     app.dependency_overrides[get_db] = lambda: object()
+    app.dependency_overrides[carbon.router.dependencies[0].dependency] = lambda: None
     try:
         with TestClient(app) as client:
             response = client.post("/api/analyze/carbon-local", json={})
@@ -254,14 +271,20 @@ def test_carbon_local_internal_error_does_not_expose_exception(monkeypatch):
 def test_analysis_job_result_is_visible_only_to_its_owner(monkeypatch, tmp_path):
     monkeypatch.setattr(analysis_jobs, "_jobs_dir", lambda: tmp_path)
     job_id = "00000000-0000-0000-0000-000000000001"
-    analysis_jobs._write_job(job_id, {"status": "queued", "owner": "admin:1"})
-    analysis_jobs._write_job(job_id, {"status": "succeeded", "result": {"value": 7}})
+    analysis_jobs._write_job(job_id, {"type": "carbon_local", "status": "queued", "owner": "admin:1"})
+    analysis_jobs._write_job(job_id, {"type": "carbon_local", "status": "succeeded", "result": {"value": 7}})
 
-    own_result = analysis_jobs.get_analysis_job(job_id, viewer=SimpleNamespace(id=1))
+    db = SimpleNamespace(get=lambda _model, _key: None)
+    owner = AdminUser(id=1, username="test-admin", password_hash="", role_id=None)
+    own_result = analysis_jobs.get_analysis_job(job_id, viewer=owner, db=db)
     assert own_result["result"] == {"value": 7}
     assert "owner" not in own_result
     with pytest.raises(HTTPException) as denied:
-        analysis_jobs.get_analysis_job(job_id, viewer=SimpleNamespace(id=2))
+        analysis_jobs.get_analysis_job(
+            job_id,
+            viewer=AdminUser(id=2, username="other-admin", password_hash="", role_id=None),
+            db=db,
+        )
     assert denied.value.status_code == 404
 
 

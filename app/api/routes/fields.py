@@ -11,12 +11,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.core.viewer_features import require_feature
 from app.registries.crop_registry import get_commodity
 from app.repositories import field_repo
 from app.schemas.field import FieldCreateRequest, FieldUpdateRequest
 from app.services.geo_utils import estimate_area_ha
 
-router = APIRouter(prefix="/fields", tags=["fields"])
+router = APIRouter(prefix="/fields", tags=["fields"], dependencies=[Depends(require_feature("app.feature.crop_monitoring"))])
 
 
 def _validate_commodity(commodity: str) -> None:

@@ -9,10 +9,14 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app.core.viewer_features import require_feature
 from app.db.models.company_boundary import CompanyBoundary
 from app.db.session import get_db
 
-router = APIRouter(tags=["companies"])
+router = APIRouter(
+    tags=["companies"],
+    dependencies=[Depends(require_feature("app.feature.carbon_stock"))],
+)
 
 
 @router.get("/companies")

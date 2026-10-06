@@ -11,6 +11,9 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
+from app.core.chat_ownership import chat_session_owner_key
+from app.core.security import get_current_app_viewer
+from app.core.viewer_features import viewer_feature_codes
 from app.db.session import get_db
 from app.services import agent_service
 
@@ -19,13 +22,21 @@ logger = logging.getLogger(__name__)
 
 
 @router.get("/capabilities")
-def agent_capabilities(request: Request, db: Session = Depends(get_db)):
+def agent_capabilities(
+    request: Request,
+    viewer: object = Depends(get_current_app_viewer),
+    db: Session = Depends(get_db),
+):
     """Expose datasets, models, tools, and guardrails available to the agent."""
-    return agent_service.build_capabilities_document(db, request)
+    return agent_service.build_capabilities_document(db, request, viewer_feature_codes(db, viewer))
 
 
 @router.post("/analyze")
-async def agent_analyze(request: Request, db: Session = Depends(get_db)):
+async def agent_analyze(
+    request: Request,
+    viewer: object = Depends(get_current_app_viewer),
+    db: Session = Depends(get_db),
+):
     """
     Agentic AI entrypoint.
 
@@ -40,16 +51,26 @@ async def agent_analyze(request: Request, db: Session = Depends(get_db)):
     whitelisted GeoMoka analysis endpoint selected by the planner.
     """
     payload = await request.json()
-    return agent_service.run_agent_analyze(db, request, payload)
+    return agent_service.run_agent_analyze(db, request, payload, viewer_feature_codes(db, viewer))
 
 
 @router.post("/control")
-async def agent_control(request: Request, db: Session = Depends(get_db)):
+async def agent_control(
+    request: Request,
+    viewer: object = Depends(get_current_app_viewer),
+    db: Session = Depends(get_db),
+):
     """
     AI Controller endpoint.
     Body: { message, page_state, image?, attachment?, session_id? }
     Returns: { intent, confidence, needs_confirmation, message, warnings, actions, session_id }
     """
     payload = await request.json()
-    result, status_code, headers = agent_service.run_agent_control(db, request, payload)
+    result, status_code, headers = agent_service.run_agent_control(
+        db,
+        request,
+        payload,
+        owner_key=chat_session_owner_key(viewer),
+        allowed_features=viewer_feature_codes(db, viewer),
+    )
     return JSONResponse(content=result, status_code=status_code, headers=headers)

@@ -37,12 +37,14 @@ from app.api.routes import (
     user_auth,
     utils,
     vegetation,
+    viewer_features,
     workflows,
 )
 
 api_router = APIRouter()
 
 api_router.include_router(health.router)
+api_router.include_router(viewer_features.router)
 api_router.include_router(actions.router)
 api_router.include_router(datasets.router)
 api_router.include_router(maps.router)

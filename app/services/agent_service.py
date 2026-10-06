@@ -22,6 +22,7 @@ from fastapi import Request
 from sqlalchemy.orm import Session
 
 from app.agentic import rate_limiter
+from app.agentic.geoai_tools import filter_direct_reference_layers
 from app.agentic.agentic_ai import (
     build_agent_capabilities,
     execute_agent_plan,
@@ -39,7 +40,11 @@ from app.services.carbon_service import get_carbon_dataset_list
 logger = logging.getLogger(__name__)
 
 
-def build_capabilities_document(db: Session, request: Request) -> dict:
+def build_capabilities_document(
+    db: Session,
+    request: Request,
+    allowed_features: set[str] | None = None,
+) -> dict:
     """Build capabilities consumed by the agent planner and frontend."""
     carbon_datasets = get_carbon_dataset_list(db, require_model=True)
     landcover_datasets = get_dataset_list(module="landcover")
@@ -47,17 +52,42 @@ def build_capabilities_document(db: Session, request: Request) -> dict:
         model.to_dict_public(include_path=False)
         for model in db.query(UploadedModel).filter_by(model_type="carbon", is_active=True).all()
     ]
+    features = allowed_features or set()
+    if allowed_features is not None:
+        if "app.feature.carbon_stock" not in features:
+            carbon_datasets = []
+            models = []
+        if not ({"app.feature.land_cover", "app.feature.land_cover_change"} & features):
+            landcover_datasets = []
     arcgis_client = get_arcgis_client()
-    return build_agent_capabilities(
+    capabilities = build_agent_capabilities(
         carbon_datasets=carbon_datasets,
         landcover_datasets=landcover_datasets,
         models=models,
         ee_initialized=bool(getattr(request.app.state, "ee_initialized", False)),
         arcgis_enabled=bool(arcgis_client.is_enabled()),
     )
+    if allowed_features is not None:
+        tool_features = {
+            "analyze_carbon": "app.feature.carbon_stock",
+            "analyze_vegetation": "app.feature.vegetation_indices",
+            "analyze_vegetation_compare": "app.feature.vegetation_indices",
+            "analyze_landcover": "app.feature.land_cover",
+            "analyze_landcover_transition": "app.feature.land_cover_change",
+        }
+        capabilities["tools"] = {
+            name: tool for name, tool in capabilities["tools"].items()
+            if name not in tool_features or tool_features[name] in allowed_features
+        }
+    return capabilities
 
 
-def run_agent_analyze(db: Session, request: Request, payload: dict) -> dict:
+def run_agent_analyze(
+    db: Session,
+    request: Request,
+    payload: dict,
+    allowed_features: set[str] | None = None,
+) -> dict:
     """
     Agentic AI entrypoint.
 
@@ -71,8 +101,20 @@ def run_agent_analyze(db: Session, request: Request, payload: dict) -> dict:
     By default the agent returns a validated plan. Set execute=true to run the
     whitelisted GeoMoka analysis endpoint selected by the planner.
     """
-    capabilities = build_capabilities_document(db, request)
+    capabilities = build_capabilities_document(db, request, allowed_features)
     plan = plan_agent_request(payload, capabilities)
+    tool_features = {
+        "analyze_carbon": "app.feature.carbon_stock",
+        "analyze_vegetation": "app.feature.vegetation_indices",
+        "analyze_vegetation_compare": "app.feature.vegetation_indices",
+        "analyze_landcover": "app.feature.land_cover",
+        "analyze_landcover_transition": "app.feature.land_cover_change",
+    }
+    required = {tool_features[call.get("tool")] for call in plan.get("tool_calls", []) if call.get("tool") in tool_features}
+    if allowed_features is not None and not required.issubset(allowed_features):
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=403, detail="Akses ke fitur ini tidak diizinkan. Hubungi administrator jika memerlukan akses.")
     response: dict[str, Any] = {
         "agent": capabilities["agent"],
         "plan": plan,
@@ -92,7 +134,15 @@ def run_agent_analyze(db: Session, request: Request, payload: dict) -> dict:
         from app.main import app as fastapi_app
 
         transport = httpx.ASGITransport(app=fastapi_app)
-        with httpx.Client(transport=transport, base_url="http://internal") as client:
+        token = request.headers.get("authorization")
+        if not token:
+            for cookie_name in ("savegeo_user_session", "savegeo_admin_session"):
+                cookie_value = request.cookies.get(cookie_name)
+                if cookie_value:
+                    token = f"Bearer {cookie_value}"
+                    break
+        headers = {"Authorization": token} if token else {}
+        with httpx.Client(transport=transport, base_url="http://internal", headers=headers) as client:
             response["execution"] = execute_agent_plan(plan, client)
     else:
         response["execution"] = {
@@ -110,7 +160,13 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else ""
 
 
-def run_agent_control(db: Session, request: Request, payload: dict) -> tuple[dict, int, dict]:
+def run_agent_control(
+    db: Session,
+    request: Request,
+    payload: dict,
+    owner_key: str,
+    allowed_features: set[str] | None = None,
+) -> tuple[dict, int, dict]:
     """
     AI Controller endpoint.
     Body: { message, page_state, image?, attachment?, session_id? }
@@ -175,6 +231,9 @@ def run_agent_control(db: Session, request: Request, payload: dict) -> tuple[dic
     session: ChatSession | None = None
     if session_id:
         session = db.get(ChatSession, session_id)
+        if session is not None and session.owner_key != owner_key:
+            # Hide whether a foreign session ID exists.
+            return {"error": "Chat session not found"}, 404, {}
 
     # Build history from last 10 messages in this session
     history: list = []
@@ -188,9 +247,39 @@ def run_agent_control(db: Session, request: Request, payload: dict) -> tuple[dic
             # SaveGeo Assistant: grounded tool-calling loop over already-computed
             # results + live hotspot search (see agentic_ai.geoai_with_ai). Screenshot/
             # attachment inputs are UI-automation-mode-only and not passed through here.
-            result = geoai_with_ai(message, geoai_context, db, history, page_state=page_state)
+            safe_context = dict(geoai_context)
+            results = safe_context.get("results")
+            if allowed_features is not None and isinstance(results, dict):
+                result_features = {
+                    "carbon": "app.feature.carbon_stock",
+                    "vegetation": "app.feature.vegetation_indices",
+                    "landcover": "app.feature.land_cover",
+                    "landcover_transition": "app.feature.land_cover_change",
+                    "crop": "app.feature.crop_monitoring",
+                    "disaster": "app.feature.disaster_mapping",
+                }
+                safe_context["results"] = {
+                    key: value for key, value in results.items()
+                    if key in result_features and result_features[key] in allowed_features
+                }
+                safe_context["results"]["direct"] = filter_direct_reference_layers(
+                    results.get("direct"), allowed_features
+                )
+            result = geoai_with_ai(
+                message, safe_context, db, history, page_state=page_state, allowed_features=allowed_features
+            )
         else:
             result = plan_with_ai(message, page_state, image_b64, attachment, history)
+        if mode != "geoai" and allowed_features is not None and isinstance(result, dict):
+            from app.agentic.agentic_ai import validate_geoai_actions
+
+            safe_actions, access_warnings = validate_geoai_actions(
+                result.get("actions"), page_state if isinstance(page_state, dict) else {},
+                geoai_context if isinstance(geoai_context, dict) else {}, allowed_features,
+            )
+            result["actions"] = safe_actions
+            if access_warnings:
+                result["warnings"] = (result.get("warnings") or []) + access_warnings
     except Exception as e:  # noqa: BLE001
         logger.error("agent_control error: %s", e)
         err_str = str(e)
@@ -220,7 +309,7 @@ def run_agent_control(db: Session, request: Request, payload: dict) -> tuple[dic
         if session is None:
             # Auto-create session titled from first message
             title = (message or "Percakapan Baru")[:80]
-            session = ChatSession(title=title, ip_address=client_ip)
+            session = ChatSession(title=title, ip_address=client_ip, owner_key=owner_key)
             db.add(session)
             db.flush()  # get session.id without committing
 

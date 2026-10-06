@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import require_ee
 from app.core.security import get_current_app_viewer
+from app.core.viewer_features import require_feature
 from app.db.session import get_db
 from app.registries.satellite_provider_registry import DEFAULT_SATELLITE
 from app.registries.vegetation_index_registry import get_catalog_payload
@@ -21,7 +22,7 @@ from app.repositories.satellite_provider_repo import list_satellites
 from app.services import vegetation_service
 from app.services.gee_common import CLOUD_MASK_TECHNIQUE_INFO, DEFAULT_CLOUD_MASK_TECHNIQUE, AnalysisError, public_analysis_error
 
-router = APIRouter(tags=["vegetation"])
+router = APIRouter(tags=["vegetation"], dependencies=[Depends(require_feature("app.feature.vegetation_indices"))])
 logger = logging.getLogger(__name__)
 
 

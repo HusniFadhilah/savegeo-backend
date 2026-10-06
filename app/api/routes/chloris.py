@@ -1,11 +1,16 @@
 """Chloris carbon stock integration diagnostics."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 
+from app.core.viewer_features import require_feature
 from app.services.chloris_service import chloris_config_status, resolve_chloris_download
 
-router = APIRouter(prefix="/carbon/chloris", tags=["chloris"])
+router = APIRouter(
+    prefix="/carbon/chloris",
+    tags=["chloris"],
+    dependencies=[Depends(require_feature("app.feature.carbon_stock"))],
+)
 
 
 @router.get("/status")

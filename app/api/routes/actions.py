@@ -8,12 +8,20 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.security import get_current_app_viewer
+from app.core.viewer_features import ensure_job_feature_access
 from app.db.models.analysis_output import AnalysisOutput
 from app.db.models.analysis_provenance import AnalysisProvenance
 from app.db.session import get_db
 from app.services.output_registry_service import get_action
 
 router = APIRouter(tags=["actions"])
+
+
+def _ensure_action_feature_access(db: Session, action_id: str, viewer: object) -> None:
+    provenance = db.get(AnalysisProvenance, action_id)
+    if provenance is None:
+        raise HTTPException(status_code=404, detail="Action not found")
+    ensure_job_feature_access(viewer, provenance.analysis_type, db, provenance.parameters)
 
 
 def _output_or_404(db: Session, action_id: str, output_id: str) -> AnalysisOutput:
@@ -27,6 +35,7 @@ def _output_or_404(db: Session, action_id: str, output_id: str) -> AnalysisOutpu
 
 @router.get("/actions/{action_id}")
 def get_action_contract(action_id: str, _viewer: object = Depends(get_current_app_viewer), db: Session = Depends(get_db)):
+    _ensure_action_feature_access(db, action_id, _viewer)
     action = get_action(db, action_id)
     if action is None:
         raise HTTPException(status_code=404, detail="Action not found")
@@ -35,6 +44,7 @@ def get_action_contract(action_id: str, _viewer: object = Depends(get_current_ap
 
 @router.get("/actions/{action_id}/outputs")
 def list_action_outputs(action_id: str, _viewer: object = Depends(get_current_app_viewer), db: Session = Depends(get_db)):
+    _ensure_action_feature_access(db, action_id, _viewer)
     if db.get(AnalysisProvenance, action_id) is None:
         raise HTTPException(status_code=404, detail="Action not found")
     values = list(db.scalars(select(AnalysisOutput).where(AnalysisOutput.action_id == action_id)))
@@ -43,11 +53,13 @@ def list_action_outputs(action_id: str, _viewer: object = Depends(get_current_ap
 
 @router.get("/actions/{action_id}/outputs/{output_id}/metadata")
 def get_output_metadata(action_id: str, output_id: str, _viewer: object = Depends(get_current_app_viewer), db: Session = Depends(get_db)):
+    _ensure_action_feature_access(db, action_id, _viewer)
     return _output_or_404(db, action_id, output_id).to_dict()
 
 
 @router.get("/actions/{action_id}/outputs/{output_id}/content")
 def get_output_content(action_id: str, output_id: str, _viewer: object = Depends(get_current_app_viewer), db: Session = Depends(get_db)):
+    _ensure_action_feature_access(db, action_id, _viewer)
     output = _output_or_404(db, action_id, output_id)
     if output.profile == "rfc-7946":
         document = (output.metadata_json or {}).get("document")
@@ -60,11 +72,13 @@ def get_output_content(action_id: str, output_id: str, _viewer: object = Depends
 
 @router.get("/actions/{action_id}/outputs/result.geojson")
 def get_named_geojson(action_id: str, _viewer: object = Depends(get_current_app_viewer), db: Session = Depends(get_db)):
+    _ensure_action_feature_access(db, action_id, _viewer)
     output = _output_or_404(db, action_id, f"{action_id}:geojson")
     return get_output_content(action_id, output.id, _viewer, db)
 
 
 @router.get("/actions/{action_id}/outputs/tilejson.json")
 def get_named_tilejson(action_id: str, _viewer: object = Depends(get_current_app_viewer), db: Session = Depends(get_db)):
+    _ensure_action_feature_access(db, action_id, _viewer)
     output = _output_or_404(db, action_id, f"{action_id}:tilejson")
     return get_output_content(action_id, output.id, _viewer, db)

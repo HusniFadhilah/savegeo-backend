@@ -8,14 +8,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from app.api.deps import require_ee
 from app.core.security import get_current_app_viewer
+from app.core.viewer_features import require_feature
 from app.services import landcover_service
 from app.services.gee_common import AnalysisError, public_analysis_error
 
-router = APIRouter(tags=["landcover"])
+router = APIRouter(tags=["landcover"], dependencies=[Depends(get_current_app_viewer)])
 logger = logging.getLogger(__name__)
 
 
-@router.get("/landcover/reference-layers/{dataset}", dependencies=[Depends(get_current_app_viewer)])
+@router.get("/landcover/reference-layers/{dataset}", dependencies=[Depends(require_feature("app.feature.land_cover"))])
 async def direct_landcover_reference_layer(
     dataset: str,
     request: Request,
@@ -47,7 +48,7 @@ async def direct_landcover_reference_layer(
         raise HTTPException(status_code=500, detail="Unable to load land cover layer") from exc
 
 
-@router.post("/analyze/landcover", dependencies=[Depends(get_current_app_viewer), Depends(require_ee)])
+@router.post("/analyze/landcover", dependencies=[Depends(require_feature("app.feature.land_cover")), Depends(require_ee)])
 async def analyze_landcover(request: Request):
     data = await request.json()
     try:
@@ -67,7 +68,7 @@ async def analyze_landcover(request: Request):
         raise HTTPException(status_code=500, detail="Analysis failed. Please try again")
 
 
-@router.post("/analyze/landcover-transition", dependencies=[Depends(get_current_app_viewer), Depends(require_ee)])
+@router.post("/analyze/landcover-transition", dependencies=[Depends(require_feature("app.feature.land_cover_change")), Depends(require_ee)])
 async def analyze_landcover_transition(request: Request):
     data = await request.json()
     try:
@@ -87,7 +88,7 @@ async def analyze_landcover_transition(request: Request):
         raise HTTPException(status_code=500, detail="Analysis failed. Please try again")
 
 
-@router.post("/analyze/landcover-change-map", dependencies=[Depends(get_current_app_viewer), Depends(require_ee)])
+@router.post("/analyze/landcover-change-map", dependencies=[Depends(require_feature("app.feature.land_cover_change")), Depends(require_ee)])
 async def analyze_landcover_change_map(request: Request):
     data = await request.json()
     try:
@@ -107,7 +108,7 @@ async def analyze_landcover_change_map(request: Request):
         raise HTTPException(status_code=500, detail="Analysis failed. Please try again")
 
 
-@router.post("/analyze/landcover-identify", dependencies=[Depends(get_current_app_viewer), Depends(require_ee)])
+@router.post("/analyze/landcover-identify", dependencies=[Depends(require_feature("app.feature.land_cover")), Depends(require_ee)])
 async def identify_landcover(request: Request):
     data = await request.json()
     try:
@@ -123,7 +124,7 @@ async def identify_landcover(request: Request):
         raise HTTPException(status_code=500, detail="Analysis failed. Please try again")
 
 
-@router.post("/analyze/landcover-hotspots", dependencies=[Depends(get_current_app_viewer), Depends(require_ee)])
+@router.post("/analyze/landcover-hotspots", dependencies=[Depends(require_feature("app.feature.land_cover_change")), Depends(require_ee)])
 async def analyze_landcover_hotspots(request: Request):
     """Ranked, vectorized pixel-change polygons (P0 hotspot detection) - see
     landcover_service.analyze_landcover_hotspots for the full contract."""

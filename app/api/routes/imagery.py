@@ -19,6 +19,7 @@ from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import require_ee
 from app.core.security import get_current_app_viewer
+from app.core.viewer_features import require_feature
 from app.core.config import get_settings
 from app.db.models.user import User
 from app.services import copernicus_geosave_service
@@ -28,7 +29,7 @@ from app.services import advanced_imagery_service
 from app.services.copernicus_geosave_service import CopernicusAnalysisError
 from app.services.gee_common import AnalysisError, public_analysis_error
 
-router = APIRouter(tags=["imagery"])
+router = APIRouter(tags=["imagery"], dependencies=[Depends(require_feature("app.feature.satellite_exploration"))])
 logger = logging.getLogger(__name__)
 
 

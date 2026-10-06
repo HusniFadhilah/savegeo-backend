@@ -16,12 +16,47 @@ from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator
+from sqlalchemy.orm import Session
 
 from app.core.security import get_current_app_viewer, require_permission
+from app.core.viewer_features import (
+    FEATURE_ACCESS_DENIED_DETAIL,
+    ensure_feature_access,
+    feature_code_for_module,
+    require_any_feature,
+)
+from app.db.models.admin_user import AdminUser
+from app.db.models.user import User
+from app.db.session import get_db
 from app.core.temporal import format_rfc3339, utc_now
 from app.schemas.metadata import DatasetMetadata
 
-router = APIRouter(prefix="/geospatial", tags=["geospatial"])
+router = APIRouter(
+    prefix="/geospatial",
+    tags=["geospatial"],
+    dependencies=[Depends(require_any_feature())],
+)
+
+def _ensure_dataset_feature_access(
+    principal: AdminUser | User,
+    module: str | None,
+    db: Session,
+) -> str:
+    code = feature_code_for_module(module)
+    if code is None:
+        raise HTTPException(status_code=403, detail=FEATURE_ACCESS_DENIED_DETAIL)
+    ensure_feature_access(principal, code, db)
+    return code
+
+
+def _dataset_feature_allowed(principal: AdminUser | User, module: str | None, db: Session) -> bool:
+    try:
+        _ensure_dataset_feature_access(principal, module, db)
+        return True
+    except HTTPException as exc:
+        if exc.status_code == 403:
+            return False
+        raise
 
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _URL = re.compile(r"^https?://", re.IGNORECASE)
@@ -98,14 +133,15 @@ class DatasetReference(BaseModel):
 
 
 class ExportRequest(BaseModel):
-    datasetId: str | None = None
-    operation: str = Field(default="export", max_length=64)
+    datasetId: str = Field(min_length=1, max_length=128)
+    operation: Literal["export"] = "export"
     runReference: str | None = Field(default=None, max_length=128)
     estimatedSizeBytes: int | None = Field(default=None, ge=0)
     mode: Literal["auto", "server"] = "auto"
 
 
 class QueryRequest(BaseModel):
+    datasetId: str = Field(min_length=1, max_length=128)
     sql: str = Field(min_length=1, max_length=50_000)
     params: list[Any] = Field(default_factory=list, max_length=100)
     limit: int = Field(default=1000, ge=1, le=10_000)
@@ -120,13 +156,14 @@ def _safe_sql(sql: str, limit: int) -> str:
     return f"{normalized} LIMIT {limit}"
 
 
-def _new_job(kind: str, request: ExportRequest | QueryRequest) -> dict[str, Any]:
+def _new_job(kind: str, request: ExportRequest | QueryRequest, feature_code: str) -> dict[str, Any]:
     job_id = str(uuid.uuid4())
     job = {
         "id": job_id,
         "kind": kind,
         "status": "queued",
         "mode": "server",
+        "featureCode": feature_code,
         "createdAt": format_rfc3339(utc_now()),
         "request": request.model_dump(exclude_none=True),
     }
@@ -139,11 +176,15 @@ def list_cloud_datasets(
     module: str | None = None,
     format: str | None = Query(default=None),
     search: str | None = None,
-    _viewer: object = Depends(get_current_app_viewer),
+    viewer: AdminUser | User = Depends(get_current_app_viewer),
+    db: Session = Depends(get_db),
 ):
     values = list(_catalog.values())
-    if module:
+    if module is not None:
+        _ensure_dataset_feature_access(viewer, module, db)
         values = [item for item in values if item.get("module") == module]
+    else:
+        values = [item for item in values if _dataset_feature_allowed(viewer, item.get("module"), db)]
     if format:
         values = [item for item in values if item.get("format") == format]
     if search:
@@ -157,10 +198,15 @@ def list_cloud_datasets(
 
 
 @router.get("/datasets/{dataset_id}")
-def get_cloud_dataset(dataset_id: str, _viewer: object = Depends(get_current_app_viewer)):
+def get_cloud_dataset(
+    dataset_id: str,
+    viewer: AdminUser | User = Depends(get_current_app_viewer),
+    db: Session = Depends(get_db),
+):
     dataset = _catalog.get(dataset_id)
     if dataset is None:
         raise HTTPException(status_code=404, detail="Dataset not found")
+    _ensure_dataset_feature_access(viewer, dataset.get("module"), db)
     return dataset
 
 
@@ -182,45 +228,84 @@ def delete_cloud_dataset(dataset_id: str, _admin: object = Depends(require_permi
 
 
 @router.get("/datasets/{dataset_id}/access")
-def dataset_access(dataset_id: str, _viewer: object = Depends(get_current_app_viewer)):
+def dataset_access(
+    dataset_id: str,
+    viewer: AdminUser | User = Depends(get_current_app_viewer),
+    db: Session = Depends(get_db),
+):
     dataset = _catalog.get(dataset_id)
     if dataset is None:
         raise HTTPException(status_code=404, detail="Dataset not found")
+    _ensure_dataset_feature_access(viewer, dataset.get("module"), db)
     if dataset.get("access") != "public":
         raise HTTPException(status_code=501, detail="Signed access provider is not configured")
     return {"datasetId": dataset_id, "url": dataset.get("url") or dataset.get("assetUrl"), "expiresAt": None}
 
 
 @router.post("/export/cog", status_code=status.HTTP_202_ACCEPTED)
-def export_cog(request: ExportRequest, _viewer: object = Depends(get_current_app_viewer)):
-    return _new_job("cog", request)
+def export_cog(
+    request: ExportRequest,
+    viewer: AdminUser | User = Depends(get_current_app_viewer),
+    db: Session = Depends(get_db),
+):
+    dataset = _catalog.get(request.datasetId)
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    feature_code = _ensure_dataset_feature_access(viewer, dataset.get("module"), db)
+    return _new_job("cog", request, feature_code)
 
 
 @router.post("/export/geoparquet", status_code=status.HTTP_202_ACCEPTED)
-def export_geoparquet(request: ExportRequest, _viewer: object = Depends(get_current_app_viewer)):
-    return _new_job("geoparquet", request)
+def export_geoparquet(
+    request: ExportRequest,
+    viewer: AdminUser | User = Depends(get_current_app_viewer),
+    db: Session = Depends(get_db),
+):
+    dataset = _catalog.get(request.datasetId)
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    feature_code = _ensure_dataset_feature_access(viewer, dataset.get("module"), db)
+    return _new_job("geoparquet", request, feature_code)
 
 
 @router.post("/query", status_code=status.HTTP_202_ACCEPTED)
-def geospatial_query(request: QueryRequest, _viewer: object = Depends(get_current_app_viewer)):
+def geospatial_query(
+    request: QueryRequest,
+    viewer: AdminUser | User = Depends(get_current_app_viewer),
+    db: Session = Depends(get_db),
+):
+    dataset = _catalog.get(request.datasetId)
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    feature_code = _ensure_dataset_feature_access(viewer, dataset.get("module"), db)
     safe_sql = _safe_sql(request.sql, request.limit)
-    job = _new_job("query", request)
+    job = _new_job("query", request, feature_code)
     job["request"]["sql"] = safe_sql
     return job
 
 
 @router.get("/jobs/{job_id}")
-def get_geospatial_job(job_id: str, _viewer: object = Depends(get_current_app_viewer)):
+def get_geospatial_job(
+    job_id: str,
+    viewer: AdminUser | User = Depends(get_current_app_viewer),
+    db: Session = Depends(get_db),
+):
     job = _jobs.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
+    ensure_feature_access(viewer, job.get("featureCode"), db)
     return job
 
 
 @router.post("/jobs/{job_id}/cancel")
-def cancel_geospatial_job(job_id: str, _viewer: object = Depends(get_current_app_viewer)):
+def cancel_geospatial_job(
+    job_id: str,
+    viewer: AdminUser | User = Depends(get_current_app_viewer),
+    db: Session = Depends(get_db),
+):
     job = _jobs.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
+    ensure_feature_access(viewer, job.get("featureCode"), db)
     job["status"] = "cancelled"
     return job

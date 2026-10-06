@@ -10,6 +10,14 @@ from app.db.models.role import Permission, Role
 from app.db.session import SessionLocal
 
 PERMISSIONS = [
+    ("viewer_features.manage", "Manage Viewer feature access"),
+    ("app.feature.carbon_stock", "Viewer: estimasi stok karbon"),
+    ("app.feature.land_cover", "Viewer: Land Cover / LULC"),
+    ("app.feature.vegetation_indices", "Viewer: indeks vegetasi"),
+    ("app.feature.land_cover_change", "Viewer: perubahan tutupan lahan"),
+    ("app.feature.satellite_exploration", "Viewer: eksplorasi scene satelit"),
+    ("app.feature.disaster_mapping", "Viewer: pemetaan bencana yang dipublikasikan"),
+    ("app.feature.crop_monitoring", "Viewer: Crop Monitoring"),
     ("config.read", "View system configuration"),
     ("config.write", "Update system configuration"),
     ("model.read", "View uploaded models"),
@@ -51,10 +59,19 @@ VIEWER_PERMISSIONS = [
     code for code, _ in PERMISSIONS
     if code.endswith(".read") and code not in {"credential.read", "secret.read"}
 ]
+VIEWER_FEATURE_PERMISSIONS = [
+    "app.feature.carbon_stock",
+    "app.feature.land_cover",
+    "app.feature.vegetation_indices",
+    "app.feature.land_cover_change",
+    "app.feature.satellite_exploration",
+    "app.feature.disaster_mapping",
+    "app.feature.crop_monitoring",
+]
 
 ROLES = [
     ("admin", "All non-secret permissions", True, ADMIN_PERMISSIONS),
-    ("viewer", "Read-only access", False, VIEWER_PERMISSIONS),
+    ("viewer", "Akses fitur aplikasi yang ditentukan administrator", False, VIEWER_PERMISSIONS + VIEWER_FEATURE_PERMISSIONS),
     (
         "geospatial_expert",
         "Ahli geospasial: batas perusahaan, pemetaan bencana, model ML, dan data geospasial",
@@ -104,7 +121,21 @@ def seed_rbac() -> None:
                 role = Role(name=name, description=description, is_default=is_default)
                 db.add(role)
                 db.flush()
-            role.permissions = [perm_by_code[c] for c in perm_codes]
+            if name == "viewer":
+                # Reconcile historic read-only grants without touching an
+                # administrator's feature selection, including an intentionally
+                # empty selection. New roles receive the seven safe defaults.
+                assigned = [perm_by_code[c] for c in VIEWER_PERMISSIONS]
+                if role.feature_permissions_configured:
+                    configured_features = [p for p in role.permissions if p.code in VIEWER_FEATURE_PERMISSIONS]
+                    role.permissions = assigned + configured_features
+                else:
+                    role.permissions = assigned + [perm_by_code[c] for c in VIEWER_FEATURE_PERMISSIONS]
+                    role.feature_permissions_configured = True
+            else:
+                # Only the built-in Admin role receives this narrow Viewer
+                # feature-management grant. Full Access remains role_id NULL.
+                role.permissions = [perm_by_code[c] for c in perm_codes]
 
         db.commit()
         print(f"Seeded {len(PERMISSIONS)} permissions and {len(ROLES)} roles.")

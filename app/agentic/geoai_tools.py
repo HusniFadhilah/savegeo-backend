@@ -159,6 +159,49 @@ GEOAI_TOOLS: list[dict[str, Any]] = [
 ]
 
 
+DIRECT_REFERENCE_FEATURES = {
+    "carbon": "app.feature.carbon_stock",
+    "landcover": "app.feature.land_cover",
+}
+DIRECT_REFERENCE_CONTEXT_FIELDS = frozenset({
+    "analysis_kind",
+    "dataset",
+    "dataset_name",
+    "year",
+    "requested_year",
+    "effective_year",
+    "available_years",
+    "resolution",
+    "unit",
+    "target_pool",
+    "provider_type",
+    "date_range",
+    "direct",
+    "statistics_available",
+    "load_note",
+})
+
+
+def filter_direct_reference_layers(layers: Any, allowed_features: set[str]) -> list[dict[str, Any]]:
+    """Return only attributed reference layers allowed for this viewer.
+
+    Unknown/legacy layer records fail closed because the old combined result
+    shape did not say whether a row came from carbon or land-cover analysis.
+    Internal tile URLs and visualization parameters are not needed by the LLM.
+    """
+    if not isinstance(layers, list):
+        return []
+    visible: list[dict[str, Any]] = []
+    for layer in layers:
+        if not isinstance(layer, dict):
+            continue
+        feature = DIRECT_REFERENCE_FEATURES.get(layer.get("analysis_kind"))
+        if feature is None or feature not in allowed_features:
+            continue
+        visible.append({key: value for key, value in layer.items() if key in DIRECT_REFERENCE_CONTEXT_FIELDS})
+    return visible
+
+
 # ══════════════════════════════════════════════════════════════════
 # Tool implementations
 # ══════════════════════════════════════════════════════════════════
@@ -180,6 +223,44 @@ def get_current_context(tool_ctx: dict) -> dict[str, Any]:
     ui = page_state.get("ui") or {}
     scenes = ui.get("scenes") or {}
     results = ctx.get("results") or {}
+    available_results = {
+        "carbon": bool(results.get("carbon")),
+        "vegetation": bool(results.get("vegetation")),
+        "landcover": bool(results.get("landcover")),
+        "landcover_transition": bool(results.get("landcover_transition")),
+        "crop": bool(results.get("crop")),
+        "disaster": bool(results.get("disaster")),
+    }
+    allowed = tool_ctx.get("allowed_features")
+    if allowed is not None:
+        result_features = {
+            "carbon": "app.feature.carbon_stock",
+            "direct": "app.feature.carbon_stock",
+            "vegetation": "app.feature.vegetation_indices",
+            "landcover": "app.feature.land_cover",
+            "landcover_transition": "app.feature.land_cover_change",
+            "crop": "app.feature.crop_monitoring",
+            "disaster": "app.feature.disaster_mapping",
+        }
+        available_results = {
+            name: present for name, present in available_results.items()
+            if result_features[name] in allowed
+        }
+        if filter_direct_reference_layers(results.get("direct"), allowed):
+            available_results["direct"] = True
+    else:
+        available_results["direct"] = bool(results.get("direct"))
+    scene_search = {
+        "provider": scenes.get("provider"),
+        "scene_count": scenes.get("sceneCount"),
+        "truncated": scenes.get("truncated"),
+        "page": scenes.get("page"),
+        "page_count": scenes.get("pageCount"),
+        "selected_scene_id": scenes.get("selectedSceneId"),
+        "scene_visible": scenes.get("sceneVisible"),
+    }
+    if allowed is not None and "app.feature.satellite_exploration" not in allowed:
+        scene_search = {}
     return {
         "aoi_present": bool(ctx.get("aoi")),
         "aoi_name": ctx.get("aoi_name"),
@@ -190,25 +271,9 @@ def get_current_context(tool_ctx: dict) -> dict[str, Any]:
         "active_module": ctx.get("current_module"),
         "active_layer": ctx.get("active_layer"),
         "route": page_state.get("route"),
-        "scene_search": {
-            "provider": scenes.get("provider"),
-            "scene_count": scenes.get("sceneCount"),
-            "truncated": scenes.get("truncated"),
-            "page": scenes.get("page"),
-            "page_count": scenes.get("pageCount"),
-            "selected_scene_id": scenes.get("selectedSceneId"),
-            "scene_visible": scenes.get("sceneVisible"),
-        },
+        "scene_search": scene_search,
         "selected_feature_present": bool(ctx.get("selected_feature")),
-        "available_results": {
-            "carbon": bool(results.get("carbon")),
-            "vegetation": bool(results.get("vegetation")),
-            "landcover": bool(results.get("landcover")),
-            "landcover_transition": bool(results.get("landcover_transition")),
-            "crop": bool(results.get("crop")),
-            "disaster": bool(results.get("disaster")),
-            "direct": bool(results.get("direct")),
-        },
+        "available_results": available_results,
     }
 
 
@@ -227,8 +292,8 @@ def get_analysis_results(tool_ctx: dict, kind: str = "all") -> dict[str, Any]:
             (val.get("carbon_reference") or {}).get("year") or
             (val.get("model_info") or {}).get("reference_dataset_year")
         ) if reference_only else ctx.get("period") or ctx.get("selected_year")
-        if k == "direct" and isinstance(val, list) and val:
-            period = val[0].get("effective_year") if isinstance(val[0], dict) else None
+        if k == "direct" and isinstance(val, list):
+            period = _direct_reference_period(val)
         return {
             "available": True,
             "data": val,
@@ -261,6 +326,16 @@ def _dataset_label(kind: str, val: Any) -> str | None:
     if kind == "landcover_transition":
         return val.get("dataset") or val.get("dataset_name")
     return None
+
+
+def _direct_reference_period(layers: list[dict[str, Any]]) -> int | str | None:
+    years = [
+        layer.get("effective_year") or layer.get("year")
+        for layer in layers
+        if isinstance(layer, dict) and (layer.get("effective_year") or layer.get("year")) is not None
+    ]
+    distinct = {str(year) for year in years}
+    return years[0] if len(distinct) == 1 else None
 
 
 def query_vegetation_index(tool_ctx: dict, index: str, operator: str | None = None, threshold: float | None = None) -> dict[str, Any]:
@@ -511,6 +586,76 @@ def execute_geoai_tool(name: str, args: dict, tool_ctx: dict) -> dict[str, Any]:
     fn = TOOL_REGISTRY.get(name)
     if not fn:
         return {"error": f"Tool '{name}' is not whitelisted."}
+    allowed = tool_ctx.get("allowed_features")
+    if allowed is not None:
+        required: str | None = {
+            "query_vegetation_index": "app.feature.vegetation_indices",
+            "query_landcover": "app.feature.land_cover",
+            "query_carbon": "app.feature.carbon_stock",
+        }.get(name)
+        if name == "find_hotspots":
+            metric = str((args or {}).get("metric") or "")
+            required = (
+                "app.feature.vegetation_indices" if metric == "vegetation_change"
+                else "app.feature.land_cover_change" if metric == "landcover_transition"
+                else "invalid"
+            )
+        if name == "compare_periods":
+            metric = str((args or {}).get("metric") or "")
+            required = (
+                "app.feature.vegetation_indices" if metric == "vegetation"
+                else "app.feature.land_cover_change" if metric == "landcover"
+                else "invalid"
+            )
+        if name == "get_analysis_results":
+            kind = str((args or {}).get("kind") or "all")
+            kind_features = {
+                "carbon": "app.feature.carbon_stock",
+                "vegetation": "app.feature.vegetation_indices",
+                "landcover": "app.feature.land_cover",
+                "landcover_transition": "app.feature.land_cover_change",
+                "crop": "app.feature.crop_monitoring",
+                "disaster": "app.feature.disaster_mapping",
+            }
+            if kind == "all":
+                safe_args = dict(args or {})
+                result = fn(tool_ctx, **safe_args)
+                safe_results = {
+                    key: value for key, value in result.items()
+                    if key in kind_features and kind_features[key] in allowed
+                }
+                direct_result = result.get("direct")
+                direct_layers = filter_direct_reference_layers(
+                    direct_result.get("data") if isinstance(direct_result, dict) else None,
+                    allowed,
+                )
+                if direct_layers and isinstance(direct_result, dict):
+                    safe_direct = {**direct_result, "data": direct_layers}
+                    safe_direct["source"] = {
+                        **(direct_result.get("source") or {}),
+                        "dataset": _dataset_label("direct", direct_layers),
+                        "period": _direct_reference_period(direct_layers),
+                    }
+                    safe_results["direct"] = safe_direct
+                return safe_results
+            if kind == "direct":
+                direct_result = fn(tool_ctx, **(args or {}))
+                direct_layers = filter_direct_reference_layers(
+                    direct_result.get("data") if isinstance(direct_result, dict) else None,
+                    allowed,
+                )
+                if not direct_layers:
+                    return {"error": "Akses ke data fitur ini tidak diizinkan."}
+                safe_direct = {**direct_result, "data": direct_layers}
+                safe_direct["source"] = {
+                    **(direct_result.get("source") or {}),
+                    "dataset": _dataset_label("direct", direct_layers),
+                    "period": _direct_reference_period(direct_layers),
+                }
+                return safe_direct
+            required = kind_features.get(kind, "invalid")
+        if required and required not in allowed:
+            return {"error": "Akses ke data fitur ini tidak diizinkan."}
     try:
         return fn(tool_ctx, **(args or {}))
     except TypeError as exc:

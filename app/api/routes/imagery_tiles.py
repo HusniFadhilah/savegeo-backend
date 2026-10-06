@@ -25,7 +25,12 @@ from app.db.session import get_db
 from app.repositories import disaster_repo
 from app.services import local_imagery_tile_service
 
-router = APIRouter(tags=["imagery-tiles"])
+from app.core.viewer_features import require_feature
+
+router = APIRouter(
+    tags=["imagery-tiles"],
+    dependencies=[Depends(require_feature("app.feature.disaster_mapping"))],
+)
 logger = logging.getLogger(__name__)
 
 _CACHE_CONTROL = "public, max-age=86400"

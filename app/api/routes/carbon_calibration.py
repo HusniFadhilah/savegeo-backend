@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.security import require_permission, get_current_app_viewer
+from app.core.viewer_features import require_feature
 from app.db.models.carbon_calibration import (
     CarbonCalibrationDataset,
     CarbonCalibrationFile,
@@ -1102,7 +1103,11 @@ def get_model_validation(model_id: int, db: Session = Depends(get_db)):
     }
 
 
-public_router = APIRouter(prefix="/carbon", tags=["carbon-calibration"])
+public_router = APIRouter(
+    prefix="/carbon",
+    tags=["carbon-calibration"],
+    dependencies=[Depends(require_feature("app.feature.carbon_stock"))],
+)
 
 
 @public_router.get("/calibration-models")

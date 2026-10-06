@@ -2381,7 +2381,12 @@ _GEOAI_UI_TARGETS = {
 }
 
 
-def validate_geoai_actions(actions: object, page_state: dict, context: dict) -> tuple[list[dict], list[str]]:
+def validate_geoai_actions(
+    actions: object,
+    page_state: dict,
+    context: dict,
+    allowed_features: set[str] | None = None,
+) -> tuple[list[dict], list[str]]:
     """Fail closed on AI-authored UI commands before they reach the browser."""
     if not isinstance(actions, list):
         return [], ["Format actions dari AI tidak valid."]
@@ -2392,6 +2397,47 @@ def validate_geoai_actions(actions: object, page_state: dict, context: dict) -> 
             warnings.append("Satu action AI bukan objek JSON dan diabaikan.")
             continue
         name, target = action.get("action"), action.get("target")
+        params = action.get("parameters") or {}
+        value = params.get("value") if isinstance(params, dict) else None
+        if allowed_features is not None:
+            required: set[str] = set()
+            if name == "open_module":
+                module_features = {
+                    "carbon": {"app.feature.carbon_stock", "app.feature.land_cover", "app.feature.vegetation_indices"},
+                    "lc-change": {"app.feature.land_cover_change"},
+                    "imagery": {"app.feature.satellite_exploration"},
+                    "disaster": {"app.feature.disaster_mapping"},
+                    "crop-monitoring": {"app.feature.crop_monitoring"},
+                }
+                if value in module_features:
+                    if not module_features[value].intersection(allowed_features):
+                        warnings.append("Modul tidak tersedia untuk akun Viewer ini.")
+                        continue
+            elif name == "set_analysis_type":
+                type_features = {
+                    "carbon": {"app.feature.carbon_stock"},
+                    "landcover": {"app.feature.land_cover"},
+                    "vegetation": {"app.feature.vegetation_indices"},
+                    "combined": {"app.feature.carbon_stock", "app.feature.land_cover", "app.feature.vegetation_indices"},
+                }
+                required = type_features.get(value, {"invalid"})
+            elif target == "lc_change.analysis" or str(target).startswith("lc_change."):
+                required = {"app.feature.land_cover_change"}
+            elif target == "crop.analysis" or str(target).startswith("crop."):
+                required = {"app.feature.crop_monitoring"}
+            elif target == "disaster.dem" or str(target).startswith("disaster."):
+                required = {"app.feature.disaster_mapping"}
+            elif str(target).startswith("scenes.") or name in {"set_provider", "search_scenes", "show_scene", "clear_scenes"}:
+                required = {"app.feature.satellite_exploration"}
+            elif str(target).startswith("carbon.vegetation"):
+                required = {"app.feature.vegetation_indices"}
+            elif str(target).startswith("carbon.landcover"):
+                required = {"app.feature.land_cover"}
+            elif str(target).startswith("carbon."):
+                required = {"app.feature.carbon_stock"}
+            if required and not required.issubset(allowed_features):
+                warnings.append("Perintah tidak diizinkan oleh pengaturan fitur Viewer.")
+                continue
         if not isinstance(name, str) or not isinstance(target, str) or name not in _GEOAI_UI_TARGETS or target not in _GEOAI_UI_TARGETS[name]:
             # Existing grounded map/result actions remain available, with their
             # own fixed dispatch table on the client.
@@ -2399,8 +2445,22 @@ def validate_geoai_actions(actions: object, page_state: dict, context: dict) -> 
             if legacy_type == "ask_user" and isinstance(action.get("question"), str):
                 valid.append({"type": "ask_user", "question": action["question"][:500]})
             elif legacy_type == "open_analysis_result" and isinstance(action.get("kind"), str) and action["kind"] in {"carbon", "vegetation", "landcover", "landcover_transition"}:
+                kind_features = {
+                    "carbon": "app.feature.carbon_stock",
+                    "vegetation": "app.feature.vegetation_indices",
+                    "landcover": "app.feature.land_cover",
+                    "landcover_transition": "app.feature.land_cover_change",
+                }
+                if allowed_features is not None and kind_features[action["kind"]] not in allowed_features:
+                    warnings.append("Hasil analisis tidak diizinkan oleh pengaturan fitur Viewer.")
+                    continue
                 valid.append({"type": legacy_type, "kind": action["kind"]})
             elif legacy_type in {"highlight_hotspot", "show_before_after"} and isinstance(action.get("hotspot_id"), str):
+                hotspot_features = context.get("_server_hotspot_features") if isinstance(context, dict) else None
+                required_feature = hotspot_features.get(action["hotspot_id"]) if isinstance(hotspot_features, dict) else None
+                if allowed_features is not None and required_feature not in allowed_features:
+                    warnings.append("Hotspot tidak tersedia untuk fitur yang diizinkan.")
+                    continue
                 valid.append({"type": legacy_type, "hotspot_id": action["hotspot_id"][:80]})
             elif legacy_type == "zoom_to_location" and all(type(action.get(k)) in (int, float) for k in ("lat", "lng")) and -90 <= action["lat"] <= 90 and -180 <= action["lng"] <= 180 and type(action.get("zoom", 13)) in (int, float) and 0 <= action.get("zoom", 13) <= 24:
                 valid.append({"type": legacy_type, "lat": action["lat"], "lng": action["lng"], "zoom": action.get("zoom", 13)})
@@ -2409,7 +2469,6 @@ def validate_geoai_actions(actions: object, page_state: dict, context: dict) -> 
             else:
                 warnings.append(f"Action AI tidak didukung: {name or action.get('type') or 'unknown'}.")
             continue
-        params = action.get("parameters") or {}
         if not isinstance(params, dict):
             warnings.append(f"Parameter {name} tidak valid.")
             continue
@@ -2553,7 +2612,7 @@ def validate_geoai_actions(actions: object, page_state: dict, context: dict) -> 
 
 
 def geoai_with_ai(message: str, context: dict, db, history: list[dict] | None = None,
-                  page_state: dict | None = None) -> dict:
+                  page_state: dict | None = None, allowed_features: set[str] | None = None) -> dict:
     """Tool-calling SaveGeo Assistant loop (P0). See GEOAI_SYSTEM_PROMPT and
     app/agentic/geoai_tools.py for the grounding/whitelist contract.
 
@@ -2569,7 +2628,13 @@ def geoai_with_ai(message: str, context: dict, db, history: list[dict] | None = 
     provider = (cfg["provider"] or "anthropic").lower()
     model = cfg["model"] or _PROVIDER_DEFAULT_MODELS.get(provider, "")
 
-    tool_ctx: dict = {"context": context or {}, "page_state": page_state or {}, "db": db, "last_hotspots": {}}
+    tool_ctx: dict = {
+        "context": context or {},
+        "page_state": page_state or {},
+        "db": db,
+        "last_hotspots": {},
+        "allowed_features": allowed_features,
+    }
     user_input = _json.dumps({"message": message, "context": context or {},
                               "page_state": page_state or {}}, ensure_ascii=False, default=str)
 
@@ -2628,8 +2693,18 @@ def geoai_with_ai(message: str, context: dict, db, history: list[dict] | None = 
         result.setdefault("warnings", [])
         result.setdefault("actions", [])
         result.setdefault("cards", [])
+        hotspot_feature_codes = {
+            "vegetation_change": "app.feature.vegetation_indices",
+            "landcover_transition": "app.feature.land_cover_change",
+        }
+        validation_context = dict(context or {})
+        validation_context["_server_hotspot_features"] = {
+            hotspot_id: hotspot_feature_codes.get(hotspot.get("metric"))
+            for hotspot_id, hotspot in tool_ctx["last_hotspots"].items()
+            if isinstance(hotspot, dict) and hotspot.get("metric") in hotspot_feature_codes
+        }
         result["actions"], action_warnings = validate_geoai_actions(
-            result.get("actions"), page_state or {}, context or {}
+            result.get("actions"), page_state or {}, validation_context, allowed_features
         )
         warnings = result.get("warnings")
         result["warnings"] = (warnings if isinstance(warnings, list) else []) + action_warnings

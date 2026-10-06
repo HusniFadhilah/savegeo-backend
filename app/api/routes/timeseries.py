@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_ee
-from app.core.security import get_current_app_viewer
+from app.core.viewer_features import require_feature
 from app.db.session import get_db
 from app.services import vegetation_service
 from app.services.gee_common import AnalysisError, public_analysis_error
@@ -17,7 +17,7 @@ router = APIRouter(tags=["timeseries"])
 logger = logging.getLogger(__name__)
 
 
-@router.post("/timeseries", dependencies=[Depends(get_current_app_viewer), Depends(require_ee)])
+@router.post("/timeseries", dependencies=[Depends(require_feature("app.feature.vegetation_indices")), Depends(require_ee)])
 async def analyze_timeseries(request: Request, db: Session = Depends(get_db)):
     data = await request.json()
     try:

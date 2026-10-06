@@ -163,6 +163,7 @@ class FireRouteContractTests(unittest.TestCase):
 
     def test_partial_source_response_does_not_require_ee(self):
         self.app.dependency_overrides[get_current_disaster_viewer] = lambda: object()
+        self.app.dependency_overrides[router.dependencies[0].dependency] = lambda: None
         with (
             patch.object(
                 fire, "_fetch_bmkg", return_value={"id": "bmkg", "status": "ok", "features": [point()]}
@@ -186,6 +187,7 @@ class FireRouteContractTests(unittest.TestCase):
 
     def test_invalid_request_returns_400(self):
         self.app.dependency_overrides[get_current_disaster_viewer] = lambda: object()
+        self.app.dependency_overrides[router.dependencies[0].dependency] = lambda: None
         for endpoint in ("fire-multi-source", "fire-big-boundaries", "fire-import"):
             self.assertEqual(self.client.post(f"/api/disaster/{endpoint}", json=[]).status_code, 400)
 

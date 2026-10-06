@@ -38,7 +38,7 @@ from app.core.security import (
 from app.db.models.admin_user import AdminUser
 from app.db.models.company_boundary import CompanyBoundary
 from app.db.models.gee_credential import GEECredential
-from app.db.models.role import Role
+from app.db.models.role import Permission, Role
 from app.db.models.satellite_provider_entry import SatelliteProviderEntry
 from app.db.models.system_config import SystemConfig
 from app.db.models.uploaded_model import UploadedModel
@@ -58,6 +58,12 @@ from app.schemas.admin import (
     SatelliteProviderUpdateRequest,
 )
 from app.services import audit_service, config_service, gee_service, storage_service
+from app.core.viewer_features import (
+    FEATURE_ACCESS_DENIED_DETAIL,
+    VIEWER_FEATURES,
+    VIEWER_FEATURE_CODES,
+    VIEWER_FEATURES_MANAGE_PERMISSION,
+)
 from app.services.arcgis_service import configure_arcgis_from_db
 from app.services.datatable_service import datatables_response, is_datatables_request
 from app.services.email_service import EmailDeliveryError, send_password_reset_email
@@ -629,6 +635,67 @@ def admin_import_legacy_models(admin: AdminUser = Depends(require_permission("mo
 def list_roles(admin: AdminUser = Depends(require_permission("users.read")), db: Session = Depends(get_db)):
     roles = db.query(Role).order_by(Role.name).all()
     return {"roles": [r.to_dict() for r in roles]}
+
+
+@router.get("/roles/viewer-features")
+def get_viewer_feature_settings(
+    admin: AdminUser = Depends(require_permission(VIEWER_FEATURES_MANAGE_PERMISSION)),
+    db: Session = Depends(get_db),
+):
+    role = db.query(Role).filter(Role.name.ilike("viewer")).first()
+    if role is None:
+        raise HTTPException(status_code=404, detail="Viewer role is unavailable")
+    enabled = {permission.code for permission in role.permissions if permission.code in VIEWER_FEATURE_CODES}
+    return {
+        "configured": role.feature_permissions_configured,
+        "features": [
+            {"code": code, "name": name, "description": description, "enabled": code in enabled}
+            for code, name, description in VIEWER_FEATURES
+        ],
+    }
+
+
+@router.put("/roles/viewer-features")
+def update_viewer_feature_settings(
+    payload: dict,
+    admin: AdminUser = Depends(require_permission(VIEWER_FEATURES_MANAGE_PERMISSION)),
+    db: Session = Depends(get_db),
+):
+    requested = payload.get("enabled_features")
+    if not isinstance(requested, list) or any(not isinstance(code, str) for code in requested):
+        raise HTTPException(status_code=422, detail="enabled_features must be a list of feature permission codes")
+    enabled = set(requested)
+    if len(enabled) != len(requested) or not enabled.issubset(VIEWER_FEATURE_CODES):
+        raise HTTPException(status_code=422, detail="One or more feature permission codes are invalid")
+
+    role = db.query(Role).filter(Role.name.ilike("viewer")).with_for_update().first()
+    if role is None:
+        raise HTTPException(status_code=404, detail="Viewer role is unavailable")
+    permission_rows = {
+        permission.code: permission
+        for permission in db.query(Permission).filter(Permission.code.in_(VIEWER_FEATURE_CODES)).all()
+    }
+    if set(permission_rows) != VIEWER_FEATURE_CODES:
+        raise HTTPException(status_code=503, detail=FEATURE_ACCESS_DENIED_DETAIL)
+    preserved = [permission for permission in role.permissions if permission.code not in VIEWER_FEATURE_CODES]
+    role.permissions = preserved + [permission_rows[code] for code, _, _ in VIEWER_FEATURES if code in enabled]
+    role.feature_permissions_configured = True
+    db.commit()
+    audit_service.log_audit(
+        db,
+        admin.id,
+        "role.viewer_features.update",
+        "role",
+        str(role.id),
+        detail={"enabled_features": sorted(enabled)},
+    )
+    return {
+        "configured": True,
+        "features": [
+            {"code": code, "name": name, "description": description, "enabled": code in enabled}
+            for code, name, description in VIEWER_FEATURES
+        ],
+    }
 
 
 @router.get("/users")

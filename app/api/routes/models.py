@@ -5,10 +5,14 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.db.models.uploaded_model import UploadedModel
+from app.core.viewer_features import require_feature
 from app.db.session import get_db
 from app.registries.model_compatibility import get_compatible_datasets
 
-router = APIRouter(tags=["models"])
+router = APIRouter(
+    tags=["models"],
+    dependencies=[Depends(require_feature("app.feature.carbon_stock"))],
+)
 
 
 @router.get("/models/list")

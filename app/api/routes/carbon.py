@@ -13,11 +13,12 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import require_ee
 from app.core.security import get_current_admin_panel, get_current_app_viewer
+from app.core.viewer_features import require_feature
 from app.db.session import get_db
 from app.services import carbon_service
 from app.services.gee_common import AnalysisError, public_analysis_error
 
-router = APIRouter(tags=["carbon"])
+router = APIRouter(tags=["carbon"], dependencies=[Depends(require_feature("app.feature.carbon_stock"))])
 logger = logging.getLogger(__name__)
 UPSTREAM_CONNECTION_ERROR = (
     "Koneksi ke layanan data eksternal terputus sebelum respons diterima. "

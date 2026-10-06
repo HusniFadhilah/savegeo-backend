@@ -22,6 +22,9 @@ class Role(Base):
     name: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Separates an intentionally empty Viewer feature selection from a role
+    # that has not received its one-time default feature seed yet.
+    feature_permissions_configured: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.UTC))
 
     permissions: Mapped[list[Permission]] = relationship("Permission", secondary=role_permissions, backref="roles")

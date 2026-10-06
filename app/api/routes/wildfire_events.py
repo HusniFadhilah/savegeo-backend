@@ -22,7 +22,13 @@ from app.registries import disaster_model_registry
 from app.repositories import disaster_repo
 from app.services import disaster_capability_service, firms_service, wildfire_hotspot_service, wildfire_region_service
 
-router = APIRouter(prefix="/disasters/wildfires", tags=["wildfires"])
+from app.core.viewer_features import require_feature
+
+router = APIRouter(
+    prefix="/disasters/wildfires",
+    tags=["wildfires"],
+    dependencies=[Depends(require_feature("app.feature.disaster_mapping"))],
+)
 MAX_MAP_FEATURES = 5000
 ADMIN_REGION_LEVELS = {"province", "city", "district", "village"}
 _ADMIN_GEOMETRY_CACHE: dict[tuple[str, str], tuple[float, dict]] = {}

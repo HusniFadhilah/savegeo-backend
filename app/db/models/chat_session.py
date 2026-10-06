@@ -18,6 +18,8 @@ class ChatSession(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     title: Mapped[str] = mapped_column(String(120), default="Percakapan Baru")
     ip_address: Mapped[str | None] = mapped_column(String(45))
+    # Nullable for legacy rows; all new rows are linked to an authenticated viewer.
+    owner_key: Mapped[str | None] = mapped_column(String(80), index=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.UTC))
     updated_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: dt.datetime.now(dt.UTC), onupdate=lambda: dt.datetime.now(dt.UTC)
