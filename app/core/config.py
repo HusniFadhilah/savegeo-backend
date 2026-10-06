@@ -130,6 +130,11 @@ class Settings(BaseSettings):
     nasa_firms_cache_ttl_seconds: int = 900
     nasa_firms_request_timeout_seconds: int = 20
     nasa_firms_max_day_range: int = 7
+    # CAMS credentials are server-only. Data requests remain disabled until
+    # the ADS licence is accepted and a provider ingestion path is validated.
+    cams_ads_api_url: str = "https://ads.atmosphere.copernicus.eu/api"
+    cams_ads_api_key: str = ""
+    cams_ads_terms_accepted: bool = False
     inarisk_wms_url: str = ""
     inarisk_wms_layers: str = ""
     inarisk_tile_url: str = ""

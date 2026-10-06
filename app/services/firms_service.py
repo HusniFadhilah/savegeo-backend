@@ -234,13 +234,15 @@ def _fetch_source_uncached(source: str, bbox: tuple[float, float, float, float],
                 time.sleep(0.2)
                 continue
             break
-        except requests.Timeout as exc:
+        except requests.Timeout:
             if attempt == 0:
                 time.sleep(0.2)
                 continue
-            raise FirmsRequestError("NASA FIRMS melewati batas waktu", 504) from exc
-        except requests.RequestException as exc:
-            raise FirmsRequestError("NASA FIRMS tidak dapat dihubungi", 502) from exc
+            # Requests exceptions include the request URL, which contains the
+            # NASA MAP_KEY. Suppress the cause so logs/tracebacks cannot leak it.
+            raise FirmsRequestError("NASA FIRMS melewati batas waktu", 504) from None
+        except requests.RequestException:
+            raise FirmsRequestError("NASA FIRMS tidak dapat dihubungi", 502) from None
     if response is None:
         raise FirmsRequestError("NASA FIRMS tidak mengembalikan response", 502)
     if response.status_code in {401, 403}:
@@ -254,8 +256,8 @@ def _fetch_source_uncached(source: str, bbox: tuple[float, float, float, float],
         features = normalize_firms_csv(response.text, source, near_real_time=requested_date is None or requested_date >= datetime.now(UTC).date() - timedelta(days=7))
     except FirmsRequestError:
         raise
-    except requests.RequestException as exc:
-        raise FirmsRequestError("NASA FIRMS menolak query", 502) from exc
+    except requests.RequestException:
+        raise FirmsRequestError("NASA FIRMS menolak query", 502) from None
     with _CACHE_LOCK:
         _CACHE[cache_key] = (time.time(), features)
     return [dict(feature) for feature in features], False, False
@@ -475,8 +477,8 @@ def fetch_wms(layer: str, bbox: tuple[float, float, float, float], crs: str, wid
     try:
         response = requests.get(url, params={"BBOX": ",".join(str(value) for value in bbox), "HEIGHT": height, "WIDTH": width, "REQUEST": "GetMap", "SERVICE": "WMS", "VERSION": "1.1.1", "LAYERS": WMS_LAYERS[layer], "SRS": crs, "FORMAT": image_format, "TRANSPARENT": "TRUE"}, timeout=max(1, settings.nasa_firms_request_timeout_seconds))
         response.raise_for_status()
-    except requests.RequestException as exc:
-        raise FirmsRequestError("Layer WMS NASA FIRMS tidak tersedia", 502) from exc
+    except requests.RequestException:
+        raise FirmsRequestError("Layer WMS NASA FIRMS tidak tersedia", 502) from None
     return {"content_type": response.headers.get("content-type", image_format), "content": response.content, "attribution": "Data: NASA FIRMS / NASA EOSDIS LANCE"}
 
 

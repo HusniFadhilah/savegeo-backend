@@ -8,7 +8,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -20,7 +20,13 @@ from app.db.models.wildfire_hotspot import WildfireHotspot
 from app.db.session import get_db
 from app.registries import disaster_model_registry
 from app.repositories import disaster_repo
-from app.services import disaster_capability_service, firms_service, wildfire_hotspot_service, wildfire_region_service
+from app.services import (
+    cams_emissions_service,
+    disaster_capability_service,
+    firms_service,
+    wildfire_hotspot_service,
+    wildfire_region_service,
+)
 
 from app.core.viewer_features import require_feature
 
@@ -586,3 +592,49 @@ def get_wildfire_burned_area(
         "unit": "ha",
         "note": "Tidak ada produk luas terbakar yang terpasang untuk event ini.",
     }
+
+
+@router.get("/events/{slug}/emissions/capabilities")
+def get_wildfire_emissions_capabilities(
+    slug: str,
+    response: Response,
+    viewer=Depends(get_current_disaster_viewer),
+    db: Session = Depends(get_db),
+):
+    # Resolve the published event before exposing product status, matching the
+    # existing wildfire API's publication and feature-permission boundary.
+    _event(db, slug)
+    response.headers["Cache-Control"] = "private, no-store"
+    return cams_emissions_service.get_capabilities()
+
+
+@router.get("/events/{slug}/emissions/summary")
+def get_wildfire_emissions_summary(
+    slug: str,
+    response: Response,
+    product: str = Query(...),
+    version: str = Query(...),
+    variable: str = Query(...),
+    valid_at: str = Query(...),
+    viewer=Depends(get_current_disaster_viewer),
+    db: Session = Depends(get_db),
+):
+    _event(db, slug)
+    response.headers["Cache-Control"] = "private, no-store"
+    try:
+        request = cams_emissions_service.validate_request(product, version, variable, valid_at)
+    except cams_emissions_service.CamsRequestError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from None
+    capabilities = cams_emissions_service.get_capabilities()
+    raise HTTPException(
+        status_code=503,
+        headers={"Cache-Control": "private, no-store"},
+        detail={
+            "code": capabilities["blocked_reason"],
+            "message": "Data CAMS belum tersedia untuk ditampilkan. Tidak ada nilai emisi nol yang diasumsikan.",
+            "request": request,
+        },
+    )

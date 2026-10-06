@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import traceback
 from types import SimpleNamespace
 
 import pytest
@@ -146,3 +147,29 @@ def test_get_fires_for_period_filters_sensor_and_confidence(monkeypatch):
 
     assert result["metadata"]["count"] == 1
     assert result["metadata"]["summary"]["high_confidence_hotspots"] == 1
+
+
+@pytest.mark.parametrize("request_kind", ["area", "wms"])
+@pytest.mark.parametrize("exception_type", [firms_service.requests.ConnectionError, firms_service.requests.Timeout])
+def test_upstream_request_error_traceback_never_contains_map_key(monkeypatch, request_kind, exception_type):
+    key = "test-only-secret-map-key"
+    monkeypatch.setattr(firms_service, "get_settings", lambda: settings(key))
+    monkeypatch.setattr(firms_service.time, "sleep", lambda *_: None)
+    firms_service.clear_cache()
+
+    def raise_with_url(url, **kwargs):
+        raise exception_type(f"connection failed: {url}")
+
+    monkeypatch.setattr(firms_service.requests, "get", raise_with_url)
+    with pytest.raises(firms_service.FirmsRequestError) as captured:
+        if request_kind == "area":
+            firms_service._fetch_source_uncached(
+                "VIIRS_NOAA20_NRT", (106, -7, 107, -6), 1, None
+            )
+        else:
+            firms_service.fetch_wms("viirs_24h", (106, -7, 107, -6), "EPSG:4326", 256, 256, "image/png")
+
+    rendered = "".join(traceback.format_exception(captured.type, captured.value, captured.tb))
+    assert key not in str(captured.value)
+    assert key not in rendered
+    assert captured.value.__suppress_context__ is True
