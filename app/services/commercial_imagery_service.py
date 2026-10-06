@@ -13,7 +13,10 @@ from typing import Any
 
 from app.core.config import Settings, get_settings
 
-COMMERCIAL_PROVIDER_KEYS = {"planet_commercial", "vantor_commercial", "iceye_commercial"}
+COMMERCIAL_PROVIDER_KEYS = {
+    "planet_commercial", "vantor_commercial", "iceye_commercial",
+    "airbus_oneatlas", "blacksky_spectra",
+}
 
 _CONFIG = {
     "planet_commercial": {
@@ -49,6 +52,34 @@ def _definition(provider_key: str) -> dict[str, str]:
 
 def configuration(provider_key: str, settings: Settings | None = None) -> dict[str, Any]:
     settings = settings or get_settings()
+    if provider_key == "airbus_oneatlas":
+        credential = str(settings.oneatlas_api_key or "").strip()
+        workspace = str(settings.oneatlas_workspace_id or "").strip()
+        return {
+            "provider_key": provider_key,
+            "label": "Airbus OneAtlas Data",
+            "catalog_url": "https://search.foundation.api.oneatlas.airbus.com/api/v2/opensearch",
+            "credential_configured": bool(credential),
+            "workspace_configured": bool(workspace),
+            "catalog_configured": True,
+            "configured": bool(credential and workspace),
+            "requires_authentication": True,
+        }
+    if provider_key == "blacksky_spectra":
+        documentation = str(settings.blacksky_spectra_api_contract_reference or "").strip()
+        credential = str(settings.blacksky_spectra_credential or "").strip()
+        return {
+            "provider_key": provider_key,
+            "label": "BlackSky Spectra",
+            "catalog_url": "",
+            "credential_configured": bool(credential),
+            "contract_reference_configured": bool(documentation),
+            "catalog_configured": False,
+            # No API endpoint/auth contract is available, so this is never
+            # reported as connected and no network call is enabled.
+            "configured": False,
+            "requires_authentication": True,
+        }
     definition = _definition(provider_key)
     catalog_url = str(getattr(settings, definition["url"], "") or "").strip()
     collection = str(getattr(settings, definition["collection"], "") or "").strip()
@@ -61,7 +92,8 @@ def configuration(provider_key: str, settings: Settings | None = None) -> dict[s
         "collection": collection,
         "credential_configured": bool(credential),
         "catalog_configured": bool(catalog_url),
-        "configured": bool(catalog_url and credential),
+        "collection_configured": bool(collection),
+        "configured": bool(catalog_url and collection and credential),
         "auth_scheme": scheme if scheme in {"bearer", "basic", "none"} else "bearer",
     }
 
@@ -70,17 +102,31 @@ def status(provider_key: str, settings: Settings | None = None) -> dict[str, Any
     config = configuration(provider_key, settings)
     if config["configured"]:
         state = "connected"
-    elif config["catalog_configured"] or config["credential_configured"]:
+    elif (
+        config["catalog_configured"]
+        or config.get("collection_configured")
+        or config["credential_configured"]
+        or config.get("workspace_configured")
+        or config.get("contract_reference_configured")
+    ):
         state = "incomplete_configuration"
     else:
         state = "not_configured"
-    return {
+    result = {
         "provider_key": provider_key,
         "status": state,
         "catalog_configured": config["catalog_configured"],
         "credential_configured": config["credential_configured"],
         "requires_authentication": True,
     }
+    if "workspace_configured" in config:
+        result["workspace_configured"] = config["workspace_configured"]
+    if "collection_configured" in config:
+        result["collection_configured"] = config["collection_configured"]
+    if "contract_reference_configured" in config:
+        result["contract_reference_configured"] = config["contract_reference_configured"]
+        result["connector_available"] = False
+    return result
 
 
 def all_statuses(settings: Settings | None = None) -> dict[str, dict[str, Any]]:
@@ -106,8 +152,15 @@ def request_headers(provider_key: str, settings: Settings | None = None) -> dict
 
 def provider_meta(provider_key: str, settings: Settings | None = None) -> dict[str, Any]:
     config = configuration(provider_key, settings)
-    return {
+    result = {
         "configuration_status": status(provider_key, settings)["status"],
-        "stac_configured": config["catalog_configured"],
+        "stac_configured": bool(config["catalog_configured"] and config.get("collection_configured")) if provider_key in _CONFIG else False,
         "credential_configured": config["credential_configured"],
     }
+    if "collection_configured" in config:
+        result["collection_configured"] = config["collection_configured"]
+    if "workspace_configured" in config:
+        result["workspace_configured"] = config["workspace_configured"]
+    if "contract_reference_configured" in config:
+        result["contract_reference_configured"] = config["contract_reference_configured"]
+    return result

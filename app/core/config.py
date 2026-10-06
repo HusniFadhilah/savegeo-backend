@@ -98,6 +98,16 @@ class Settings(BaseSettings):
     iceye_stac_collection: str = ""
     iceye_api_token: str = ""
     iceye_auth_scheme: str = "bearer"
+    # Airbus OneAtlas Data uses its documented API-key-to-bearer-token flow.
+    # The private workspace id is intentionally required for account-scoped
+    # search; preview rights are checked on each provider result.
+    oneatlas_api_key: str = ""
+    oneatlas_workspace_id: str = ""
+    # BlackSky Spectra remains a visible, blocked catalog entry until SAVEGEO
+    # receives its customer API contract. These placeholders do not activate
+    # a connector or make outbound requests.
+    blacksky_spectra_api_contract_reference: str = ""
+    blacksky_spectra_credential: str = ""
     commercial_imagery_timeout_seconds: int = 30
 
     # --- Chloris carbon stock integration ---

@@ -69,6 +69,7 @@ from app.services.commercial_imagery_service import (
     provider_meta as commercial_provider_meta,
     request_headers as commercial_request_headers,
 )
+from app.services import oneatlas_imagery_service
 from app.services.geo_utils import bbox_and_centroid
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,7 @@ logger = logging.getLogger(__name__)
 # Keep a generous safety ceiling for one browsing response. The UI paginates
 # this collection, so users are no longer forced to stop at 200 scenes.
 _MAX_SCENES = 2000
+_COMMERCIAL_STAC_PROVIDER_KEYS = {"planet_commercial", "vantor_commercial", "iceye_commercial"}
 _SENTINEL2_MOSAIC_PROVIDER_KEYS = {"sentinel2", "sentinel2_l1c"}
 _COMMERCIAL_ITEM_CACHE: dict[tuple[str, str], str] = {}
 _COMMERCIAL_ITEM_CACHE_LOCK = threading.RLock()
@@ -108,17 +110,20 @@ def _store_commercial_item(provider_key: str, item_url: str) -> str:
     public_id = f"commercial:{provider_key}:{token}"
     with _COMMERCIAL_ITEM_CACHE_LOCK:
         _COMMERCIAL_ITEM_CACHE[(provider_key, public_id)] = item_url
+        while len(_COMMERCIAL_ITEM_CACHE) > 10_000:
+            _COMMERCIAL_ITEM_CACHE.pop(next(iter(_COMMERCIAL_ITEM_CACHE)))
     return public_id
 
 
 def _resolve_commercial_item(provider_key: str, item_url: str) -> str:
-    if item_url.startswith("commercial:"):
-        with _COMMERCIAL_ITEM_CACHE_LOCK:
-            resolved = _COMMERCIAL_ITEM_CACHE.get((provider_key, item_url))
-        if not resolved:
-            raise AnalysisError("Referensi scene commercial sudah kedaluwarsa; lakukan search ulang", 410)
-        return resolved
-    return item_url
+    expected_prefix = f"commercial:{provider_key}:"
+    if not item_url.startswith(expected_prefix) or not re.fullmatch(r"commercial:[a-z0-9_]+:[0-9a-f]{32}", item_url):
+        raise AnalysisError("Referensi scene commercial tidak valid", 400)
+    with _COMMERCIAL_ITEM_CACHE_LOCK:
+        resolved = _COMMERCIAL_ITEM_CACHE.get((provider_key, item_url))
+    if not resolved:
+        raise AnalysisError("Referensi scene commercial sudah kedaluwarsa; lakukan search ulang", 410)
+    return resolved
 
 
 def _copernicus_geosave_service():
@@ -141,14 +146,19 @@ def list_providers() -> dict:
         providers.update(copernicus_service.COPERNICUS_PROVIDERS)
     catalog = {}
     for key, meta in providers.items():
-        enriched = {**meta, "capabilities": provider_capabilities(meta)}
-        if key in COMMERCIAL_PROVIDER_KEYS:
-            enriched.update(commercial_provider_meta(key))
-        catalog[key] = enriched
+        catalog[key] = imagery_provider_response_meta(key, meta)
     return {
         "providers": catalog,
         "default": "sentinel2",
     }
+
+
+def imagery_provider_response_meta(key: str, meta: dict[str, Any] | None = None) -> dict[str, Any]:
+    provider = meta or get_imagery_provider_meta(key)
+    enriched = {**provider, "capabilities": provider_capabilities(provider)}
+    if key in COMMERCIAL_PROVIDER_KEYS:
+        enriched.update(commercial_provider_meta(key))
+    return enriched
 
 
 def _aoi_payload_to_bbox(aoi_payload: dict) -> list[float]:
@@ -230,8 +240,18 @@ def _abs_stac_href(base_url: str, href: str) -> str:
     return urljoin(base_url, href)
 
 
+def _url_origin(url: str) -> tuple[str, str | None, int | None]:
+    parsed = urlparse(url)
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    return parsed.scheme.lower(), parsed.hostname.lower() if parsed.hostname else None, port
+
+
 def _fetch_json(client: httpx.Client, url: str) -> dict[str, Any]:
     for _ in range(6):
+        previous_url = url
         _validate_public_http_url(url)
         response = client.get(url, follow_redirects=False)
         if response.status_code in {301, 302, 303, 307, 308}:
@@ -239,6 +259,8 @@ def _fetch_json(client: httpx.Client, url: str) -> dict[str, Any]:
             if not location:
                 raise AnalysisError("Redirect STAC tidak memiliki tujuan", 502)
             url = urljoin(url, location)
+            if client.headers.get("Authorization") and _url_origin(previous_url) != _url_origin(url):
+                raise AnalysisError("Redirect STAC lintas host saat autentikasi diblokir", 502)
             continue
         response.raise_for_status()
         return response.json()
@@ -357,14 +379,32 @@ def _scene_from_stac_item(
     props = item.get("properties") or {}
     item_dt = _parse_stac_datetime(props.get("datetime") or props.get("start_datetime") or props.get("end_datetime"))
     cloud = props.get(meta.get("cloud_property") or "eo:cloud_cover")
+    if meta.get("key") in COMMERCIAL_PROVIDER_KEYS and not item_dt:
+        return None
+    try:
+        cloud_value = float(cloud) if cloud is not None else None
+        if cloud_value is not None and (not np.isfinite(cloud_value) or cloud_value < 0 or cloud_value > 100):
+            cloud_value = None
+    except (TypeError, ValueError):
+        cloud_value = None
     default_asset = next((asset for asset in assets if asset["key"] == default_asset_key), assets[0])
     base = str(request.base_url).rstrip("/") if request is not None else ""
     is_commercial = meta.get("key") in COMMERCIAL_PROVIDER_KEYS
+    if is_commercial:
+        parsed_scene_url = urlparse(scene_url)
+        catalog_host = urlparse(commercial_configuration(str(meta["key"]))["catalog_url"]).hostname
+        if (
+            _url_origin(scene_url) != _url_origin(commercial_configuration(str(meta["key"]))["catalog_url"])
+            or parsed_scene_url.scheme != "https" or parsed_scene_url.hostname != catalog_host
+            or parsed_scene_url.username or parsed_scene_url.password or parsed_scene_url.query or parsed_scene_url.fragment
+        ):
+            return None
+        _validate_public_http_url(scene_url, "URL scene commercial")
     public_scene_id = _store_commercial_item(str(meta["key"]), scene_url) if is_commercial else scene_url
     if base and is_commercial:
         download_url = (
             f"{base}/api/imagery/commercial-source?provider_key={quote(str(meta['key']), safe='')}"
-            f"&item_url={quote(public_scene_id, safe='')}&asset_key={quote(default_asset_key, safe='')}"
+            f"&scene_id={quote(public_scene_id, safe='')}&asset_key={quote(default_asset_key, safe='')}"
         )
     else:
         download_url = (
@@ -375,7 +415,7 @@ def _scene_from_stac_item(
     return {
         "id": public_scene_id,
         "acquired_at": (item_dt.isoformat().replace("+00:00", "Z") if item_dt else ""),
-        "cloud_cover_pct": round(float(cloud), 1) if cloud is not None else None,
+        "cloud_cover_pct": round(cloud_value, 1) if cloud_value is not None else None,
         "bbox": item.get("bbox"),
         "footprint": item.get("geometry"),
         "resolution_m": props.get("gsd") or default_asset.get("resolution_m") or meta.get("resolution_m"),
@@ -387,7 +427,7 @@ def _scene_from_stac_item(
                 **asset,
                 "href": (
                     f"{base}/api/imagery/commercial-source?provider_key={quote(str(meta['key']), safe='')}"
-                    f"&item_url={quote(public_scene_id, safe='')}&asset_key={quote(asset['key'], safe='')}"
+                    f"&scene_id={quote(public_scene_id, safe='')}&asset_key={quote(asset['key'], safe='')}"
                     if base and is_commercial
                     else asset["href"]
                 ),
@@ -422,13 +462,15 @@ def _stac_api_search(
     url = search_url
     for _ in range(20):
         _validate_public_http_url(url)
+        if meta.get("key") in COMMERCIAL_PROVIDER_KEYS and _url_origin(url) != _url_origin(search_url):
+            raise AnalysisError("Pagination STAC lintas host dengan credential diblokir", 502)
         if method == "GET":
-            response = client.get(url)
+            response = client.get(url, follow_redirects=False)
         else:
-            response = client.post(url, json=body)
+            response = client.post(url, json=body, follow_redirects=False)
             if response.status_code in {405, 501}:
                 params = {key: ",".join(map(str, value)) if isinstance(value, list) else value for key, value in body.items()}
-                response = client.get(url, params=params)
+                response = client.get(url, params=params, follow_redirects=False)
         response.raise_for_status()
         payload = response.json()
         for feature in payload.get("features", []):
@@ -529,6 +571,8 @@ def _list_static_stac_scenes(
             if str(href).lower().endswith((".parquet", ".geojson", ".fgb")):
                 continue
             absolute = _abs_stac_href(url, href)
+            if meta.get("key") in COMMERCIAL_PROVIDER_KEYS and _url_origin(absolute) != _url_origin(catalog_url):
+                raise AnalysisError("Link katalog STAC lintas host dengan credential diblokir", 502)
             if absolute in visited:
                 continue
             queue.append(absolute)
@@ -558,16 +602,23 @@ def _list_cog_stac_scenes(
     if not catalog_url.startswith(("http://", "https://")):
         raise AnalysisError("URL STAC harus diawali http:// atau https://", 400)
 
+    if provider_key in COMMERCIAL_PROVIDER_KEYS:
+        parsed_catalog = urlparse(catalog_url)
+        if parsed_catalog.scheme != "https" or parsed_catalog.username or parsed_catalog.password or parsed_catalog.query or parsed_catalog.fragment:
+            raise AnalysisError("URL STAC commercial wajib HTTPS tanpa userinfo, query token, atau fragment", 400)
+
     meta = get_imagery_provider_meta(provider_key)
     aoi_bbox = _aoi_payload_to_bbox(data["aoi"])
     start_dt, end_dt, interval = _stac_datetime_range(data, meta["name"])
 
     try:
         timeout = max(5, get_settings().commercial_imagery_timeout_seconds) if provider_key in COMMERCIAL_PROVIDER_KEYS else 30
-        with httpx.Client(timeout=timeout, follow_redirects=True, headers=headers or {}) as client:
+        with httpx.Client(timeout=timeout, follow_redirects=False, headers=headers or {}) as client:
             root = _fetch_json(client, catalog_url)
             search_url = data.get("stac_search_url") or _find_stac_search_url(catalog_url, root)
             if search_url:
+                if provider_key in COMMERCIAL_PROVIDER_KEYS and _url_origin(search_url) != _url_origin(catalog_url):
+                    raise AnalysisError("STAC search link lintas host dengan credential diblokir", 502)
                 scenes, api_truncated = _stac_api_search(client, search_url, data, meta, aoi_bbox, interval, producer, request)
                 truncated = api_truncated if api_truncated is not None else len(scenes) >= _MAX_SCENES
             else:
@@ -575,11 +626,22 @@ def _list_cog_stac_scenes(
                     client, catalog_url, data, meta, aoi_bbox, start_dt, end_dt, producer, request
                 )
     except httpx.HTTPStatusError as exc:
+        if provider_key in COMMERCIAL_PROVIDER_KEYS:
+            status = exc.response.status_code
+            message = (
+                "credential atau entitlement provider ditolak"
+                if status in {401, 403}
+                else "provider membatasi request; coba lagi nanti"
+                if status == 429
+                else "provider gagal memproses pencarian"
+            )
+            raise AnalysisError(f"{meta['name']} STAC error (HTTP {status}): {message}.", 502)
         detail = exc.response.text[:500].strip()
         suffix = f" - {detail}" if detail else ""
         raise AnalysisError(f"{meta['name']} STAC error: HTTP {exc.response.status_code}{suffix}", 502)
     except httpx.HTTPError as exc:
-        raise AnalysisError(f"Gagal menghubungi {meta['name']}: {exc}", 502)
+        detail = "network timeout or connection failure" if provider_key in COMMERCIAL_PROVIDER_KEYS else str(exc)
+        raise AnalysisError(f"Gagal menghubungi {meta['name']}: {detail}", 502)
     except ValueError as exc:
         raise AnalysisError(f"Respons {meta['name']} tidak valid: {exc}", 502)
 
@@ -587,7 +649,7 @@ def _list_cog_stac_scenes(
     return {
         "scenes": scenes,
         "count": len(scenes),
-        "satellite": meta,
+        "satellite": imagery_provider_response_meta(provider_key, meta),
         "truncated": truncated,
     }
 
@@ -892,6 +954,15 @@ def list_scenes(data: dict, request=None) -> dict:
     if data.get("satellite") == "himawari":
         raise AnalysisError("Himawari menyediakan frame waktu JMA, bukan katalog scene AOI", 400)
 
+    if data.get("satellite") == "airbus_oneatlas":
+        return oneatlas_imagery_service.list_scenes(data, request)
+
+    if data.get("satellite") == "blacksky_spectra":
+        raise AnalysisError(
+            "BlackSky Spectra belum dapat dicari: dokumentasi/API resmi pelanggan SAVEGEO, skema autentikasi, hak preview, dan kontrak akun belum tersedia.",
+            503,
+        )
+
     if data.get("satellite") == _BIG_CTSRT_PROVIDER_KEY:
         return _list_big_ctsrt_scenes(data)
 
@@ -921,11 +992,12 @@ def list_scenes(data: dict, request=None) -> dict:
         config = commercial_configuration(provider_key)
         if not config["configured"]:
             raise AnalysisError(
-                f"{config['label']} belum dikonfigurasi. Isi URL STAC dan credential di backend/.env.",
+                f"{config['label']} belum lengkap. Lengkapi URL STAC, koleksi STAC, dan credential di konfigurasi backend.",
                 503,
             )
+        commercial_data = {**data, "stac_collections": config["collection"]}
         return _list_cog_stac_scenes(
-            data,
+            commercial_data,
             provider_key,
             config["catalog_url"],
             config["label"],
@@ -1227,6 +1299,15 @@ def get_scene_tile(data: dict, request=None) -> dict:
     if data.get("satellite") == "himawari":
         raise AnalysisError("Himawari dimuat sebagai layer tile JMA langsung dari pemilih waktu", 400)
 
+    if data.get("satellite") == "airbus_oneatlas":
+        return oneatlas_imagery_service.get_scene_tile(data, request)
+
+    if data.get("satellite") == "blacksky_spectra":
+        raise AnalysisError(
+            "BlackSky Spectra belum dapat menampilkan preview karena dokumentasi/API resmi pelanggan SAVEGEO dan hak streaming belum tersedia.",
+            503,
+        )
+
     if data.get("satellite") == _BIG_CTSRT_PROVIDER_KEY:
         if not data.get("scene_id"):
             raise AnalysisError("scene_id is required", 400)
@@ -1305,11 +1386,21 @@ def get_scene_tile(data: dict, request=None) -> dict:
         if request is None:
             raise AnalysisError("request context is required for commercial STAC tile URLs", 500)
         base = str(request.base_url).rstrip("/")
-        query = _cog_tile_query(data, str(data["scene_id"]))
+        scene_id = str(data["scene_id"])
+        _resolve_commercial_item(provider_key, scene_id)
+        asset_key = str(data.get("cog_asset_key") or "visual").strip() or "visual"
+        if not re.fullmatch(r"[A-Za-z0-9._:-]{1,80}", asset_key):
+            raise AnalysisError("Asset commercial tidak valid", 400)
+        parts = [f"scene_id={quote(scene_id, safe='')}", f"asset_key={quote(asset_key, safe='')}"]
+        if data.get("cog_bands"):
+            parts.append(f"bands={quote(str(data['cog_bands']), safe='')}")
+        if data.get("cog_rescale"):
+            parts.append(f"rescale={quote(str(data['cog_rescale']), safe='')}")
+        query = "&".join(parts)
         return {
             "scene_id": data["scene_id"],
             "tile_url": f"{base}/api/imagery/commercial-tiles/{provider_key}/{{z}}/{{x}}/{{y}}.png?{query}",
-            "satellite": get_imagery_provider_meta(provider_key),
+            "satellite": imagery_provider_response_meta(provider_key),
             "super_resolution": None,
         }
 
@@ -1462,7 +1553,6 @@ def get_scene_tile(data: dict, request=None) -> dict:
     }
 
 
-@lru_cache(maxsize=512)
 def _stac_asset_href(item_url: str, asset_key: str, provider_key: str | None = None) -> str:
     fetch_url = _resolve_commercial_item(provider_key, item_url) if provider_key in COMMERCIAL_PROVIDER_KEYS else item_url
     headers = commercial_request_headers(provider_key) if provider_key in COMMERCIAL_PROVIDER_KEYS else None
@@ -1473,7 +1563,9 @@ def _stac_asset_href(item_url: str, asset_key: str, provider_key: str | None = N
     asset = assets.get(asset_key)
     if not asset or not asset.get("href") or not _is_cog_like_asset(asset_key, asset):
         raise AnalysisError("Asset COG/GeoTIFF resolusi penuh yang dipilih tidak tersedia; pilih aset lain secara eksplisit", 404)
-    return _abs_stac_href(fetch_url, asset["href"])
+    href = _abs_stac_href(fetch_url, asset["href"])
+    _validate_public_http_url(href, "URL asset COG")
+    return href
 
 
 def _readable_stac_asset_href(item_url: str, asset_key: str, provider_key: str | None = None) -> str:
@@ -1556,6 +1648,98 @@ def get_stac_asset_download_url(item_url: str, asset_key: str, provider_key: str
     href = _readable_stac_asset_href(item_url, asset_key, provider_key)
     _validate_public_http_url(href, "URL asset COG")
     return href
+
+
+def open_commercial_asset_stream(
+    provider_key: str,
+    scene_id: str,
+    asset_key: str,
+    *,
+    client_factory=httpx.Client,
+):
+    """Open a validated commercial asset for a bounded, credential-safe proxy.
+
+    The browser gets a SAVEGEO URL only. Provider credentials are attached to
+    the upstream request only when the asset host matches the configured STAC
+    host, and are stripped before any cross-host redirect.
+    """
+    if provider_key not in _COMMERCIAL_STAC_PROVIDER_KEYS:
+        raise AnalysisError("Provider commercial tidak dikenal", 400)
+    if not commercial_configuration(provider_key)["configured"]:
+        raise AnalysisError(f"{provider_key} belum dikonfigurasi di backend", 503)
+    if not re.fullmatch(r"[A-Za-z0-9._:-]{1,80}", str(asset_key or "")):
+        raise AnalysisError("Asset commercial tidak valid", 400)
+    href = _stac_asset_href(scene_id, asset_key, provider_key)
+    config = commercial_configuration(provider_key)
+    catalog_origin = _url_origin(config["catalog_url"])
+    timeout = max(5, get_settings().commercial_imagery_timeout_seconds)
+    client = client_factory(timeout=timeout, follow_redirects=False)
+    url = href
+    headers = commercial_request_headers(provider_key) if _url_origin(url) == catalog_origin else {"User-Agent": "SAVEGEO/1.0"}
+    response = None
+    try:
+        for _ in range(6):
+            _validate_public_http_url(url, "URL asset commercial")
+            request = client.build_request("GET", url, headers=headers)
+            response = client.send(request, stream=True, follow_redirects=False)
+            if response.status_code not in {301, 302, 303, 307, 308}:
+                break
+            location = response.headers.get("location")
+            response.close()
+            if not location:
+                raise AnalysisError("Redirect asset commercial tidak memiliki tujuan", 502)
+            next_url = urljoin(url, location)
+            if _url_origin(url) != _url_origin(next_url):
+                headers = {"User-Agent": "SAVEGEO/1.0"}
+            url = next_url
+        else:
+            raise AnalysisError("Terlalu banyak redirect asset commercial", 502)
+
+        if response is None:
+            raise AnalysisError("Provider tidak mengembalikan asset", 502)
+        if response.status_code in {401, 403}:
+            raise AnalysisError("Provider menolak asset ini (401/403). Periksa hak download untuk akun dan produk.", 403)
+        if response.status_code == 429:
+            raise AnalysisError("Provider membatasi download (429). Coba lagi nanti.", 429)
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            raise AnalysisError(f"Provider gagal mengirim asset (HTTP {status})", 502)
+
+        max_size = 5 * 1024 * 1024 * 1024
+        content_length = response.headers.get("content-length")
+        if content_length:
+            try:
+                if int(content_length) > max_size:
+                    raise AnalysisError("Asset commercial melampaui batas download 5 GiB", 413)
+            except ValueError:
+                pass
+        upstream_type = response.headers.get("content-type", "application/octet-stream").split(";", 1)[0].strip().lower()
+        media_type = upstream_type if upstream_type in {
+            "application/octet-stream", "application/geotiff", "application/x-geotiff",
+            "image/geotiff", "image/tiff", "image/jpeg", "image/png",
+        } else "application/octet-stream"
+
+        def stream():
+            total = 0
+            try:
+                for chunk in response.iter_bytes():
+                    total += len(chunk)
+                    if total > max_size:
+                        raise AnalysisError("Asset commercial melampaui batas download 5 GiB", 413)
+                    if chunk:
+                        yield chunk
+            finally:
+                response.close()
+                client.close()
+
+        return stream(), media_type, f"{provider_key}-{asset_key}"
+    except Exception:
+        if response is not None:
+            response.close()
+        client.close()
+        raise
 
 
 def render_stac_cog_tile(
@@ -1668,7 +1852,7 @@ def render_commercial_stac_tile(
     bands: str | None = None,
     rescale: str | None = None,
 ) -> bytes | None:
-    if provider_key not in COMMERCIAL_PROVIDER_KEYS:
+    if provider_key not in _COMMERCIAL_STAC_PROVIDER_KEYS:
         raise AnalysisError("Provider commercial tidak dikenal", 400)
     if not commercial_configuration(provider_key)["configured"]:
         raise AnalysisError(f"{provider_key} belum dikonfigurasi di backend", 503)
@@ -1684,6 +1868,10 @@ def render_commercial_stac_tile(
     except Exception as exc:  # noqa: BLE001
         logger.exception("Commercial STAC tile render failed provider=%s", provider_key)
         raise AnalysisError(f"Gagal merender tile {provider_key}: {exc}", 502)
+
+
+def render_oneatlas_tile(scene_id: str, z: int, x: int, y: int) -> bytes | None:
+    return oneatlas_imagery_service.render_tile(scene_id, z, x, y)
 
 
 def get_dem_tile(data: dict) -> dict:

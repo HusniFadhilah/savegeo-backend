@@ -111,13 +111,20 @@ IMAGERY_PROVIDERS: dict[str, dict[str, Any]] = {
         "source_kind": "planet_stac",
         "visualization": "rgb",
         "color_mode": "natural",
-        "resolution_m": 3,
-        "revisit_days": 1,
-        "start_year": 2016,
+        "resolution_m": None,
+        "revisit_days": None,
+        "start_year": None,
         "cloud_property": "eo:cloud_cover",
         "cloud_mask_techniques": None,
         "license": "Planet customer license",
-        "description": "Katalog Planet berlisensi melalui STAC backend. Search dan preview memakai entitlement server; order/tasking/download bulk belum dipicu otomatis.",
+        "description": "Katalog Planet berlisensi melalui konektor STAC backend. Dukungan STAC Planet saat ini beta; produk, cakupan, resolusi, asset, dan hak akses mengikuti koleksi serta entitlement akun yang dikonfigurasi. Search/preview tidak membuat order atau tasking.",
+        "capabilities": {
+            "searchable": True, "downloadable": True, "supports_preview": True,
+            "supports_compare": True, "supports_mosaic": False,
+            "supports_bands": True, "supports_raw_data": True, "supports_ai": False,
+            "visualization_only": True, "analytical": False,
+            "preview_kind": "cog", "supports_visual_enhancement": False,
+        },
     },
     "vantor_commercial": {
         "key": "vantor_commercial",
@@ -128,13 +135,20 @@ IMAGERY_PROVIDERS: dict[str, dict[str, Any]] = {
         "source_kind": "vantor_stac",
         "visualization": "rgb",
         "color_mode": "natural",
-        "resolution_m": 0.5,
-        "revisit_days": 1,
-        "start_year": 2010,
+        "resolution_m": None,
+        "revisit_days": None,
+        "start_year": None,
         "cloud_property": "eo:cloud_cover",
         "cloud_mask_techniques": None,
         "license": "Vantor/Maxar customer license",
-        "description": "Katalog Vantor/Maxar berlisensi melalui STAC backend. Resolusi aktual mengikuti asset dan entitlement.",
+        "description": "Katalog Vantor/Maxar berlisensi melalui konektor STAC backend. Produk, cakupan, resolusi, asset, dan hak akses mengikuti koleksi serta entitlement akun yang dikonfigurasi.",
+        "capabilities": {
+            "searchable": True, "downloadable": True, "supports_preview": True,
+            "supports_compare": True, "supports_mosaic": False,
+            "supports_bands": True, "supports_raw_data": True, "supports_ai": False,
+            "visualization_only": True, "analytical": False,
+            "preview_kind": "cog", "supports_visual_enhancement": False,
+        },
     },
     "iceye_commercial": {
         "key": "iceye_commercial",
@@ -144,13 +158,70 @@ IMAGERY_PROVIDERS: dict[str, dict[str, Any]] = {
         "gee_collection": "",
         "source_kind": "iceye_stac",
         "visualization": "sar",
-        "resolution_m": 3,
-        "revisit_days": 1,
-        "start_year": 2018,
+        "resolution_m": None,
+        "revisit_days": None,
+        "start_year": None,
         "cloud_property": None,
         "cloud_mask_techniques": None,
         "license": "ICEYE customer license",
-        "description": "Katalog ICEYE SAR berlisensi melalui STAC backend. Analisis InSAR/coherence tetap memerlukan pasangan SLC dan processor yang kompatibel.",
+        "description": "Katalog ICEYE SAR berlisensi melalui konektor STAC backend. Produk, cakupan, resolusi, asset, dan hak akses mengikuti koleksi serta entitlement akun yang dikonfigurasi.",
+        "capabilities": {
+            "searchable": True, "downloadable": True, "supports_preview": True,
+            "supports_compare": True, "supports_mosaic": False,
+            "supports_bands": True, "supports_raw_data": True, "supports_ai": False,
+            "visualization_only": True, "analytical": False,
+            "preview_kind": "cog", "supports_visual_enhancement": False,
+        },
+    },
+    "airbus_oneatlas": {
+        "key": "airbus_oneatlas",
+        "name": "Airbus OneAtlas Data",
+        "provider": "Airbus Defence and Space",
+        "group": "Commercial EO",
+        "gee_collection": "",
+        "source_kind": "oneatlas_data_api",
+        "visualization": "rgb",
+        "color_mode": "natural",
+        "resolution_m": None,
+        "revisit_days": None,
+        "start_year": None,
+        "cloud_property": "cloudCover",
+        "cloud_mask_techniques": None,
+        "license": "OneAtlas customer contract and product-specific terms",
+        "configuration_message": "OneAtlas API key, account workspace ID, and a streaming entitlement are required. Preview is available only for returned scenes with WMTS rights.",
+        "description": "OneAtlas Data Living Library through the official OpenSearch API. Scene search is separate from STAC; RGB preview uses the authenticated provider WMTS only when the account response grants that right. No order or tasking is performed.",
+        "capabilities": {
+            "searchable": True, "downloadable": False, "supports_preview": True,
+            "supports_compare": True, "supports_mosaic": False,
+            "supports_bands": False, "supports_raw_data": False, "supports_ai": False,
+            "visualization_only": True, "analytical": False,
+            "preview_kind": "provider_tiles", "supports_visual_enhancement": False,
+        },
+    },
+    "blacksky_spectra": {
+        "key": "blacksky_spectra",
+        "name": "BlackSky Spectra",
+        "provider": "BlackSky",
+        "group": "Commercial EO",
+        "gee_collection": "",
+        "source_kind": "blacksky_spectra",
+        "visualization": "rgb",
+        "color_mode": "natural",
+        "resolution_m": None,
+        "revisit_days": None,
+        "start_year": None,
+        "cloud_property": None,
+        "cloud_mask_techniques": None,
+        "license": "BlackSky customer contract and product-specific terms",
+        "configuration_message": "Belum dapat dicari: dokumentasi API, skema autentikasi, hak preview, dan kontrak akun pelanggan SAVEGEO belum tersedia.",
+        "description": "Katalog belum aktif. SAVEGEO belum memiliki kontrak API pelanggan resmi untuk BlackSky Spectra; endpoint, skema, dan hak akses tidak diasumsikan.",
+        "capabilities": {
+            "searchable": False, "downloadable": False, "supports_preview": False,
+            "supports_compare": False, "supports_mosaic": False,
+            "supports_bands": False, "supports_raw_data": False, "supports_ai": False,
+            "visualization_only": True, "analytical": False,
+            "preview_kind": None, "supports_visual_enhancement": False,
+        },
     },
     "openaerialmap": {
         "key": "openaerialmap",
@@ -535,14 +606,18 @@ IMAGERY_PROVIDERS: dict[str, dict[str, Any]] = {
 DEFAULT_IMAGERY_PROVIDER = "sentinel2"
 
 
-def provider_capabilities(meta: dict[str, Any]) -> dict[str, bool]:
+def provider_capabilities(meta: dict[str, Any]) -> dict[str, Any]:
     """Normalize provider capabilities for the imagery catalog response."""
     source_kind = str(meta.get("source_kind") or "gee")
     visualization = str(meta.get("visualization") or "rgb")
+    declared = meta.get("capabilities") if isinstance(meta.get("capabilities"), dict) else {}
     visualization_only = source_kind in {"esri_wayback", "google_basemap", "apple_basemap", "himawari"}
-    commercial = source_kind in {"planet", "maxar", "commercial", "planet_stac", "vantor_stac", "iceye_stac"}
+    commercial = source_kind in {
+        "planet", "maxar", "commercial", "planet_stac", "vantor_stac", "iceye_stac",
+        "oneatlas_data_api", "blacksky_spectra",
+    }
     open_data = bool(meta.get("open_data", not commercial))
-    return {
+    defaults: dict[str, Any] = {
         "searchable": source_kind != "himawari",
         "downloadable": bool(meta.get("gee_collection") or "stac" in source_kind),
         "analytical": not visualization_only,
@@ -557,7 +632,27 @@ def provider_capabilities(meta: dict[str, Any]) -> dict[str, bool]:
         "requires_authentication": commercial,
         "commercial": commercial,
         "open_data": open_data,
+        "supports_preview": True,
+        "supports_compare": True,
+        "supports_mosaic": bool(meta.get("supports_mosaic")),
+        "supports_visual_enhancement": not visualization_only and not commercial,
+        "preview_kind": (
+            "provider_tiles" if source_kind == "oam_stac"
+            else "cog" if "stac" in source_kind
+            else "direct_xyz" if source_kind == "big_ctsrt"
+            else "gee" if meta.get("gee_collection")
+            else None
+        ),
+        "supports_scene_metadata": "stac" in source_kind or source_kind in {"big_ctsrt", "oneatlas_data_api"},
     }
+    defaults.update(declared)
+    # Keep the legacy top-level mosaic flag authoritative while returning it
+    # through the capability object used by new UI code.
+    defaults["supports_mosaic"] = bool(meta.get("supports_mosaic", declared.get("supports_mosaic", False)))
+    defaults["supports_cloud_filter"] = bool(meta.get("cloud_property")) and bool(
+        declared.get("supports_cloud_filter", True)
+    )
+    return defaults
 
 
 def resolve_imagery_provider(key: str | None) -> str:

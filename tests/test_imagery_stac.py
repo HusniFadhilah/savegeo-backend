@@ -37,6 +37,8 @@ class StacTests(unittest.TestCase):
                 "planet_commercial",
                 "vantor_commercial",
                 "iceye_commercial",
+                "airbus_oneatlas",
+                "blacksky_spectra",
                 "planet_open_data",
                 "vantor_open_data",
                 "stac_catalog",

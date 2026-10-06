@@ -14,7 +14,7 @@ from uuid import uuid4
 
 import ee
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, UploadFile
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import require_ee
@@ -164,6 +164,8 @@ def _requires_ee(data: dict) -> bool:
         "planet_commercial",
         "vantor_commercial",
         "iceye_commercial",
+        "airbus_oneatlas",
+        "blacksky_spectra",
         "stac_catalog",
     } and not _is_copernicus_request(data)
 
@@ -280,14 +282,16 @@ def imagery_commercial_tile(
     z: int,
     x: int,
     y: int,
-    item_url: str,
+    scene_id: str,
     asset_key: str = "visual",
     bands: str | None = None,
     rescale: str | None = None,
 ):
     try:
+        if not (0 <= z <= 22 and 0 <= x < 2**z and 0 <= y < 2**z):
+            raise AnalysisError("Tile coordinates are invalid", 400)
         png_bytes = imagery_service.render_commercial_stac_tile(
-            provider_key, item_url, z, x, y, asset_key, bands, rescale
+            provider_key, scene_id, z, x, y, asset_key, bands, rescale
         )
     except AnalysisError as e:
         raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
@@ -296,6 +300,20 @@ def imagery_commercial_tile(
         raise HTTPException(status_code=500, detail="Imagery analysis failed") from e
     if png_bytes is None:
         raise HTTPException(status_code=404, detail="Tile commercial di luar cakupan raster")
+    return Response(content=png_bytes, media_type="image/png", headers={"Cache-Control": "private, max-age=300"})
+
+
+@router.get("/imagery/oneatlas-tiles/{scene_id}/{z}/{x}/{y}.png", dependencies=[Depends(get_current_app_viewer)])
+def imagery_oneatlas_tile(scene_id: str, z: int, x: int, y: int):
+    try:
+        png_bytes = imagery_service.render_oneatlas_tile(scene_id, z, x, y)
+    except AnalysisError as e:
+        raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
+    except Exception as e:  # noqa: BLE001
+        logger.error("OneAtlas WMTS proxy error: %s", type(e).__name__)
+        raise HTTPException(status_code=502, detail="Airbus OneAtlas preview failed") from e
+    if png_bytes is None:
+        raise HTTPException(status_code=404, detail="Tile OneAtlas di luar cakupan")
     return Response(content=png_bytes, media_type="image/png", headers={"Cache-Control": "private, max-age=300"})
 
 
@@ -348,9 +366,17 @@ def imagery_stac_source(item_url: str, asset_key: str = "visual"):
 
 
 @router.get("/imagery/commercial-source", dependencies=[Depends(get_current_app_viewer)])
-def imagery_commercial_source(provider_key: str, item_url: str, asset_key: str = "visual"):
+def imagery_commercial_source(provider_key: str, scene_id: str, asset_key: str = "visual"):
     try:
-        href = imagery_service.get_stac_asset_download_url(item_url, asset_key, provider_key)
+        stream, media_type, filename = imagery_service.open_commercial_asset_stream(provider_key, scene_id, asset_key)
     except AnalysisError as e:
         raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
-    return RedirectResponse(href)
+    return StreamingResponse(
+        stream,
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
