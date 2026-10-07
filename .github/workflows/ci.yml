@@ -39,7 +39,17 @@ jobs:
           mypy app
           bandit -r app -lll
           # scikit-learn is pinned for existing pickle model compatibility; remove this ignore after retraining.
-          pip-audit . --ignore-vuln PYSEC-2024-110
+          for attempt in 1 2 3; do
+            if pip-audit . --ignore-vuln PYSEC-2024-110; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::pip-audit failed after $attempt attempts"
+              exit 1
+            fi
+            echo "::warning::pip-audit could not reach its advisory service; retrying in 10 seconds (attempt $attempt/3)"
+            sleep 10
+          done
           pytest
 
   gitleaks:
