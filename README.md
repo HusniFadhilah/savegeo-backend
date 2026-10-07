@@ -127,3 +127,33 @@ var/              Data runtime, upload, model, raster, dan job
 - Thumbnail/raster `404`: periksa `DISASTER_RASTER_DIR`, path database, dan proxy `/disaster-thumbnails/`.
 - GEE tidak aktif: periksa service account, key file, project ID, dan permission Earth Engine.
 - Deployment gagal: periksa gate pertama yang merah di GitHub Actions.
+
+## CAMS wildfire archive
+
+Configure `CAMS_ADS_API_URL`, `CAMS_ADS_API_KEY` and
+`CAMS_ADS_TERMS_ACCEPTED` only in the server's ignored environment file.
+Confirm the account has already accepted the dataset licences before enabling
+the terms flag. Install the `[cams]` extra for ADS retrieval and NetCDF parsing.
+
+Run a bounded import using completed UTC days:
+
+```sh
+python -m scripts.sync_cams_archive --slug kalimantan-2026 --from 2026-09-29 --to 2026-10-06 --forecast
+```
+
+The importer writes validated GeoTIFF fields and a provenance manifest beneath
+`CAMS_ARCHIVE_DIR` (default `./var/cams/archive`). HTTP requests serve this
+archive; they never submit ADS jobs. Re-run the command with a new date range
+to refresh data. Daily automatic scheduling is not enabled by this command.
+Missing daily fields remain unavailable rather than becoming zero emissions.
+
+GFAS burnt-carbon flux is integrated over geodesic cell areas intersecting the
+five event provinces and over 86,400 seconds. The map displays tonnes of carbon
+per square kilometre per day. The source NetCDF interval-end timestamp is kept
+in provenance; the timeline labels the daily interval start. IFS organic AOD
+at 550 nm is dimensionless, includes multiple emission sources, and must not be
+presented as a fire-only aerosol product or a PM2.5 concentration. Forecasts
+retain initialization and lead time.
+
+Archive metadata, tiles and downloads require Disaster Mapping access and a
+published wildfire event. Importing data does not publish a Draft event.

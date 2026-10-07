@@ -33,7 +33,7 @@ jobs:
           python scripts/write_build_metadata.py --output build-metadata.json
           python scripts/validate_build_metadata.py build-metadata.json --expected-environment production --require-workflow
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          pip install -e ".[dev,cams]"
           ruff check . --ignore E501 --ignore B904 --ignore B905
           mypy app
           bandit -r app -lll

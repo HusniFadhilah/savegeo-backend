@@ -115,6 +115,15 @@ PRODUCT_CATALOG: tuple[dict[str, Any], ...] = (
         "forecast_horizon_hours": 120,
         "single_level_step_hours": 1,
         "variables": {
+            "organic_aod": {
+                "label": "Organic matter aerosol optical depth at 550 nm",
+                "symbol": "AOD",
+                "source_name": "Organic matter aerosol optical depth at 550 nm",
+                "unit": "1",
+                "kind": "aerosol_optical_depth",
+                "temporal_resolution_hours": 1,
+                "vertical_product": "total_column",
+            },
             "pm25": {
                 "label": "Particulate matter concentration (diameter < 2.5 µm)",
                 "symbol": "PM2.5",
@@ -211,7 +220,15 @@ def create_ads_archive_adapter(
             ) from None
         client_factory = cdsapi.Client
     try:
-        client = client_factory(url=settings.cams_ads_api_url, key=settings.cams_ads_api_key, quiet=True)
+        client = client_factory(
+            url=settings.cams_ads_api_url,
+            key=settings.cams_ads_api_key,
+            quiet=True,
+            progress=False,
+            timeout=60,
+            retry_max=3,
+            sleep_max=10,
+        )
     except Exception:
         raise CamsRequestError(
             "Client CAMS ADS tidak dapat dikonfigurasi", 503, "ads_client_configuration_failed"
@@ -289,7 +306,7 @@ def validate_request(product: str, version: str, variable: str, valid_at: str) -
     parsed_utc = parsed.astimezone(UTC)
     day = parsed_utc.date()
     now = datetime.now(UTC)
-    if parsed_utc > now:
+    if product == "gfas" and parsed_utc > now:
         raise CamsRequestError("Waktu valid tidak boleh berada di masa depan", code="future_valid_time")
 
     if product == "gfas":

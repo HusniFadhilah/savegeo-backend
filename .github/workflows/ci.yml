@@ -33,7 +33,7 @@ jobs:
           python scripts/validate_build_metadata.py build-metadata.json --expected-environment ci
           python scripts/validate_release_manifest.py release/v1.0.0.json
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          pip install -e ".[dev,cams]"
           ruff check . --ignore E501 --ignore B904 --ignore B905
           python scripts/audit_standards.py --check > standards-audit.json
           mypy app

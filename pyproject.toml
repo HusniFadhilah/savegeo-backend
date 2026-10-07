@@ -89,6 +89,8 @@ cdse = [
 ]
 cams = [
     "cdsapi>=0.7.7",
+    "xarray>=2024.1,<2027",
+    "netCDF4>=1.6.5",
 ]
 dev = [
     "pytest>=8.0.0",

@@ -135,6 +135,7 @@ class Settings(BaseSettings):
     cams_ads_api_url: str = "https://ads.atmosphere.copernicus.eu/api"
     cams_ads_api_key: str = ""
     cams_ads_terms_accepted: bool = False
+    cams_archive_dir: str = "./var/cams/archive"
     inarisk_wms_url: str = ""
     inarisk_wms_layers: str = ""
     inarisk_tile_url: str = ""

@@ -8,6 +8,11 @@ from starlette.responses import Response
 from app.api.routes import wildfire_events
 
 
+@pytest.fixture(autouse=True)
+def isolate_archive(tmp_path, monkeypatch):
+    monkeypatch.setattr(wildfire_events.cams_archive_service, "event_directory", lambda slug: tmp_path / slug)
+
+
 def test_cams_capabilities_route_is_registered():
     paths = {route.path for route in wildfire_events.router.routes}
     assert "/disasters/wildfires/events/{slug}/emissions/capabilities" in paths

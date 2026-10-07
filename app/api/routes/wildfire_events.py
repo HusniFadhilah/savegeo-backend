@@ -9,6 +9,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -21,6 +22,7 @@ from app.db.session import get_db
 from app.registries import disaster_model_registry
 from app.repositories import disaster_repo
 from app.services import (
+    cams_archive_service,
     cams_emissions_service,
     disaster_capability_service,
     firms_service,
@@ -77,7 +79,9 @@ def _filter_by_admin_region(
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=502, detail="Hotspot tidak dapat difilter berdasarkan batas wilayah") from exc
+        raise HTTPException(
+            status_code=502, detail="Hotspot tidak dapat difilter berdasarkan batas wilayah"
+        ) from exc
 
 
 def _as_region_features(geometry: dict, name: str, code: str, level: str) -> list[dict]:
@@ -104,10 +108,12 @@ def _admin_child_features(event: DisasterEvent, level: str, parent_code: str | N
         names = event.province or []
         if not codes:
             raise HTTPException(status_code=422, detail="Kode provinsi event belum tersedia")
+
         def fetch_province(index_code: tuple[int, str]):
             index, code = index_code
             name = names[index] if index < len(names) else code
             return _as_region_features(_admin_geometry("province", code), name, code, level)
+
         with ThreadPoolExecutor(max_workers=min(5, len(codes))) as executor:
             return [feature for batch in executor.map(fetch_province, enumerate(codes)) for feature in batch]
 
@@ -220,7 +226,7 @@ def _summary(hotspots: list[Hotspot], event: DisasterEvent) -> dict:
         "total_frp": sum(frps) if frps else None,
         "average_frp": sum(frps) / len(frps) if frps else None,
         "latest_acquisition_time": max(
-            (record.get("acq_datetime_utc") for record in records if record.get("acq_datetime_utc")),
+            (str(record["acq_datetime_utc"]) for record in records if record.get("acq_datetime_utc")),
             default=event.last_data_at.isoformat() if event.last_data_at else None,
         ),
         "burned_area_ha": getattr(event, "burned_area_ha", None),
@@ -267,9 +273,7 @@ def _feature(hotspot: Hotspot) -> dict | None:
     }
 
 
-def _period_dates(
-    event: DisasterEvent, from_date: str | None, to: str | None
-) -> tuple[str, str]:
+def _period_dates(event: DisasterEvent, from_date: str | None, to: str | None) -> tuple[str, str]:
     end_date = (
         to
         or (event.last_data_at.date().isoformat() if event.last_data_at else None)
@@ -411,7 +415,9 @@ def list_wildfire_events(
         )
         count = len(persisted_stats)
         high_confidence_count = sum(
-            str((stats or {}).get("confidence_category", (stats or {}).get("confidence_label", ""))).casefold()
+            str(
+                (stats or {}).get("confidence_category", (stats or {}).get("confidence_label", ""))
+            ).casefold()
             == "high"
             for stats in persisted_stats
         )
@@ -439,7 +445,9 @@ def list_wildfire_events(
         items.sort(key=lambda item: str(item.get("updated_at")), reverse=True)
     return {
         "events": items,
-        "updated_at": max((item.get("updated_at") for item in items), default=None),
+        "updated_at": max(
+            (str(item["updated_at"]) for item in items if item.get("updated_at")), default=None
+        ),
         "total": len(items),
     }
 
@@ -530,7 +538,9 @@ def get_wildfire_region_statistics(
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=502, detail="Statistik hotspot per wilayah tidak dapat dimuat") from exc
+        raise HTTPException(
+            status_code=502, detail="Statistik hotspot per wilayah tidak dapat dimuat"
+        ) from exc
     return {
         "level": level,
         "parent_code": parent_code,
@@ -581,7 +591,11 @@ def get_wildfire_burned_area(
     event = _event(db, slug)
     area = _published_burned_area(db, event)
     if area:
-        return {"available": True, **area, "note": "Luas hasil produk burned-area terpublikasi; bukan jumlah hotspot."}
+        return {
+            "available": True,
+            **area,
+            "note": "Luas hasil produk burned-area terpublikasi; bukan jumlah hotspot.",
+        }
     return {
         "available": False,
         "area_ha": None,
@@ -605,7 +619,7 @@ def get_wildfire_emissions_capabilities(
     # existing wildfire API's publication and feature-permission boundary.
     _event(db, slug)
     response.headers["Cache-Control"] = "private, no-store"
-    return cams_emissions_service.get_capabilities()
+    return cams_archive_service.capabilities(slug)
 
 
 @router.get("/events/{slug}/emissions/summary")
@@ -616,6 +630,7 @@ def get_wildfire_emissions_summary(
     version: str = Query(...),
     variable: str = Query(...),
     valid_at: str = Query(...),
+    region_code: str | None = None,
     viewer=Depends(get_current_disaster_viewer),
     db: Session = Depends(get_db),
 ):
@@ -628,7 +643,12 @@ def get_wildfire_emissions_summary(
             status_code=exc.status_code,
             detail={"code": exc.code, "message": str(exc)},
         ) from None
-    capabilities = cams_emissions_service.get_capabilities()
+    capabilities = cams_archive_service.capabilities(slug)
+    if capabilities.get("data_available"):
+        try:
+            return cams_archive_service.request_summary(slug, request, region_code)
+        except cams_emissions_service.CamsRequestError as exc:
+            raise HTTPException(exc.status_code, detail={"code": exc.code, "message": str(exc)}) from None
     raise HTTPException(
         status_code=503,
         headers={"Cache-Control": "private, no-store"},
@@ -637,4 +657,59 @@ def get_wildfire_emissions_summary(
             "message": "Data CAMS belum tersedia untuk ditampilkan. Tidak ada nilai emisi nol yang diasumsikan.",
             "request": request,
         },
+    )
+
+
+@router.get("/events/{slug}/emissions/archive")
+def get_wildfire_emissions_archive(
+    slug: str,
+    response: Response,
+    viewer=Depends(get_current_disaster_viewer),
+    db: Session = Depends(get_db),
+):
+    _event(db, slug)
+    response.headers["Cache-Control"] = "private, no-store"
+    try:
+        return cams_archive_service.public_archive(slug)
+    except cams_emissions_service.CamsRequestError as exc:
+        raise HTTPException(exc.status_code, detail={"code": exc.code, "message": str(exc)}) from None
+
+
+@router.get("/events/{slug}/emissions/tiles/{layer_id}/{frame_id}/{z}/{x}/{y}.png")
+def get_wildfire_emissions_tile(
+    slug: str,
+    layer_id: str,
+    frame_id: str,
+    z: int,
+    x: int,
+    y: int,
+    viewer=Depends(get_current_disaster_viewer),
+    db: Session = Depends(get_db),
+):
+    _event(db, slug)
+    try:
+        content = cams_archive_service.tile(slug, layer_id, frame_id, z, x, y)
+    except cams_emissions_service.CamsRequestError as exc:
+        raise HTTPException(exc.status_code, detail={"code": exc.code, "message": str(exc)}) from None
+    return Response(
+        content=content, media_type="image/png", headers={"Cache-Control": "private, max-age=300"}
+    )
+
+
+@router.get("/events/{slug}/emissions/download/{layer_id}/{frame_id}.tif")
+def download_wildfire_emissions_field(
+    slug: str,
+    layer_id: str,
+    frame_id: str,
+    viewer=Depends(get_current_disaster_viewer),
+    db: Session = Depends(get_db),
+):
+    _event(db, slug)
+    try:
+        _, frame, path = cams_archive_service.resolve_frame(slug, layer_id, frame_id)
+    except cams_emissions_service.CamsRequestError as exc:
+        raise HTTPException(exc.status_code, detail={"code": exc.code, "message": str(exc)}) from None
+    name = f"{slug}_{layer_id}_{frame['valid_at'][:10]}_{frame_id}.tif"
+    return FileResponse(
+        path, media_type="image/tiff", filename=name, headers={"Cache-Control": "private, no-store"}
     )
