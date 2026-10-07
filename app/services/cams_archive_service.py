@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -12,10 +14,18 @@ import numpy as np
 from PIL import Image
 from rio_tiler.errors import TileOutsideBounds
 from rio_tiler.io import COGReader
+from rasterio import open as raster_open
+from rasterio.warp import transform_geom
+from rasterio.windows import Window, from_bounds
+from shapely.geometry import Polygon, box, mapping, shape
 
 from app.core.config import get_settings
 from app.services import cams_emissions_service
 from app.services.cams_emissions_service import CamsRequestError
+
+MAX_AGGREGATION_CELLS = 100_000
+MAX_GRID_FEATURES = 5_000
+MAX_CUSTOM_GEOMETRY_VERTICES = 10_000
 
 LAYER_DEFINITIONS = {
     "burnt_carbon": {
@@ -172,3 +182,193 @@ def tile(slug: str, layer_id: str, frame_id: str, z: int, x: int, y: int) -> byt
     output = io.BytesIO()
     Image.fromarray(result).save(output, format="PNG")
     return output.getvalue()
+
+
+def aggregate(
+    slug: str,
+    layer_id: str,
+    frame_id: str,
+    mode: str,
+    *,
+    geometry: dict[str, Any] | None = None,
+    bbox: list[float] | None = None,
+) -> dict[str, Any]:
+    """Calculate raster statistics for a user polygon or visible native grid cells."""
+    if mode not in {"area", "grid"}:
+        raise CamsRequestError("Mode agregasi CAMS tidak valid")
+    manifest = read_archive(slug)
+    layer = manifest.get("layers", {}).get(layer_id)
+    if not layer:
+        raise CamsRequestError("Layer CAMS belum tersedia", 404, "layer_not_found")
+    frame = next((item for item in layer["frames"] if item["id"] == frame_id), None)
+    if not frame:
+        raise CamsRequestError("Waktu CAMS belum tersedia", 404, "frame_not_found")
+    path = event_directory(slug) / frame["filename"]
+    event_box = box(*manifest["bbox"])
+
+    if mode == "area":
+        candidate = geometry.get("geometry", geometry) if isinstance(geometry, dict) else None
+        try:
+            target = shape(candidate)
+        except Exception as exc:
+            raise CamsRequestError("Geometri area kustom tidak valid") from exc
+        if target.geom_type not in {"Polygon", "MultiPolygon"} or not target.is_valid:
+            raise CamsRequestError("Area kustom harus berupa polygon yang valid")
+        if _geometry_vertex_count(candidate) > MAX_CUSTOM_GEOMETRY_VERTICES:
+            raise CamsRequestError("Area kustom memiliki terlalu banyak titik")
+        target = target.intersection(event_box)
+    else:
+        if not isinstance(bbox, list) or len(bbox) != 4:
+            raise CamsRequestError("Batas peta diperlukan untuk agregasi grid")
+        try:
+            west, south, east, north = (float(value) for value in bbox)
+        except (TypeError, ValueError) as exc:
+            raise CamsRequestError("Batas peta tidak valid") from exc
+        if not all(math.isfinite(value) for value in (west, south, east, north)) or not (
+            -180 <= west < east <= 180 and -90 <= south < north <= 90
+        ):
+            raise CamsRequestError("Batas peta tidak valid")
+        target = box(west, south, east, north).intersection(event_box)
+
+    if target.is_empty or target.area <= 0:
+        raise CamsRequestError("Area agregasi berada di luar cakupan event")
+
+    try:
+        with raster_open(path) as dataset:
+            if dataset.crs is None:
+                raise CamsRequestError("CRS raster CAMS tidak tersedia", 503, "raster_invalid")
+            raster_geometry = shape(transform_geom("EPSG:4326", dataset.crs, mapping(target)))
+            window = from_bounds(*raster_geometry.bounds, transform=dataset.transform)
+            col_start = max(0, math.floor(window.col_off))
+            row_start = max(0, math.floor(window.row_off))
+            col_stop = min(dataset.width, math.ceil(window.col_off + window.width))
+            row_stop = min(dataset.height, math.ceil(window.row_off + window.height))
+            width, height = col_stop - col_start, row_stop - row_start
+            if width <= 0 or height <= 0:
+                return _empty_aggregate(layer, mode)
+            if width * height > MAX_AGGREGATION_CELLS:
+                raise CamsRequestError(
+                    "Area agregasi terlalu luas; perbesar peta atau gambar area yang lebih kecil",
+                    413,
+                    "aggregation_too_large",
+                )
+            read_window = Window(col_start, row_start, width, height)
+            values = dataset.read(1, window=read_window, masked=True)
+            transform = dataset.window_transform(read_window)
+            multiplier = LAYER_DEFINITIONS[layer_id]["multiplier"]
+            palette_maximum = max(float(layer.get("maximum", 0)), float(np.finfo(float).tiny))
+            valid_values: list[float] = []
+            area_weighted_sum = 0.0
+            total_area = 0.0
+            integrated_mass_kg = 0.0
+            missing_cells = 0
+            features: list[dict[str, Any]] = []
+            duration_seconds = _frame_duration_seconds(frame)
+
+            for row in range(height):
+                for col in range(width):
+                    x0, y0 = transform * (col, row)
+                    x1, y1 = transform * (col + 1, row + 1)
+                    cell = Polygon([(x0, y0), (x1, y0), (x1, y1), (x0, y1)])
+                    clipped = cell.intersection(raster_geometry)
+                    if clipped.is_empty or clipped.area <= 0:
+                        continue
+                    raw = float(values[row, col]) if not np.ma.is_masked(values[row, col]) else float("nan")
+                    if not math.isfinite(raw) or raw < 0:
+                        missing_cells += 1
+                        continue
+                    clipped_wgs84 = (
+                        clipped
+                        if dataset.crs.to_epsg() == 4326
+                        else shape(transform_geom(dataset.crs, "EPSG:4326", mapping(clipped)))
+                    )
+                    cell_area, _ = cams_emissions_service.WGS84_GEOD.geometry_area_perimeter(clipped_wgs84)
+                    cell_area = abs(float(cell_area))
+                    if cell_area <= 0 or not math.isfinite(cell_area):
+                        missing_cells += 1
+                        continue
+                    display_value = raw * multiplier
+                    valid_values.append(display_value)
+                    area_weighted_sum += display_value * cell_area
+                    total_area += cell_area
+                    if layer_id == "burnt_carbon":
+                        integrated_mass_kg += raw * cell_area * duration_seconds
+                    if mode == "grid":
+                        cell_wgs84 = (
+                            cell
+                            if dataset.crs.to_epsg() == 4326
+                            else shape(transform_geom(dataset.crs, "EPSG:4326", mapping(cell)))
+                        )
+                        features.append({
+                            "type": "Feature",
+                            "geometry": mapping(cell_wgs84),
+                            "properties": {"value": display_value, "unit": layer["display_unit"]},
+                        })
+                        if len(features) > MAX_GRID_FEATURES:
+                            raise CamsRequestError(
+                                "Grid melebihi 5.000 sel; perbesar peta agar tampilkan area lebih kecil",
+                                413,
+                                "grid_too_large",
+                            )
+
+            summary = {
+                "valid_cell_count": len(valid_values),
+                "missing_cell_count": missing_cells,
+                "maximum": max(valid_values) if valid_values else None,
+                "area_weighted_mean": area_weighted_sum / total_area if total_area else None,
+                "integrated_mass_kg": integrated_mass_kg if valid_values and layer_id == "burnt_carbon" else None,
+                "unit": layer["display_unit"],
+                "duration_seconds": duration_seconds if layer_id == "burnt_carbon" else None,
+                "area_km2": total_area / 1_000_000,
+            }
+            if mode == "grid":
+                return {
+                    "type": "FeatureCollection",
+                    "features": features,
+                    "summary": summary,
+                    "maximum": palette_maximum,
+                    "unit": layer["display_unit"],
+                }
+            return {"summary": summary, "unit": layer["display_unit"]}
+    except CamsRequestError:
+        raise
+    except Exception as exc:
+        raise CamsRequestError("Statistik raster CAMS gagal dihitung", 503, "aggregation_failed") from exc
+
+
+def _geometry_vertex_count(value: Any) -> int:
+    if not isinstance(value, list):
+        return 0
+    if value and isinstance(value[0], (int, float)):
+        return 1
+    return sum(_geometry_vertex_count(item) for item in value)
+
+
+def _frame_duration_seconds(frame: dict[str, Any]) -> float:
+    start_text = frame.get("valid_at")
+    end_text = frame.get("interval_end")
+    if not start_text or not end_text:
+        return 86_400.0
+    try:
+        start = datetime.fromisoformat(start_text.replace("Z", "+00:00"))
+        end = datetime.fromisoformat(end_text.replace("Z", "+00:00"))
+        duration = (end - start).total_seconds()
+    except (AttributeError, TypeError, ValueError):
+        return 86_400.0
+    return duration if math.isfinite(duration) and duration > 0 else 86_400.0
+
+
+def _empty_aggregate(layer: dict[str, Any], mode: str) -> dict[str, Any]:
+    summary = {
+        "valid_cell_count": 0,
+        "missing_cell_count": 0,
+        "maximum": None,
+        "area_weighted_mean": None,
+        "integrated_mass_kg": None,
+        "unit": layer["display_unit"],
+        "duration_seconds": None,
+        "area_km2": 0,
+    }
+    if mode == "grid":
+        return {"type": "FeatureCollection", "features": [], "summary": summary, "maximum": layer["maximum"], "unit": layer["display_unit"]}
+    return {"summary": summary, "unit": layer["display_unit"]}

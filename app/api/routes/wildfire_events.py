@@ -8,7 +8,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response
 from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -671,6 +671,32 @@ def get_wildfire_emissions_archive(
     response.headers["Cache-Control"] = "private, no-store"
     try:
         return cams_archive_service.public_archive(slug)
+    except cams_emissions_service.CamsRequestError as exc:
+        raise HTTPException(exc.status_code, detail={"code": exc.code, "message": str(exc)}) from None
+
+
+@router.post("/events/{slug}/emissions/aggregate/{layer_id}/{frame_id}")
+def aggregate_wildfire_emissions(
+    slug: str,
+    layer_id: str,
+    frame_id: str,
+    payload: dict = Body(...),
+    viewer=Depends(get_current_disaster_viewer),
+    db: Session = Depends(get_db),
+):
+    _event(db, slug)
+    response_mode = payload.get("mode")
+    if response_mode not in {"area", "grid"}:
+        raise HTTPException(status_code=400, detail={"code": "invalid_aggregation_mode", "message": "Mode agregasi tidak valid"})
+    try:
+        return cams_archive_service.aggregate(
+            slug,
+            layer_id,
+            frame_id,
+            response_mode,
+            geometry=payload.get("geometry"),
+            bbox=payload.get("bbox"),
+        )
     except cams_emissions_service.CamsRequestError as exc:
         raise HTTPException(exc.status_code, detail={"code": exc.code, "message": str(exc)}) from None
 
