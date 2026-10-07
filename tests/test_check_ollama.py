@@ -53,7 +53,33 @@ def test_check_ollama_can_probe_openai_compatible_inference(monkeypatch, capsys)
             _Response(json.dumps({"choices": [{"message": {"content": "OK"}}]}).encode()),
         ]
     )
-    monkeypatch.setattr(check_ollama, "urlopen", lambda request, timeout: next(responses))
+
+    def respond(request, timeout):
+        if request.data:
+            payload = json.loads(request.data)
+            assert payload["reasoning_effort"] == "none"
+            assert payload["max_tokens"] >= 64
+        return next(responses)
+
+    monkeypatch.setattr(check_ollama, "urlopen", respond)
 
     assert check_ollama.check_ollama() == 0
     assert "inference probe passed" in capsys.readouterr().out
+
+
+def test_check_ollama_rejects_reasoning_without_assistant_content(monkeypatch, capsys):
+    monkeypatch.setenv("AI_PROVIDER", "ollama")
+    monkeypatch.setenv("AI_MODEL", "qwen3:8b")
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434/v1")
+    monkeypatch.setenv("OLLAMA_PREFLIGHT_INFERENCE", "true")
+    responses = iter(
+        [
+            _Response(json.dumps({"models": [{"name": "qwen3:8b"}]}).encode()),
+            _Response(
+                json.dumps({"choices": [{"message": {"content": "", "reasoning": "thinking"}}]}).encode()
+            ),
+        ]
+    )
+    monkeypatch.setattr(check_ollama, "urlopen", lambda request, timeout: next(responses))
+    assert check_ollama.check_ollama() == 1
+    assert "no assistant content" in capsys.readouterr().err

@@ -5,6 +5,7 @@ local ``/api/tags`` catalogue and checks that the configured model is installed.
 Deploy workflows additionally enable a short OpenAI-compatible inference probe
 so a deployment verifies that the model can answer, not only that it exists.
 """
+
 from __future__ import annotations
 
 import os
@@ -66,13 +67,14 @@ def check_ollama() -> int:
 
     models = payload.get("models") if isinstance(payload, dict) else None
     installed = {
-        str(item.get("name"))
-        for item in (models or [])
-        if isinstance(item, dict) and item.get("name")
+        str(item.get("name")) for item in (models or []) if isinstance(item, dict) and item.get("name")
     }
     if model not in installed:
         available = ", ".join(sorted(installed)) or "(none)"
-        print(f"Ollama is reachable, but model '{model}' is not installed. Available: {available}", file=sys.stderr)
+        print(
+            f"Ollama is reachable, but model '{model}' is not installed. Available: {available}",
+            file=sys.stderr,
+        )
         return 1
 
     probe_enabled = os.getenv("OLLAMA_PREFLIGHT_INFERENCE", "").strip().lower() in {"1", "true", "yes", "on"}
@@ -88,7 +90,10 @@ def check_ollama() -> int:
                     "model": model,
                     "messages": [{"role": "user", "content": "Reply with exactly OK."}],
                     "stream": False,
-                    "max_tokens": 8,
+                    "max_tokens": 64,
+                    # Match the chatbot provider: Qwen thinking must not exhaust
+                    # the short probe budget before emitting assistant content.
+                    "reasoning_effort": "none",
                     "temperature": 0,
                 }
             ).encode("utf-8")
