@@ -37,7 +37,7 @@ from functools import lru_cache
 from typing import Any
 from urllib.parse import quote, urljoin, urlparse
 from importlib.util import find_spec
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import ee
 import httpx
@@ -1286,6 +1286,55 @@ def _get_imagery_mosaic_tile(data: dict, aoi: ee.Geometry, meta: dict) -> dict |
         "super_resolution": super_resolution,
         "cloud_mask_technique": applied_cloud_mask,
         "visualization_bands": vis.get("bands"),
+    }
+
+
+def get_historical_sentinel2_mosaic(data: dict) -> dict:
+    """Build a short Sentinel-2 L1C mosaic for the historical map control.
+
+    The date window is deliberately capped at one nominal revisit interval so
+    this endpoint cannot accidentally turn into an unbounded archive export.
+    ``COPERNICUS/S2_HARMONIZED`` is the Copernicus Level-1C archive hosted by
+    Earth Engine; L1C gives this viewer access back to the 2015 mission start.
+    """
+    if not isinstance(data, dict) or not data.get("aoi"):
+        raise AnalysisError("aoi is required", 422)
+
+    try:
+        start_date = date.fromisoformat(str(data.get("start_date") or ""))
+        end_date = date.fromisoformat(str(data.get("end_date") or ""))
+    except ValueError as exc:
+        raise AnalysisError("Tanggal Sentinel-2 harus berformat YYYY-MM-DD", 422) from exc
+
+    if start_date < date(2015, 6, 27):
+        raise AnalysisError("Arsip Sentinel-2 L1C dimulai pada 27 Juni 2015", 422)
+    if (end_date - start_date) != timedelta(days=5):
+        raise AnalysisError("Rentang mosaik Sentinel-2 harus tepat lima hari", 422)
+    if end_date > datetime.now(UTC).date() + timedelta(days=1):
+        raise AnalysisError("Tanggal Sentinel-2 tidak boleh berada di masa depan", 422)
+
+    try:
+        aoi = create_geometry_from_payload(data["aoi"])
+    except ValueError as exc:
+        raise AnalysisError(str(exc), 422) from exc
+
+    provider_key = "sentinel2_l1c"
+    meta = get_imagery_provider_meta(provider_key)
+    request_data = {
+        **data,
+        "satellite": provider_key,
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+    }
+    mosaic = _get_sentinel2_mosaic_tile(request_data, aoi, meta)
+    return {
+        "tile_url": mosaic["tile_url"] if mosaic else None,
+        "scene_count": mosaic["scene_count"] if mosaic else 0,
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "dataset": meta["gee_collection"],
+        "resolution_m": meta.get("resolution_m"),
+        "cloud_mask_technique": mosaic["cloud_mask_technique"] if mosaic else None,
     }
 
 

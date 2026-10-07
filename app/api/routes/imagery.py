@@ -109,6 +109,27 @@ def imagery_nasa_gibs_layers():
     return {"layers": imagery_service.nasa_gibs_layers()}
 
 
+@router.post("/imagery/historical/sentinel2-tile", dependencies=[Depends(get_current_app_viewer)])
+async def imagery_historical_sentinel2_tile(request: Request, db: Session = Depends(get_db)):
+    """Create one bounded, five-day Copernicus Sentinel-2 L1C map mosaic."""
+    data = await request.json()
+    try:
+        imagery_provider_repo.refresh_cache(db)
+        if "sentinel2_l1c" in imagery_provider_repo.provider_catalog() and not imagery_provider_repo.provider_is_active("sentinel2_l1c"):
+            raise HTTPException(status_code=404, detail="Provider Sentinel-2 dinonaktifkan administrator")
+        require_ee(request)
+        return await run_in_threadpool(imagery_service.get_historical_sentinel2_mosaic, data)
+    except AnalysisError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=public_analysis_error(exc))
+    except ee.EEException as exc:
+        raise HTTPException(status_code=400, detail="Earth Engine rejected the Sentinel-2 date or map bounds") from exc
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Historical Sentinel-2 tile error (%s)", type(exc).__name__)
+        raise HTTPException(status_code=500, detail="Historical Sentinel-2 imagery failed") from exc
+
+
 @router.get("/imagery/advanced/capabilities")
 def imagery_advanced_capabilities(viewer=Depends(get_current_app_viewer)):
     return advanced_imagery_service.capabilities()
