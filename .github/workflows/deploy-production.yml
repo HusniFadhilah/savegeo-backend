@@ -216,7 +216,10 @@ jobs:
               python -m scripts.import_legacy_models /app/var/saved_models
             curl --fail --silent "$BACKEND_HEALTH_URL" >/dev/null
             deployment_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-            python3 scripts/write_build_metadata.py --output var/deployment-metadata.json --deployment-time-utc "$deployment_time" --deployment-environment production
+            # Preserve the validated CI build provenance. The SSH host does
+            # not have the runner's GITHUB_* environment.
+            python3 scripts/validate_build_metadata.py var/build-metadata.json --expected-sha "$SAVEGEO_COMMIT_SHA" --expected-environment production --require-workflow
+            python3 -c 'import json, sys; from pathlib import Path; data = json.loads(Path("var/build-metadata.json").read_text()); data["deployed_at_utc"] = sys.argv[1]; target = Path("var/deployment-metadata.json"); temporary = target.with_suffix(".json.tmp"); temporary.write_text(json.dumps(data, indent=2) + "\n"); temporary.replace(target)' "$deployment_time"
             # Verify the actual container, independent of external proxy routing.
             docker compose -f docker-compose.prod.yml exec -T api \
               python -c 'import os; from app.core.version import get_public_version_metadata; actual = get_public_version_metadata()["commit_sha"]; expected = os.environ["SAVEGEO_COMMIT_SHA"]; assert actual == expected, f"Container revision mismatch: {actual} != {expected}"'
@@ -228,6 +231,8 @@ jobs:
           # stdin surviving the SSH authentication and connection setup.
           sshpass -e scp -P "$DEPLOY_SSH_PORT" "$RUNNER_TEMP/deploy-backend.sh" \
             "$DEPLOY_USER@$DEPLOY_HOST:$BACKEND_REMOTE_DIR/var/deploy-backend.sh"
+          sshpass -e scp -P "$DEPLOY_SSH_PORT" build-metadata-artifact/build-metadata.json \
+            "$DEPLOY_USER@$DEPLOY_HOST:$BACKEND_REMOTE_DIR/var/build-metadata.json"
           sshpass -e ssh -p "$DEPLOY_SSH_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
             "BACKEND_REMOTE_DIR='$BACKEND_REMOTE_DIR' BACKEND_HEALTH_URL='$BACKEND_HEALTH_URL' SAVEGEO_PRODUCT_VERSION='$SAVEGEO_PRODUCT_VERSION' SAVEGEO_BUILD_NUMBER='$SAVEGEO_BUILD_NUMBER' SAVEGEO_RUN_ATTEMPT='$SAVEGEO_RUN_ATTEMPT' SAVEGEO_COMMIT_SHA='$SAVEGEO_COMMIT_SHA' SAVEGEO_REF='$SAVEGEO_REF' SAVEGEO_BUILD_TIME_UTC='$SAVEGEO_BUILD_TIME_UTC' SAVEGEO_WORKFLOW_NAME='$SAVEGEO_WORKFLOW_NAME' SAVEGEO_WORKFLOW_RUN_ID='$SAVEGEO_WORKFLOW_RUN_ID' SAVEGEO_WORKFLOW_RUN_URL='$SAVEGEO_WORKFLOW_RUN_URL' SAVEGEO_DEPLOYMENT_ENVIRONMENT='$SAVEGEO_DEPLOYMENT_ENVIRONMENT' bash '$BACKEND_REMOTE_DIR/var/deploy-backend.sh'"
 
