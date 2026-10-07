@@ -21,6 +21,7 @@ from app.db.models.wildfire_hotspot import WildfireHotspot
 from app.db.models.role import Permission, Role, role_permissions
 from app.db.models.satellite_imagery import SatelliteImagery
 from app.db.models.satellite_provider_entry import SatelliteProviderEntry
+from app.db.models.imagery_provider_entry import ImageryProviderEntry
 from app.db.models.system_config import SystemConfig
 from app.db.models.uploaded_model import UploadedModel
 from app.db.models.user import User
@@ -55,6 +56,7 @@ __all__ = [
     "Role",
     "SatelliteImagery",
     "SatelliteProviderEntry",
+    "ImageryProviderEntry",
     "SystemConfig",
     "UploadedModel",
     "User",

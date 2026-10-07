@@ -45,6 +45,7 @@ from app.db.models.uploaded_model import UploadedModel
 from app.db.session import get_db
 from app.registries.satellite_provider_registry import SATELLITE_PROVIDERS
 from app.repositories.satellite_provider_repo import apply_override, get_overrides_by_key
+from app.repositories import imagery_provider_repo
 from app.repositories.uploaded_model_repo import ALLOWED_MODEL_EXTS, import_legacy_models
 from app.schemas.admin import (
     AdminProfileUpdateRequest,
@@ -58,6 +59,8 @@ from app.schemas.admin import (
     SatelliteProviderUpdateRequest,
 )
 from app.services import audit_service, config_service, gee_service, storage_service
+from app.services.imagery_provider_config import admin_connection_view, effective_settings, save_connection
+from app.services.commercial_imagery_service import COMMERCIAL_PROVIDER_KEYS
 from app.core.viewer_features import (
     FEATURE_ACCESS_DENIED_DETAIL,
     VIEWER_FEATURES,
@@ -1371,6 +1374,104 @@ def admin_satellite_provider_reset(key: str, admin: AdminUser = Depends(require_
     db.commit()
     audit_service.log_audit(db, admin.id, "satellite_provider.reset", "satellite_provider", key)
     return {"message": "Override dihapus, kembali ke default registry"}
+
+
+# -- Raw imagery provider catalog and commercial connectors --
+@router.get("/imagery-providers")
+def admin_imagery_providers_list(
+    admin: AdminUser = Depends(require_permission("satellite.read")), db: Session = Depends(get_db)
+):
+    settings = effective_settings(db)
+    rows = imagery_provider_repo.list_provider_rows(db)
+    for row in rows:
+        row["connection"] = admin_connection_view(row["key"], settings)
+        row["connection"]["can_write_credential"] = admin_has_permission(admin, "secret.write")
+    return {"providers": rows}
+
+
+@router.put("/imagery-providers/{key}")
+async def admin_imagery_provider_update(
+    key: str,
+    request: Request,
+    admin: AdminUser = Depends(require_permission("satellite.write")),
+    db: Session = Depends(get_db),
+):
+    if key not in imagery_provider_repo.provider_catalog():
+        raise HTTPException(status_code=404, detail="Provider citra tidak ditemukan")
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="Payload harus berupa objek")
+    allowed = {
+        "name", "provider", "group", "description", "resolution_m", "revisit_days", "start_year",
+        "gee_collection", "cloud_property", "is_active", "display_order",
+    }
+    if set(payload) - allowed:
+        raise HTTPException(status_code=422, detail="Ada field provider yang tidak dapat diedit")
+    patch: dict = {}
+    for field, value in payload.items():
+        if field in {"is_active"}:
+            if not isinstance(value, bool):
+                raise HTTPException(status_code=422, detail="is_active harus bernilai true atau false")
+        elif field == "display_order":
+            if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 10000:
+                raise HTTPException(status_code=422, detail="display_order harus berupa bilangan 0–10000")
+        elif field in {"resolution_m", "revisit_days", "start_year"}:
+            if value is not None and (not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0):
+                raise HTTPException(status_code=422, detail=f"{field} harus berupa bilangan positif")
+        elif not isinstance(value, str) or len(value) > (10000 if field == "description" else 2048):
+            raise HTTPException(status_code=422, detail=f"{field} tidak valid")
+        patch[field] = value
+    imagery_provider_repo.update_provider(db, key, patch)
+    audit_service.log_audit(db, admin.id, "imagery_provider.update", "imagery_provider", key, detail={"fields": sorted(patch)})
+    meta = imagery_provider_repo.list_provider_rows(db)
+    provider = next(item for item in meta if item["key"] == key)
+    provider["connection"] = admin_connection_view(key, effective_settings(db))
+    provider["connection"]["can_write_credential"] = admin_has_permission(admin, "secret.write")
+    return {"message": "Provider citra diperbarui", "provider": provider}
+
+
+@router.put("/imagery-providers/{key}/connection")
+async def admin_imagery_provider_connection_update(
+    key: str,
+    request: Request,
+    admin: AdminUser = Depends(require_permission("satellite.write")),
+    db: Session = Depends(get_db),
+):
+    if key not in COMMERCIAL_PROVIDER_KEYS:
+        raise HTTPException(status_code=404, detail="Provider ini tidak memiliki konfigurasi koneksi komersial")
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="Payload harus berupa objek")
+    if (payload.get("credential") or payload.get("clear_credential")) and not admin_has_permission(admin, "secret.write"):
+        raise HTTPException(status_code=403, detail="Perubahan credential hanya dapat dilakukan administrator dengan secret.write")
+    updated = save_connection(db, key, payload, admin.id)
+    audit_service.log_audit(
+        db, admin.id, "imagery_provider.connection_update", "imagery_provider", key,
+        detail={
+            "updated_keys": updated,
+            "credential_updated": bool(payload.get("credential")),
+            "credential_cleared": bool(payload.get("clear_credential")),
+        },
+    )
+    return {"message": "Konfigurasi koneksi provider diperbarui", "updated": updated,
+            "connection": {
+                **admin_connection_view(key, effective_settings(db)),
+                "can_write_credential": admin_has_permission(admin, "secret.write"),
+            }}
+
+
+@router.delete("/imagery-providers/{key}")
+def admin_imagery_provider_reset(
+    key: str,
+    admin: AdminUser = Depends(require_permission("satellite.write")),
+    db: Session = Depends(get_db),
+):
+    if key not in imagery_provider_repo.provider_catalog():
+        raise HTTPException(status_code=404, detail="Provider citra tidak ditemukan")
+    if not imagery_provider_repo.reset_provider(db, key):
+        raise HTTPException(status_code=404, detail="Provider sudah menggunakan pengaturan katalog bawaan")
+    audit_service.log_audit(db, admin.id, "imagery_provider.reset", "imagery_provider", key)
+    return {"message": "Pengaturan provider dikembalikan ke katalog bawaan"}
 
 
 # -- Key pool status (config-derived; savegeo/backend has no live LLM-call

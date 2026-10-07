@@ -258,8 +258,8 @@ def _normalize_feature(feature: Any, request=None) -> dict[str, Any] | None:
     }
 
 
-def list_scenes(data: dict[str, Any], request=None, *, client_factory: Callable[..., httpx.Client] = httpx.Client) -> dict[str, Any]:
-    config = _configuration()
+def list_scenes(data: dict[str, Any], request=None, *, settings: Settings | None = None, client_factory: Callable[..., httpx.Client] = httpx.Client) -> dict[str, Any]:
+    config = _configuration(settings)
     if not config.api_key or not config.workspace_id:
         raise AnalysisError("Airbus OneAtlas belum siap. Isi ONEATLAS_API_KEY dan ONEATLAS_WORKSPACE_ID di backend; preview juga memerlukan hak WMTS/streaming pada akun.", 503)
     geometry = _geojson_geometry(data.get("aoi"))
@@ -271,13 +271,13 @@ def list_scenes(data: dict[str, Any], request=None, *, client_factory: Callable[
     if data.get("max_cloud_cover") is not None and max_cloud is None:
         raise AnalysisError("max_cloud_cover harus di antara 0 dan 100", 400)
 
-    timeout = max(5, int(get_settings().commercial_imagery_timeout_seconds or 30))
+    timeout = max(5, int((settings or get_settings()).commercial_imagery_timeout_seconds or 30))
     scenes: list[dict[str, Any]] = []
     truncated = False
     page_count = 0
     try:
         with client_factory(timeout=timeout, follow_redirects=False) as client:
-            token = _get_token(client)
+            token = _get_token(client, settings)
             for page in range(1, _MAX_PAGES + 1):
                 body: dict[str, Any] = {
                     "itemsPerPage": _MAX_PAGE_SIZE,
@@ -332,11 +332,11 @@ def list_scenes(data: dict[str, Any], request=None, *, client_factory: Callable[
     scenes.sort(key=lambda scene: scene.get("acquired_at") or "", reverse=True)
     from app.services.imagery_service import imagery_provider_response_meta
 
-    return {"scenes": scenes, "count": len(scenes), "satellite": imagery_provider_response_meta("airbus_oneatlas"), "truncated": truncated}
+    return {"scenes": scenes, "count": len(scenes), "satellite": imagery_provider_response_meta("airbus_oneatlas", settings=settings), "truncated": truncated}
 
 
-def get_scene_tile(data: dict[str, Any], request=None) -> dict[str, Any]:
-    config = _configuration()
+def get_scene_tile(data: dict[str, Any], request=None, *, settings: Settings | None = None) -> dict[str, Any]:
+    config = _configuration(settings)
     if not config.api_key or not config.workspace_id:
         raise AnalysisError("Airbus OneAtlas belum dikonfigurasi. Isi ONEATLAS_API_KEY dan ONEATLAS_WORKSPACE_ID di backend.", 503)
     scene_ref = str(data.get("scene_id") or "")
@@ -351,15 +351,15 @@ def get_scene_tile(data: dict[str, Any], request=None) -> dict[str, Any]:
     return {
         "scene_id": scene_ref,
         "tile_url": f"{base}/api/imagery/oneatlas-tiles/{quote(scene_ref, safe=':')}/{{z}}/{{x}}/{{y}}.png",
-        "satellite": imagery_provider_response_meta("airbus_oneatlas"),
+        "satellite": imagery_provider_response_meta("airbus_oneatlas", settings=settings),
         "resolution_m": resolution_m,
         "super_resolution": None,
         "render_mode": "scene",
     }
 
 
-def render_tile(scene_ref: str, z: int, x: int, y: int, *, client_factory: Callable[..., httpx.Client] = httpx.Client) -> bytes | None:
-    config = _configuration()
+def render_tile(scene_ref: str, z: int, x: int, y: int, *, settings: Settings | None = None, client_factory: Callable[..., httpx.Client] = httpx.Client) -> bytes | None:
+    config = _configuration(settings)
     if not config.api_key or not config.workspace_id:
         raise AnalysisError("Airbus OneAtlas belum dikonfigurasi. Isi ONEATLAS_API_KEY dan ONEATLAS_WORKSPACE_ID di backend.", 503)
     if not (0 <= z <= 22 and 0 <= x < 2**z and 0 <= y < 2**z):
@@ -373,10 +373,10 @@ def render_tile(scene_ref: str, z: int, x: int, y: int, *, client_factory: Calla
     parsed = urlparse(tile_url)
     if parsed.scheme != "https" or parsed.hostname != _ACCESS_HOST or parsed.username or parsed.password:
         raise AnalysisError("OneAtlas WMTS URL failed validation", 400)
-    timeout = max(5, int(get_settings().commercial_imagery_timeout_seconds or 30))
+    timeout = max(5, int((settings or get_settings()).commercial_imagery_timeout_seconds or 30))
     try:
         with client_factory(timeout=timeout, follow_redirects=False) as client:
-            token = _get_token(client)
+            token = _get_token(client, settings)
             with client.stream("GET", tile_url, headers={"Authorization": f"Bearer {token}", "Cache-Control": "no-cache"}, follow_redirects=False) as response:
                 if response.status_code in {301, 302, 303, 307, 308}:
                     raise AnalysisError("OneAtlas WMTS redirect was blocked", 502)

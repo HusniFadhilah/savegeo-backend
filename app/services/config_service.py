@@ -115,6 +115,30 @@ def upsert_setting(db: Session, key: str, value, updated_by: int | None = None) 
     return row
 
 
+def clear_secret_setting(db: Session, key: str, updated_by: int | None = None) -> SystemConfig:
+    """Explicitly clear a secret; kept separate from blank-value PUT no-ops."""
+    if not is_secret_key(key):
+        raise ValueError("Only secret configuration values can be explicitly cleared")
+    row = db.query(SystemConfig).filter_by(key=key).first()
+    if row is None:
+        defaults = next((config for config in DEFAULT_CONFIGS if config[0] == key), None)
+        row = SystemConfig(
+            key=key,
+            value_type=defaults[2] if defaults else "string",
+            category=defaults[3] if defaults else "general",
+            label=defaults[4] if defaults else None,
+            description=defaults[5] if defaults else None,
+            is_public=False,
+        )
+        db.add(row)
+    row.value = ""
+    row.updated_by = updated_by
+    db.commit()
+    db.refresh(row)
+    invalidate()
+    return row
+
+
 def get_analysis_defaults(db: Session) -> dict:
     """Resolve GEE analysis defaults (cloud threshold, scales, carbon vis params,
     CO2 factor, max pixels) from `system_config` - the table admins actually edit

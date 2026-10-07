@@ -52,7 +52,6 @@ from rio_tiler.models import ImageData
 from app.core.config import get_settings
 from app.registries.imagery_provider_registry import (
     IMAGERY_PROVIDERS,
-    get_imagery_provider_meta,
     provider_capabilities,
     resolve_imagery_provider,
 )
@@ -63,6 +62,8 @@ from app.services.gee_common import (
     mask_landsat_clouds,
     resolve_cloud_mask_technique,
 )
+from app.repositories import imagery_provider_repo
+from app.repositories.imagery_provider_repo import apply_cached_override, provider_meta as get_cached_imagery_provider_meta
 from app.services.commercial_imagery_service import (
     COMMERCIAL_PROVIDER_KEYS,
     configuration as commercial_configuration,
@@ -138,26 +139,38 @@ def _copernicus_geosave_available() -> bool:
     return find_spec("geosave_engine") is not None and _copernicus_geosave_service() is not None
 
 
-def list_providers() -> dict:
+def get_imagery_provider_meta(key: str | None) -> dict[str, Any]:
+    resolved = resolve_imagery_provider(key)
+    return get_cached_imagery_provider_meta(resolved)
+
+
+def list_providers(settings=None) -> dict:
     """GET /imagery/providers - static (no GEE) catalog for the satellite picker."""
     providers = dict(IMAGERY_PROVIDERS)
     copernicus_service = _copernicus_geosave_service()
     if find_spec("geosave_engine") is not None and copernicus_service is not None:
         providers.update(copernicus_service.COPERNICUS_PROVIDERS)
     catalog = {}
-    for key, meta in providers.items():
-        catalog[key] = imagery_provider_response_meta(key, meta)
+    entries = list(providers.items())
+    saved_rows = imagery_provider_repo.cached_overrides()
+    for index, (key, meta) in enumerate(entries):
+        if not imagery_provider_repo.provider_is_active(key):
+            continue
+        merged = apply_cached_override(key, meta)
+        saved_order = saved_rows.get(key, {}).get("display_order")
+        merged["display_order"] = saved_order if saved_order is not None else index
+        catalog[key] = imagery_provider_response_meta(key, merged, settings=settings)
     return {
         "providers": catalog,
         "default": "sentinel2",
     }
 
 
-def imagery_provider_response_meta(key: str, meta: dict[str, Any] | None = None) -> dict[str, Any]:
+def imagery_provider_response_meta(key: str, meta: dict[str, Any] | None = None, *, settings=None) -> dict[str, Any]:
     provider = meta or get_imagery_provider_meta(key)
     enriched = {**provider, "capabilities": provider_capabilities(provider)}
     if key in COMMERCIAL_PROVIDER_KEYS:
-        enriched.update(commercial_provider_meta(key))
+        enriched.update(commercial_provider_meta(key) if settings is None else commercial_provider_meta(key, settings))
     return enriched
 
 
@@ -370,6 +383,7 @@ def _scene_from_stac_item(
     meta: dict[str, Any],
     producer: str | None,
     request=None,
+    settings=None,
 ) -> dict[str, Any] | None:
     scene_url = _stac_item_url(item_url, item)
     assets = _stac_asset_options(scene_url, item)
@@ -392,9 +406,14 @@ def _scene_from_stac_item(
     is_commercial = meta.get("key") in COMMERCIAL_PROVIDER_KEYS
     if is_commercial:
         parsed_scene_url = urlparse(scene_url)
-        catalog_host = urlparse(commercial_configuration(str(meta["key"]))["catalog_url"]).hostname
+        config = (
+            commercial_configuration(str(meta["key"]))
+            if settings is None else commercial_configuration(str(meta["key"]), settings)
+        )
+        catalog_url = config["catalog_url"]
+        catalog_host = urlparse(catalog_url).hostname
         if (
-            _url_origin(scene_url) != _url_origin(commercial_configuration(str(meta["key"]))["catalog_url"])
+            _url_origin(scene_url) != _url_origin(catalog_url)
             or parsed_scene_url.scheme != "https" or parsed_scene_url.hostname != catalog_host
             or parsed_scene_url.username or parsed_scene_url.password or parsed_scene_url.query or parsed_scene_url.fragment
         ):
@@ -448,6 +467,7 @@ def _stac_api_search(
     interval: str,
     producer: str | None,
     request=None,
+    settings=None,
 ) -> tuple[list[dict[str, Any]], bool | None]:
     body: dict[str, Any] = {"bbox": aoi_bbox, "datetime": interval, "limit": _MAX_SCENES}
     collections = data.get("stac_collections") or data.get("stac_collection")
@@ -481,7 +501,7 @@ def _stac_api_search(
             cloud = (feature.get("properties") or {}).get("eo:cloud_cover")
             if data.get("max_cloud_cover") is not None and cloud is not None and float(cloud) > float(data["max_cloud_cover"]):
                 continue
-            scene = _scene_from_stac_item(scene_url, feature, meta, producer, request)
+            scene = _scene_from_stac_item(scene_url, feature, meta, producer, request, settings)
             if scene:
                 scenes.append(scene)
             if len(scenes) >= _MAX_SCENES:
@@ -505,6 +525,7 @@ def _list_static_stac_scenes(
     end_dt: datetime,
     producer: str | None,
     request=None,
+    settings=None,
 ) -> tuple[list[dict[str, Any]], bool]:
     max_cloud_cover = data.get("max_cloud_cover")
     scenes: list[dict[str, Any]] = []
@@ -534,7 +555,7 @@ def _list_static_stac_scenes(
                 cloud = props.get(meta.get("cloud_property") or "eo:cloud_cover")
                 if max_cloud_cover is not None and cloud is not None and float(cloud) > float(max_cloud_cover):
                     continue
-                scene = _scene_from_stac_item(scene_url, feature, meta, producer, request)
+                scene = _scene_from_stac_item(scene_url, feature, meta, producer, request, settings)
                 if scene:
                     scenes.append(scene)
                 if len(scenes) >= _MAX_SCENES:
@@ -551,7 +572,7 @@ def _list_static_stac_scenes(
             cloud = props.get(meta.get("cloud_property") or "eo:cloud_cover")
             if max_cloud_cover is not None and cloud is not None and float(cloud) > float(max_cloud_cover):
                 continue
-            scene = _scene_from_stac_item(url, node, meta, producer, request)
+            scene = _scene_from_stac_item(url, node, meta, producer, request, settings)
             if scene:
                 scenes.append(scene)
             continue
@@ -596,6 +617,7 @@ def _list_cog_stac_scenes(
     producer: str | None = None,
     request=None,
     headers: dict[str, str] | None = None,
+    settings=None,
 ) -> dict:
     if not data.get("aoi"):
         raise AnalysisError("aoi is required", 400)
@@ -612,18 +634,18 @@ def _list_cog_stac_scenes(
     start_dt, end_dt, interval = _stac_datetime_range(data, meta["name"])
 
     try:
-        timeout = max(5, get_settings().commercial_imagery_timeout_seconds) if provider_key in COMMERCIAL_PROVIDER_KEYS else 30
+        timeout = max(5, (settings or get_settings()).commercial_imagery_timeout_seconds) if provider_key in COMMERCIAL_PROVIDER_KEYS else 30
         with httpx.Client(timeout=timeout, follow_redirects=False, headers=headers or {}) as client:
             root = _fetch_json(client, catalog_url)
             search_url = data.get("stac_search_url") or _find_stac_search_url(catalog_url, root)
             if search_url:
                 if provider_key in COMMERCIAL_PROVIDER_KEYS and _url_origin(search_url) != _url_origin(catalog_url):
                     raise AnalysisError("STAC search link lintas host dengan credential diblokir", 502)
-                scenes, api_truncated = _stac_api_search(client, search_url, data, meta, aoi_bbox, interval, producer, request)
+                scenes, api_truncated = _stac_api_search(client, search_url, data, meta, aoi_bbox, interval, producer, request, settings)
                 truncated = api_truncated if api_truncated is not None else len(scenes) >= _MAX_SCENES
             else:
                 scenes, truncated = _list_static_stac_scenes(
-                    client, catalog_url, data, meta, aoi_bbox, start_dt, end_dt, producer, request
+                    client, catalog_url, data, meta, aoi_bbox, start_dt, end_dt, producer, request, settings
                 )
     except httpx.HTTPStatusError as exc:
         if provider_key in COMMERCIAL_PROVIDER_KEYS:
@@ -649,7 +671,7 @@ def _list_cog_stac_scenes(
     return {
         "scenes": scenes,
         "count": len(scenes),
-        "satellite": imagery_provider_response_meta(provider_key, meta),
+        "satellite": imagery_provider_response_meta(provider_key, meta, settings=settings),
         "truncated": truncated,
     }
 
@@ -950,12 +972,12 @@ def render_big_ctsrt_tile(z: int, x: int, y: int, service_name: str | None = Non
         return None
 
 
-def list_scenes(data: dict, request=None) -> dict:
+def list_scenes(data: dict, request=None, settings=None) -> dict:
     if data.get("satellite") == "himawari":
         raise AnalysisError("Himawari menyediakan frame waktu JMA, bukan katalog scene AOI", 400)
 
     if data.get("satellite") == "airbus_oneatlas":
-        return oneatlas_imagery_service.list_scenes(data, request)
+        return oneatlas_imagery_service.list_scenes(data, request, settings=settings)
 
     if data.get("satellite") == "blacksky_spectra":
         raise AnalysisError(
@@ -989,7 +1011,7 @@ def list_scenes(data: dict, request=None) -> dict:
 
     if data.get("satellite") in COMMERCIAL_PROVIDER_KEYS:
         provider_key = str(data["satellite"])
-        config = commercial_configuration(provider_key)
+        config = commercial_configuration(provider_key, settings)
         if not config["configured"]:
             raise AnalysisError(
                 f"{config['label']} belum lengkap. Lengkapi URL STAC, koleksi STAC, dan credential di konfigurasi backend.",
@@ -1002,7 +1024,8 @@ def list_scenes(data: dict, request=None) -> dict:
             config["catalog_url"],
             config["label"],
             request,
-            headers=commercial_request_headers(provider_key),
+            headers=commercial_request_headers(provider_key, settings),
+            settings=settings,
         )
 
     if data.get("satellite") in _COPERNICUS_PROVIDER_KEYS:
@@ -1295,12 +1318,12 @@ def _apply_super_resolution(img: ee.Image, meta: dict, mode: str | None) -> tupl
 
 
 
-def get_scene_tile(data: dict, request=None) -> dict:
+def get_scene_tile(data: dict, request=None, settings=None) -> dict:
     if data.get("satellite") == "himawari":
         raise AnalysisError("Himawari dimuat sebagai layer tile JMA langsung dari pemilih waktu", 400)
 
     if data.get("satellite") == "airbus_oneatlas":
-        return oneatlas_imagery_service.get_scene_tile(data, request)
+        return oneatlas_imagery_service.get_scene_tile(data, request, settings=settings)
 
     if data.get("satellite") == "blacksky_spectra":
         raise AnalysisError(
@@ -1379,7 +1402,7 @@ def get_scene_tile(data: dict, request=None) -> dict:
 
     if data.get("satellite") in COMMERCIAL_PROVIDER_KEYS:
         provider_key = str(data["satellite"])
-        if not commercial_configuration(provider_key)["configured"]:
+        if not commercial_configuration(provider_key, settings)["configured"]:
             raise AnalysisError(f"{provider_key} belum dikonfigurasi di backend", 503)
         if not data.get("scene_id"):
             raise AnalysisError("scene_id is required", 400)
@@ -1400,7 +1423,7 @@ def get_scene_tile(data: dict, request=None) -> dict:
         return {
             "scene_id": data["scene_id"],
             "tile_url": f"{base}/api/imagery/commercial-tiles/{provider_key}/{{z}}/{{x}}/{{y}}.png?{query}",
-            "satellite": imagery_provider_response_meta(provider_key),
+            "satellite": imagery_provider_response_meta(provider_key, settings=settings),
             "super_resolution": None,
         }
 
@@ -1553,10 +1576,10 @@ def get_scene_tile(data: dict, request=None) -> dict:
     }
 
 
-def _stac_asset_href(item_url: str, asset_key: str, provider_key: str | None = None) -> str:
+def _stac_asset_href(item_url: str, asset_key: str, provider_key: str | None = None, settings=None) -> str:
     fetch_url = _resolve_commercial_item(provider_key, item_url) if provider_key in COMMERCIAL_PROVIDER_KEYS else item_url
-    headers = commercial_request_headers(provider_key) if provider_key in COMMERCIAL_PROVIDER_KEYS else None
-    timeout = max(5, get_settings().commercial_imagery_timeout_seconds) if provider_key in COMMERCIAL_PROVIDER_KEYS else 30
+    headers = commercial_request_headers(provider_key, settings) if provider_key in COMMERCIAL_PROVIDER_KEYS else None
+    timeout = max(5, (settings or get_settings()).commercial_imagery_timeout_seconds) if provider_key in COMMERCIAL_PROVIDER_KEYS else 30
     with httpx.Client(timeout=timeout, follow_redirects=True, headers=headers or {}) as client:
         item = _fetch_json(client, fetch_url)
     assets = item.get("assets") or {}
@@ -1568,8 +1591,8 @@ def _stac_asset_href(item_url: str, asset_key: str, provider_key: str | None = N
     return href
 
 
-def _readable_stac_asset_href(item_url: str, asset_key: str, provider_key: str | None = None) -> str:
-    href = _stac_asset_href(item_url, asset_key, provider_key)
+def _readable_stac_asset_href(item_url: str, asset_key: str, provider_key: str | None = None, settings=None) -> str:
+    href = _stac_asset_href(item_url, asset_key, provider_key, settings)
     _validate_public_http_url(href, "URL asset COG")
     # Cache the stable asset URL, never an expiring SAS token.
     if urlparse(item_url).hostname == "planetarycomputer.microsoft.com":
@@ -1623,8 +1646,8 @@ def _parse_cog_rescale(value: str | None, band_count: int) -> list[tuple[float, 
     return ranges
 
 
-def _render_cog_tile(item_url: str, z: int, x: int, y: int, asset_key: str, bands: str | None, rescale: str | None, provider_key: str | None = None) -> bytes | None:
-    href = _readable_stac_asset_href(item_url, asset_key, provider_key)
+def _render_cog_tile(item_url: str, z: int, x: int, y: int, asset_key: str, bands: str | None, rescale: str | None, provider_key: str | None = None, settings=None) -> bytes | None:
+    href = _readable_stac_asset_href(item_url, asset_key, provider_key, settings)
     _validate_public_http_url(href, "URL asset COG")
     indexes = _parse_cog_bands(bands)
     with rasterio.Env():
@@ -1644,8 +1667,8 @@ def _render_cog_tile(item_url: str, z: int, x: int, y: int, asset_key: str, band
     return rendered.render(img_format="PNG")
 
 
-def get_stac_asset_download_url(item_url: str, asset_key: str, provider_key: str | None = None) -> str:
-    href = _readable_stac_asset_href(item_url, asset_key, provider_key)
+def get_stac_asset_download_url(item_url: str, asset_key: str, provider_key: str | None = None, settings=None) -> str:
+    href = _readable_stac_asset_href(item_url, asset_key, provider_key, settings)
     _validate_public_http_url(href, "URL asset COG")
     return href
 
@@ -1656,6 +1679,7 @@ def open_commercial_asset_stream(
     asset_key: str,
     *,
     client_factory=httpx.Client,
+    settings=None,
 ):
     """Open a validated commercial asset for a bounded, credential-safe proxy.
 
@@ -1665,17 +1689,17 @@ def open_commercial_asset_stream(
     """
     if provider_key not in _COMMERCIAL_STAC_PROVIDER_KEYS:
         raise AnalysisError("Provider commercial tidak dikenal", 400)
-    if not commercial_configuration(provider_key)["configured"]:
+    if not commercial_configuration(provider_key, settings)["configured"]:
         raise AnalysisError(f"{provider_key} belum dikonfigurasi di backend", 503)
     if not re.fullmatch(r"[A-Za-z0-9._:-]{1,80}", str(asset_key or "")):
         raise AnalysisError("Asset commercial tidak valid", 400)
-    href = _stac_asset_href(scene_id, asset_key, provider_key)
-    config = commercial_configuration(provider_key)
+    href = _stac_asset_href(scene_id, asset_key, provider_key, settings)
+    config = commercial_configuration(provider_key, settings)
     catalog_origin = _url_origin(config["catalog_url"])
-    timeout = max(5, get_settings().commercial_imagery_timeout_seconds)
+    timeout = max(5, (settings or get_settings()).commercial_imagery_timeout_seconds)
     client = client_factory(timeout=timeout, follow_redirects=False)
     url = href
-    headers = commercial_request_headers(provider_key) if _url_origin(url) == catalog_origin else {"User-Agent": "SAVEGEO/1.0"}
+    headers = commercial_request_headers(provider_key, settings) if _url_origin(url) == catalog_origin else {"User-Agent": "SAVEGEO/1.0"}
     response = None
     try:
         for _ in range(6):
@@ -1750,9 +1774,10 @@ def render_stac_cog_tile(
     asset_key: str = "visual",
     bands: str | None = None,
     rescale: str | None = None,
+    settings=None,
 ) -> bytes | None:
     try:
-        return _render_cog_tile(item_url, z, x, y, asset_key, bands, rescale)
+        return _render_cog_tile(item_url, z, x, y, asset_key, bands, rescale, settings=settings)
     except (TileOutsideBounds, PointOutsideBounds):
         return None
     except AnalysisError:
@@ -1851,16 +1876,17 @@ def render_commercial_stac_tile(
     asset_key: str = "visual",
     bands: str | None = None,
     rescale: str | None = None,
+    settings=None,
 ) -> bytes | None:
     if provider_key not in _COMMERCIAL_STAC_PROVIDER_KEYS:
         raise AnalysisError("Provider commercial tidak dikenal", 400)
-    if not commercial_configuration(provider_key)["configured"]:
+    if not commercial_configuration(provider_key, settings)["configured"]:
         raise AnalysisError(f"{provider_key} belum dikonfigurasi di backend", 503)
     try:
         # The item lookup is authenticated. Providers should return a signed
         # COG href for range-based rendering; the credential is never sent to
         # the browser or embedded in the tile URL.
-        return _render_cog_tile(item_url, z, x, y, asset_key, bands, rescale, provider_key)
+        return _render_cog_tile(item_url, z, x, y, asset_key, bands, rescale, provider_key, settings)
     except (TileOutsideBounds, PointOutsideBounds):
         return None
     except AnalysisError:
@@ -1870,8 +1896,8 @@ def render_commercial_stac_tile(
         raise AnalysisError(f"Gagal merender tile {provider_key}: {exc}", 502)
 
 
-def render_oneatlas_tile(scene_id: str, z: int, x: int, y: int) -> bytes | None:
-    return oneatlas_imagery_service.render_tile(scene_id, z, x, y)
+def render_oneatlas_tile(scene_id: str, z: int, x: int, y: int, *, settings=None) -> bytes | None:
+    return oneatlas_imagery_service.render_tile(scene_id, z, x, y, settings=settings)
 
 
 def get_dem_tile(data: dict) -> dict:

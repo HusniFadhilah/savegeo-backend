@@ -22,6 +22,10 @@ from app.core.security import get_current_app_viewer
 from app.core.viewer_features import require_feature
 from app.core.config import get_settings
 from app.db.models.user import User
+from app.db.session import get_db
+from sqlalchemy.orm import Session
+from app.repositories import imagery_provider_repo
+from app.services.imagery_provider_config import effective_settings
 from app.services import copernicus_geosave_service
 from app.services import imagery_service
 from app.services import samgeo_service
@@ -82,18 +86,20 @@ def imagery_samgeo_result(job_id: str, viewer=Depends(get_current_app_viewer)):
 
 
 @router.get("/imagery/providers")
-def imagery_providers():
+def imagery_providers(db: Session = Depends(get_db)):
     """Static (no GEE) catalog of selectable satellite/sensor providers for the
     scene browser - separate from GET /vegetation/satellites (index-analysis
     catalog); see imagery_provider_registry.py for why."""
-    return imagery_service.list_providers()
+    imagery_provider_repo.refresh_cache(db)
+    return imagery_service.list_providers(effective_settings(db))
 
 
 @router.get("/imagery/provider-status")
-def imagery_provider_status(viewer=Depends(get_current_app_viewer)):
+def imagery_provider_status(viewer=Depends(get_current_app_viewer), db: Session = Depends(get_db)):
     """Return commercial connector status without exposing credentials."""
+    settings = effective_settings(db)
     return {
-        key: imagery_service.commercial_provider_meta(key)
+        key: imagery_service.commercial_provider_meta(key, settings)
         for key in imagery_service.COMMERCIAL_PROVIDER_KEYS
     }
 
@@ -172,13 +178,18 @@ def _requires_ee(data: dict) -> bool:
 
 
 @router.post("/imagery/scenes", dependencies=[Depends(get_current_app_viewer)])
-async def imagery_scenes(request: Request):
+async def imagery_scenes(request: Request, db: Session = Depends(get_db)):
     data = await request.json()
+    imagery_provider_repo.refresh_cache(db)
+    provider_key = str(data.get("satellite") or "")
+    if provider_key in imagery_provider_repo.provider_catalog() and not imagery_provider_repo.provider_is_active(provider_key):
+        raise HTTPException(status_code=404, detail="Provider citra ini dinonaktifkan administrator")
+    settings = effective_settings(db)
     request_id = getattr(request.state, "request_id", "unknown")
     try:
         if _requires_ee(data):
             require_ee(request)
-        return await run_in_threadpool(imagery_service.list_scenes, data, request)
+        return await run_in_threadpool(imagery_service.list_scenes, data, request, settings)
     except CopernicusAnalysisError as e:
         logger.warning("Imagery scenes provider error request_id=%s status=%s provider=%s", request_id, e.status_code, data.get("satellite"))
         raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
@@ -196,12 +207,17 @@ async def imagery_scenes(request: Request):
 
 
 @router.post("/imagery/scene-tile", dependencies=[Depends(get_current_app_viewer)])
-async def imagery_scene_tile(request: Request):
+async def imagery_scene_tile(request: Request, db: Session = Depends(get_db)):
     data = await request.json()
+    imagery_provider_repo.refresh_cache(db)
+    provider_key = str(data.get("satellite") or "")
+    if provider_key in imagery_provider_repo.provider_catalog() and not imagery_provider_repo.provider_is_active(provider_key):
+        raise HTTPException(status_code=404, detail="Provider citra ini dinonaktifkan administrator")
+    settings = effective_settings(db)
     try:
         if _requires_ee(data):
             require_ee(request)
-        return await run_in_threadpool(imagery_service.get_scene_tile, data, request)
+        return await run_in_threadpool(imagery_service.get_scene_tile, data, request, settings)
     except CopernicusAnalysisError as e:
         raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
     except AnalysisError as e:
@@ -287,12 +303,16 @@ def imagery_commercial_tile(
     asset_key: str = "visual",
     bands: str | None = None,
     rescale: str | None = None,
+    db: Session = Depends(get_db),
 ):
     try:
         if not (0 <= z <= 22 and 0 <= x < 2**z and 0 <= y < 2**z):
             raise AnalysisError("Tile coordinates are invalid", 400)
+        imagery_provider_repo.refresh_cache(db)
+        if not imagery_provider_repo.provider_is_active(provider_key):
+            raise AnalysisError("Provider citra ini dinonaktifkan administrator", 404)
         png_bytes = imagery_service.render_commercial_stac_tile(
-            provider_key, scene_id, z, x, y, asset_key, bands, rescale
+            provider_key, scene_id, z, x, y, asset_key, bands, rescale, effective_settings(db)
         )
     except AnalysisError as e:
         raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
@@ -305,9 +325,12 @@ def imagery_commercial_tile(
 
 
 @router.get("/imagery/oneatlas-tiles/{scene_id}/{z}/{x}/{y}.png", dependencies=[Depends(get_current_app_viewer)])
-def imagery_oneatlas_tile(scene_id: str, z: int, x: int, y: int):
+def imagery_oneatlas_tile(scene_id: str, z: int, x: int, y: int, db: Session = Depends(get_db)):
     try:
-        png_bytes = imagery_service.render_oneatlas_tile(scene_id, z, x, y)
+        imagery_provider_repo.refresh_cache(db)
+        if not imagery_provider_repo.provider_is_active("airbus_oneatlas"):
+            raise AnalysisError("Provider citra ini dinonaktifkan administrator", 404)
+        png_bytes = imagery_service.render_oneatlas_tile(scene_id, z, x, y, settings=effective_settings(db))
     except AnalysisError as e:
         raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
     except Exception as e:  # noqa: BLE001
@@ -367,9 +390,14 @@ def imagery_stac_source(item_url: str, asset_key: str = "visual"):
 
 
 @router.get("/imagery/commercial-source", dependencies=[Depends(get_current_app_viewer)])
-def imagery_commercial_source(provider_key: str, scene_id: str, asset_key: str = "visual"):
+def imagery_commercial_source(provider_key: str, scene_id: str, asset_key: str = "visual", db: Session = Depends(get_db)):
     try:
-        stream, media_type, filename = imagery_service.open_commercial_asset_stream(provider_key, scene_id, asset_key)
+        imagery_provider_repo.refresh_cache(db)
+        if not imagery_provider_repo.provider_is_active(provider_key):
+            raise AnalysisError("Provider citra ini dinonaktifkan administrator", 404)
+        stream, media_type, filename = imagery_service.open_commercial_asset_stream(
+            provider_key, scene_id, asset_key, settings=effective_settings(db)
+        )
     except AnalysisError as e:
         raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
     return StreamingResponse(

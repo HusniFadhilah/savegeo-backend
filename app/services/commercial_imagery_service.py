@@ -85,6 +85,7 @@ def configuration(provider_key: str, settings: Settings | None = None) -> dict[s
     collection = str(getattr(settings, definition["collection"], "") or "").strip()
     credential = str(getattr(settings, definition["credential"], "") or "").strip()
     scheme = str(getattr(settings, definition["scheme"], "bearer") or "bearer").strip().lower()
+    requires_credential = scheme != "none"
     return {
         "provider_key": provider_key,
         "label": definition["label"],
@@ -93,7 +94,7 @@ def configuration(provider_key: str, settings: Settings | None = None) -> dict[s
         "credential_configured": bool(credential),
         "catalog_configured": bool(catalog_url),
         "collection_configured": bool(collection),
-        "configured": bool(catalog_url and collection and credential),
+        "configured": bool(catalog_url and collection and (credential or not requires_credential)),
         "auth_scheme": scheme if scheme in {"bearer", "basic", "none"} else "bearer",
     }
 

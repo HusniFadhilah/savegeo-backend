@@ -72,6 +72,40 @@ DEFAULT_CONFIGS: list[tuple[str, str, str, str, str, str, bool]] = [
     ("app.version", get_product_version(), "string", "app",
      "Platform version", "", True),
 
+    # -- Raw satellite imagery providers (credentials are write-only in admin) --
+    ("imagery.planet.stac_url", os.getenv("PLANET_STAC_URL", ""), "string", "satellite",
+     "Planet STAC URL", "Catalog URL atau endpoint search STAC Planet", False),
+    ("imagery.planet.collection", os.getenv("PLANET_STAC_COLLECTION", ""), "string", "satellite",
+     "Planet STAC collection", "ID koleksi Planet yang dapat diakses akun", False),
+    ("imagery.planet.api_key", os.getenv("PLANET_API_KEY", ""), "string", "satellite",
+     "Planet API key", "Credential Planet; ditampilkan sebagai status saja", False),
+    ("imagery.planet.auth_scheme", os.getenv("PLANET_AUTH_SCHEME", "basic"), "string", "satellite",
+     "Planet auth scheme", "Metode autentikasi: basic, bearer, atau none", False),
+    ("imagery.vantor.stac_url", os.getenv("VANTOR_STAC_URL", ""), "string", "satellite",
+     "Vantor STAC URL", "Catalog URL atau endpoint search STAC Vantor", False),
+    ("imagery.vantor.collection", os.getenv("VANTOR_STAC_COLLECTION", ""), "string", "satellite",
+     "Vantor STAC collection", "ID koleksi Vantor/Maxar yang dapat diakses akun", False),
+    ("imagery.vantor.api_token", os.getenv("VANTOR_API_TOKEN", ""), "string", "satellite",
+     "Vantor API token", "Credential Vantor; ditampilkan sebagai status saja", False),
+    ("imagery.vantor.auth_scheme", os.getenv("VANTOR_AUTH_SCHEME", "bearer"), "string", "satellite",
+     "Vantor auth scheme", "Metode autentikasi: basic, bearer, atau none", False),
+    ("imagery.iceye.stac_url", os.getenv("ICEYE_STAC_URL", ""), "string", "satellite",
+     "ICEYE STAC URL", "Catalog URL atau endpoint search STAC ICEYE", False),
+    ("imagery.iceye.collection", os.getenv("ICEYE_STAC_COLLECTION", ""), "string", "satellite",
+     "ICEYE STAC collection", "ID koleksi ICEYE yang dapat diakses akun", False),
+    ("imagery.iceye.api_token", os.getenv("ICEYE_API_TOKEN", ""), "string", "satellite",
+     "ICEYE API token", "Credential ICEYE; ditampilkan sebagai status saja", False),
+    ("imagery.iceye.auth_scheme", os.getenv("ICEYE_AUTH_SCHEME", "bearer"), "string", "satellite",
+     "ICEYE auth scheme", "Metode autentikasi: basic, bearer, atau none", False),
+    ("imagery.oneatlas.api_key", os.getenv("ONEATLAS_API_KEY", ""), "string", "satellite",
+     "Airbus OneAtlas API key", "Credential Airbus OneAtlas; ditampilkan sebagai status saja", False),
+    ("imagery.oneatlas.workspace_id", os.getenv("ONEATLAS_WORKSPACE_ID", ""), "string", "satellite",
+     "Airbus OneAtlas workspace", "Workspace ID untuk pencarian akun Airbus", False),
+    ("imagery.blacksky.api_contract_reference", os.getenv("BLACKSKY_SPECTRA_API_CONTRACT_REFERENCE", ""), "string", "satellite",
+     "BlackSky API contract reference", "Referensi kontrak API pelanggan; tidak mengaktifkan konektor", False),
+    ("imagery.blacksky.credential", os.getenv("BLACKSKY_SPECTRA_CREDENTIAL", ""), "string", "satellite",
+     "BlackSky credential", "Credential placeholder; konektor tetap nonaktif tanpa kontrak API resmi", False),
+
     # -- ArcGIS connection --
     ("arcgis.enabled", os.getenv("ARCGIS_ENABLED", "false"), "bool", "arcgis",
      "Enable ArcGIS", "Allow ArcGIS REST services in the application", False),
@@ -156,7 +190,7 @@ DEFAULT_CONFIGS: list[tuple[str, str, str, str, str, str, bool]] = [
 
 # Keys with these suffixes are treated as secrets: masked on GET, write-only on PUT
 # (empty-value PUT is a no-op so a masked GET->PUT roundtrip can't accidentally wipe them).
-SECRET_KEY_SUFFIXES = ("_api_key", ".api_key", "_secret", "_password", "_token", "_private_key", "_secret_key", "_api_secret")
+SECRET_KEY_SUFFIXES = ("_api_key", ".api_key", "_secret", "_password", "_token", "_credential", "_private_key", "_secret_key", "_api_secret")
 
 
 def is_secret_key(key: str) -> bool:
