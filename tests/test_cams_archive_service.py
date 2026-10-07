@@ -63,6 +63,8 @@ def archive(tmp_path, monkeypatch):
 def test_public_manifest_hides_server_paths_and_detects_missing_rasters(archive):
     directory, identifier = archive
     payload = service.public_archive("test-fire")
+    assert payload["layers"]["organic_aod"]["rendering"]["maximum"] == 1
+    assert payload["layers"]["organic_aod"]["maximum"] == 2
     assert "filename" not in payload["layers"]["organic_aod"]["frames"][0]
     (directory / (identifier + ".tif")).unlink()
     with pytest.raises(CamsRequestError, match="lengkap"):
@@ -84,6 +86,53 @@ def test_tiles_are_png_with_mask_and_match_the_legend(archive):
     visible = image[image[:, :, 3] == 255]
     expected_max = [64, 0, 107]
     assert np.any(np.all(visible[:, :3] == expected_max, axis=1))
+    # Smooth aerosol transitions and low-value alpha fading, not two enlarged
+    # source pixel colours or a fully opaque wash over the basemap.
+    assert len(np.unique(image[image[:, :, 3] > 0, :3], axis=0)) > 20
+    assert ((image[:, :, 3] > 0) & (image[:, :, 3] < 230)).any()
+
+
+def test_point_reads_native_cells_including_zero_and_reports_missing_data(archive):
+    _, identifier = archive
+    point = service.point("test-fire", "organic_aod", identifier, 60, -20)
+    assert point["data_available"] is True
+    assert point["value"] == 1
+    assert point["center"] == {"lat": 42.5, "lon": -90}
+    assert point["valid_at"] == "2026-10-03T00:00:00Z"
+    assert point["mass_tonnes"] is None
+    zero = service.point("test-fire", "organic_aod", identifier, 60, 20)
+    assert zero["data_available"] is True and zero["value"] == 0
+    assert service.point("test-fire", "organic_aod", identifier, -10, 20)["value"] == 2
+    missing = service.point("test-fire", "organic_aod", identifier, -10, -20)
+    assert missing["reason"] == "nodata" and missing["value"] is None
+    outside = service.point("test-fire", "organic_aod", identifier, -89, 20)
+    assert outside["reason"] == "outside_coverage" and outside["center"] is None
+
+
+@pytest.mark.parametrize("lat,lon", [(float("nan"), 0), (0, float("inf")), (91, 0), (0, -181)])
+def test_point_rejects_invalid_coordinates(archive, lat, lon):
+    with pytest.raises(CamsRequestError, match="Koordinat"):
+        service.point("test-fire", "organic_aod", archive[1], lat, lon)
+
+
+def test_gfas_point_integrates_native_cell_area_and_actual_interval(archive):
+    directory, identifier = archive
+    with rasterio.open(directory / (identifier + ".tif"), "r+") as dst:
+        dst.transform = from_origin(110, 0.2, 0.1, 0.1)
+        dst.write(np.array([[1e-6, 0], [np.nan, 2e-6]], dtype="float32"), 1)
+    manifest_path = directory / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    layer = manifest["layers"].pop("organic_aod")
+    layer["frames"][0]["interval_end"] = "2026-10-03T12:00:00Z"
+    layer["display_unit"] = "t C/km²/day"
+    manifest["layers"]["burnt_carbon"] = layer
+    manifest_path.write_text(json.dumps(manifest))
+    point = service.point("test-fire", "burnt_carbon", identifier, 0.18, 110.08)
+    assert point["center"] == pytest.approx({"lat": 0.15, "lon": 110.05})
+    area, _ = service.cams_emissions_service.WGS84_GEOD.geometry_area_perimeter(box(110, 0.1, 110.1, 0.2))
+    assert point["mass_tonnes"] == pytest.approx(1e-6 * abs(area) * 43200 / 1000)
+    assert point["value"] == pytest.approx(86.4)
+    assert point["source_unit"] == "kg m-2 s-1"
 
 
 def test_nodata_is_not_reported_as_zero_mass_and_flux_is_integrated_over_area():
@@ -155,5 +204,11 @@ def test_http_tile_and_download_keep_authentication_and_private_headers(archive,
     assert download.headers["content-type"] == "image/tiff"
     assert "attachment" in download.headers["content-disposition"]
     assert download.headers["cache-control"] == "private, no-store"
+    point = client.get(f"{prefix}/point/organic_aod/{identifier}?lat=60&lon=-20")
+    assert point.status_code == 200 and point.json()["value"] == 1
+    assert point.headers["cache-control"] == "private, no-store"
+    assert client.get(f"{prefix}/point/organic_aod/{identifier}?lat=91&lon=0").status_code == 422
+    assert client.get(f"{prefix}/point/organic_aod/missing?lat=60&lon=0").status_code == 404
     app.dependency_overrides.pop(wildfire_events.get_current_disaster_viewer)
     assert client.get(f"{prefix}/tiles/organic_aod/{identifier}/0/0/0.png").status_code == 401
+    assert client.get(f"{prefix}/point/organic_aod/{identifier}?lat=60&lon=0").status_code == 401

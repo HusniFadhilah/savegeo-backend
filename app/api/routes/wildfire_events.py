@@ -701,6 +701,25 @@ def aggregate_wildfire_emissions(
         raise HTTPException(exc.status_code, detail={"code": exc.code, "message": str(exc)}) from None
 
 
+@router.get("/events/{slug}/emissions/point/{layer_id}/{frame_id}")
+def get_wildfire_emissions_point(
+    slug: str,
+    layer_id: str,
+    frame_id: str,
+    response: Response,
+    lat: float = Query(..., ge=-90, le=90),
+    lon: float = Query(..., ge=-180, le=180),
+    viewer=Depends(get_current_disaster_viewer),
+    db: Session = Depends(get_db),
+):
+    _event(db, slug)
+    response.headers["Cache-Control"] = "private, no-store"
+    try:
+        return cams_archive_service.point(slug, layer_id, frame_id, lat, lon)
+    except cams_emissions_service.CamsRequestError as exc:
+        raise HTTPException(exc.status_code, detail={"code": exc.code, "message": str(exc)}) from None
+
+
 @router.get("/events/{slug}/emissions/tiles/{layer_id}/{frame_id}/{z}/{x}/{y}.png")
 def get_wildfire_emissions_tile(
     slug: str,

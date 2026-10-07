@@ -15,7 +15,7 @@ from PIL import Image
 from rio_tiler.errors import TileOutsideBounds
 from rio_tiler.io import COGReader
 from rasterio import open as raster_open
-from rasterio.warp import transform_geom
+from rasterio.warp import transform as transform_coordinates, transform_geom
 from rasterio.windows import Window, from_bounds
 from shapely.geometry import Polygon, box, mapping, shape
 
@@ -27,7 +27,7 @@ MAX_AGGREGATION_CELLS = 100_000
 MAX_GRID_FEATURES = 5_000
 MAX_CUSTOM_GEOMETRY_VERTICES = 10_000
 
-LAYER_DEFINITIONS = {
+LAYER_DEFINITIONS: dict[str, dict[str, Any]] = {
     "burnt_carbon": {
         "product": "gfas",
         "variable": "burnt_carbon",
@@ -90,6 +90,7 @@ def public_archive(slug: str) -> dict[str, Any]:
         "layers": {
             key: {
                 **layer,
+                "rendering": _rendering(key, layer),
                 "frames": [{k: v for k, v in frame.items() if k != "filename"} for frame in layer["frames"]],
             }
             for key, layer in manifest["layers"].items()
@@ -162,7 +163,13 @@ def tile(slug: str, layer_id: str, frame_id: str, z: int, x: int, y: int) -> byt
     blank = np.zeros((256, 256, 4), dtype=np.uint8)
     try:
         with COGReader(str(path)) as reader:
-            image = reader.tile(x, y, z, tilesize=256, resampling_method="nearest")
+            # Aerosol is a continuous field. Resample during both reprojection and
+            # reading; changing only the latter still leaves Web Mercator blocks.
+            method = "bilinear" if layer_id == "organic_aod" else "nearest"
+            image = reader.tile(
+                x, y, z, tilesize=256, padding=3,
+                resampling_method=method, reproject_method=method,
+            )
     except TileOutsideBounds:
         result = blank
     except Exception:
@@ -170,7 +177,7 @@ def tile(slug: str, layer_id: str, frame_id: str, z: int, x: int, y: int) -> byt
     else:
         values = image.data[0].astype(float) * LAYER_DEFINITIONS[layer_id]["multiplier"]
         valid = (image.mask > 0) & np.isfinite(values) & (values > 0)
-        maximum = max(float(layer["maximum"]), float(np.finfo(float).tiny))
+        maximum = _rendering(layer_id, layer)["maximum"]
         positions = np.linspace(0, maximum, len(layer["palette"]))
         colors = np.array([[int(c[i : i + 2], 16) for i in (0, 2, 4)] for c in layer["palette"]])
         result = blank
@@ -178,10 +185,89 @@ def tile(slug: str, layer_id: str, frame_id: str, z: int, x: int, y: int) -> byt
             result[:, :, channel] = np.interp(
                 np.where(valid, values, 0), positions, colors[:, channel]
             ).astype(np.uint8)
-        result[:, :, 3] = np.where(valid, 255, 0).astype(np.uint8)
+        if layer_id == "organic_aod":
+            # Fade low aerosol values rather than covering the entire basemap
+            # with an opaque pale rectangle. This affects display alpha only.
+            alpha = np.interp(values / maximum, [0, 0.08, 0.25, 1], [0, 110, 230, 255])
+            result[:, :, 3] = np.where(valid, alpha, 0).astype(np.uint8)
+        else:
+            result[:, :, 3] = np.where(valid, 255, 0).astype(np.uint8)
     output = io.BytesIO()
     Image.fromarray(result).save(output, format="PNG")
     return output.getvalue()
+
+
+def _rendering(layer_id: str, layer: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "minimum": 0.0,
+        # A fixed AOD domain keeps frames comparable and avoids rare forecast
+        # extremes flattening the colour scale. Higher native values saturate.
+        "maximum": 1.0 if layer_id == "organic_aod"
+        else max(float(layer["maximum"]), float(np.finfo(float).tiny)),
+        "interpolation": "bilinear" if layer_id == "organic_aod" else "nearest",
+    }
+
+
+def point(slug: str, layer_id: str, frame_id: str, lat: float, lon: float) -> dict[str, Any]:
+    """Read the native containing cell, never an interpolated display pixel."""
+    if not math.isfinite(lat) or not math.isfinite(lon) or not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        raise CamsRequestError("Koordinat titik tidak valid")
+    layer, frame, path = resolve_frame(slug, layer_id, frame_id)
+    definition = LAYER_DEFINITIONS[layer_id]
+    result: dict[str, Any] = {
+        "layer_id": layer_id,
+        "frame_id": frame_id,
+        "product": definition["product"],
+        "valid_at": frame["valid_at"],
+        "interval_end": frame.get("interval_end"),
+        "is_forecast": bool(frame.get("is_forecast")),
+        "forecast_reference_time": frame.get("forecast_reference_time"),
+        "leadtime_hours": frame.get("leadtime_hours"),
+        "data_available": False,
+        "reason": "outside_coverage",
+        "value": None,
+        "unit": layer.get("display_unit", definition["display_unit"]),
+        "source_value": None,
+        "source_unit": definition["source_unit"],
+        "center": None,
+        "cell_area_km2": None,
+        "mass_tonnes": None,
+    }
+    try:
+        with raster_open(path) as dataset:
+            if dataset.crs is None:
+                raise CamsRequestError("CRS raster CAMS tidak tersedia", 503, "raster_invalid")
+            xs, ys = transform_coordinates("EPSG:4326", dataset.crs, [lon], [lat])
+            row, col = dataset.index(xs[0], ys[0])
+            if not (0 <= row < dataset.height and 0 <= col < dataset.width):
+                return result
+            cx, cy = dataset.xy(row, col)
+            longitudes, latitudes = transform_coordinates(dataset.crs, "EPSG:4326", [cx], [cy])
+            result["center"] = {"lat": latitudes[0], "lon": longitudes[0]}
+            sample = dataset.read(1, window=Window(col, row, 1, 1), masked=True)[0, 0]
+            raw = float(sample) if not np.ma.is_masked(sample) else float("nan")
+            if not math.isfinite(raw) or raw < 0:
+                return {**result, "reason": "nodata"}
+            corners = [dataset.transform * position for position in (
+                (col, row), (col + 1, row), (col + 1, row + 1), (col, row + 1),
+            )]
+            cell = shape(transform_geom(dataset.crs, "EPSG:4326", mapping(Polygon(corners))))
+            area, _ = cams_emissions_service.WGS84_GEOD.geometry_area_perimeter(cell)
+            area = abs(float(area))
+            return {
+                **result,
+                "data_available": True,
+                "reason": None,
+                "source_value": raw,
+                "value": raw * definition["multiplier"],
+                "cell_area_km2": area / 1_000_000,
+                "mass_tonnes": raw * area * _frame_duration_seconds(frame) / 1000
+                if layer_id == "burnt_carbon" else None,
+            }
+    except CamsRequestError:
+        raise
+    except Exception as exc:
+        raise CamsRequestError("Nilai raster CAMS tidak dapat dibaca", 503, "raster_unavailable") from exc
 
 
 def aggregate(
@@ -256,7 +342,7 @@ def aggregate(
             values = dataset.read(1, window=read_window, masked=True)
             transform = dataset.window_transform(read_window)
             multiplier = LAYER_DEFINITIONS[layer_id]["multiplier"]
-            palette_maximum = max(float(layer.get("maximum", 0)), float(np.finfo(float).tiny))
+            palette_maximum = _rendering(layer_id, layer)["maximum"]
             valid_values: list[float] = []
             area_weighted_sum = 0.0
             total_area = 0.0
