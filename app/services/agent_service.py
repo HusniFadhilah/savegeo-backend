@@ -79,6 +79,8 @@ def build_capabilities_document(
             name: tool for name, tool in capabilities["tools"].items()
             if name not in tool_features or tool_features[name] in allowed_features
         }
+    from app.agentic.action_catalog import application_action_catalog
+    capabilities["application_actions"] = application_action_catalog(allowed_features)
     return capabilities
 
 
@@ -247,7 +249,27 @@ def run_agent_control(
             # SaveGeo Assistant: grounded tool-calling loop over already-computed
             # results + live hotspot search (see agentic_ai.geoai_with_ai). Screenshot/
             # attachment inputs are UI-automation-mode-only and not passed through here.
+            from app.agentic.action_catalog import application_action_catalog, classify_application_intent
             safe_context = dict(geoai_context)
+            safe_context["action_catalog"] = application_action_catalog(allowed_features)
+            safe_context["runtime"] = {"earth_engine_initialized": bool(getattr(getattr(request.scope.get("app"), "state", None), "ee_initialized", False))}
+            safe_context["intent_hint"] = classify_application_intent(message)
+            # Catalogs can be needed before the lazily mounted module is opened.
+            # Reuse the same admin-managed public provider response as /imagery/providers.
+            page_state = dict(page_state)
+            ui = dict(page_state.get("ui") or {})
+            if allowed_features is None or "app.feature.satellite_exploration" in allowed_features:
+                from app.repositories import imagery_provider_repo
+                from app.services import imagery_service
+                from app.services.imagery_provider_config import effective_settings
+                imagery_provider_repo.refresh_cache(db)
+                providers = imagery_service.list_providers(effective_settings(db))["providers"]
+                scenes = dict(ui.get("scenes") or {})
+                scenes["availableProviders"] = list(providers)
+                scenes["providers"] = [{"key": key, "name": value.get("name"), "capabilities": value.get("capabilities"),
+                                        "configuration_status": value.get("configuration_status")} for key, value in providers.items()]
+                ui["scenes"] = scenes
+            page_state["ui"] = ui
             results = safe_context.get("results")
             if allowed_features is not None and isinstance(results, dict):
                 result_features = {
@@ -297,7 +319,7 @@ def run_agent_control(
                 "confidence": 0.0,
                 "needs_confirmation": False,
                 "message": user_msg,
-                "warnings": [err_str],
+                "warnings": [],
                 "actions": [],
             },
             500,

@@ -1,4 +1,4 @@
-"""Bounded ADS ingestion: python -m scripts.sync_cams_archive --from YYYY-MM-DD --to YYYY-MM-DD."""
+"""Sync a CAMS archive with --scope event|world and completed UTC date bounds."""
 
 from __future__ import annotations
 
@@ -29,6 +29,8 @@ from app.services.cams_emissions_service import (
     geodesic_cell_area_m2,
 )
 
+WORLD_BBOX = [-180.0, -90.0, 180.0, 90.0]
+
 
 def geometry(payload: dict):
     if payload.get("type") == "FeatureCollection":
@@ -58,6 +60,24 @@ def cell_areas(latitudes: np.ndarray, longitudes: np.ndarray, boundary) -> np.nd
             elif prepared.intersects(polygon):
                 result[row, col] = clipped_cell_area_m2(cell, mapping(boundary))
     return result
+
+
+def global_cell_areas(latitudes: np.ndarray, longitudes: np.ndarray) -> np.ndarray:
+    """Compute global grid-cell areas by latitude row without polygon clipping."""
+    dx = abs(float(longitudes[1] - longitudes[0]))
+    dy = abs(float(latitudes[1] - latitudes[0]))
+    west = max(-180.0, float(longitudes[0]) - dx / 2)
+    east = min(180.0, west + dx)
+    row_areas = np.asarray([
+        geodesic_cell_area_m2(
+            west,
+            max(-90.0, float(latitude) - dy / 2),
+            east,
+            min(90.0, float(latitude) + dy / 2),
+        )
+        for latitude in latitudes
+    ])
+    return np.broadcast_to(row_areas[:, None], (len(latitudes), len(longitudes))).copy()
 
 
 def statistics(values: np.ndarray, areas: np.ndarray, layer_id: str) -> dict:
@@ -104,7 +124,8 @@ def ingest_file(
         "organic_aod": {"~", "1", "dimensionless"},
     }
     expected_id = 210092 if layer_id == "burnt_carbon" else 210210
-    boundary = unary_union([geometry(r["geometry"]) for r in regions])
+    is_global = not regions and bbox == WORLD_BBOX
+    boundary = box(*bbox) if is_global else unary_union([geometry(r["geometry"]) for r in regions])
     source_sha = hashlib.sha256(path.read_bytes()).hexdigest()
     frames = []
     with xr.open_dataset(path) as ds:
@@ -118,6 +139,8 @@ def ingest_file(
             )
         if variable.attrs.get("GRIB_stepType") != ("avg" if layer_id == "burnt_carbon" else "instant"):
             raise CamsRequestError("Interval variabel ADS tidak sesuai", 502, "source_interval_mismatch")
+        if bbox == WORLD_BBOX and float(ds.longitude.max()) > 180:
+            ds = ds.assign_coords(longitude=((ds.longitude + 180) % 360) - 180).sortby("longitude")
         west, south, east, north = bbox
         ds = ds.sel(latitude=slice(north + 1, south - 1), longitude=slice(west - 1, east + 1))
         lat, lon = ds.latitude.values, ds.longitude.values
@@ -135,7 +158,7 @@ def ingest_file(
             expected_spacing,
             expected_spacing,
         )
-        overall_areas = cell_areas(lat, lon, boundary)
+        overall_areas = global_cell_areas(lat, lon) if is_global else cell_areas(lat, lon, boundary)
         region_areas = [(r, cell_areas(lat, lon, geometry(r["geometry"]))) for r in regions]
         variable = ds[definition["source_variable"]]
         dimensions = [d for d in variable.dims if d not in {"latitude", "longitude"}]
@@ -242,7 +265,7 @@ def ingest_file(
                         "source_valid_at": source_valid.isoformat(),
                         "request": request,
                         "temporal_step": "rolling_24h" if layer_id == "burnt_carbon" else "instant",
-                        "boundary_source": "SP3STAB; union of event provinces; invalid polygons repaired with make_valid",
+                        "boundary_source": "Global WGS84 raster extent" if is_global else "SP3STAB; union of event provinces; invalid polygons repaired with make_valid",
                         "boundary_sha256": hashlib.sha256(
                             json.dumps(mapping(boundary), sort_keys=True).encode()
                         ).hexdigest(),
@@ -256,6 +279,7 @@ def ingest_file(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--slug", default="kalimantan-2026")
+    parser.add_argument("--scope", choices=("event", "world"), default="event")
     parser.add_argument("--from", dest="start", type=date.fromisoformat, required=True)
     parser.add_argument("--to", dest="end", type=date.fromisoformat, required=True)
     parser.add_argument("--forecast", action="store_true")
@@ -266,16 +290,23 @@ def main() -> None:
         or args.end >= datetime.now(UTC).date()
     ):
         parser.error("Select 1–31 completed UTC days")
-    from app.api.routes.wildfire_events import _admin_geometry
-    from app.db.models.disaster_event import DisasterEvent
-    from app.db.session import SessionLocal
+    is_world_scope = args.scope == "world"
+    if is_world_scope:
+        archive_slug = "world"
+        codes, names, bbox = [], [], WORLD_BBOX
+    else:
+        from app.api.routes.wildfire_events import _admin_geometry
+        from app.db.models.disaster_event import DisasterEvent
+        from app.db.session import SessionLocal
 
-    with SessionLocal() as db:
-        event = db.query(DisasterEvent).filter_by(slug=args.slug, disaster_type="forest_fire").one()
-        codes, names, bbox = event.province_codes or [], event.province or [], event.bbox
-    if not codes or not bbox:
-        parser.error("Event needs province codes and bbox")
-    directory = archive.event_directory(args.slug)
+        with SessionLocal() as db:
+            event = db.query(DisasterEvent).filter_by(slug=args.slug, disaster_type="forest_fire").one()
+            codes, names, bbox = event.province_codes or [], event.province or [], event.bbox
+        if not codes or not bbox:
+            parser.error("Event needs province codes and bbox")
+        archive_slug = args.slug
+
+    directory = archive.event_directory(archive_slug)
     directory.mkdir(parents=True, exist_ok=True)
     boundary_directory = directory.parent / "boundaries"
     boundary_directory.mkdir(exist_ok=True)
@@ -297,8 +328,9 @@ def main() -> None:
     source_dir = directory.parent / "sources"
     source_dir.mkdir(exist_ok=True)
     adapter = None
-    requests = [
-        (
+    requests = []
+    if not is_world_scope:
+        requests.append((
             "burnt_carbon",
             GFAS_DATASET_ID,
             {
@@ -308,28 +340,24 @@ def main() -> None:
                 "temporal_aggregation": ["daily"],
                 "data_format": "netcdf",
             },
-        ),
-        (
-            "organic_aod",
-            IFS_DATASET_ID,
-            {
-                "variable": ["organic_matter_aerosol_optical_depth_550nm"],
-                "date": f"{args.start}/{args.end}",
-                "time": ["00:00", "12:00"],
-                "leadtime_hour": ["0"],
-                "type": ["forecast"],
-                "area": [bbox[3] + 1, bbox[0] - 1, bbox[1] - 1, bbox[2] + 1],
-                "data_format": "netcdf_zip",
-            },
-        ),
-    ]
+        ))
+    aod_request = {
+        "variable": ["organic_matter_aerosol_optical_depth_550nm"],
+        "date": f"{args.start}/{args.end}",
+        "time": ["00:00", "12:00"],
+        "leadtime_hour": ["0"],
+        "type": ["forecast"],
+        **({} if is_world_scope else {"area": [bbox[3] + 1, bbox[0] - 1, bbox[1] - 1, bbox[2] + 1]}),
+        "data_format": "netcdf_zip",
+    }
+    requests.append(("organic_aod", IFS_DATASET_ID, aod_request))
     if args.forecast:
         requests.append(
             (
                 "organic_aod",
                 IFS_DATASET_ID,
                 {
-                    **requests[1][2],
+                    **aod_request,
                     "date": f"{args.end}/{args.end}",
                     "time": ["12:00"],
                     "leadtime_hour": [str(i) for i in range(0, 121, 3)],
@@ -337,11 +365,11 @@ def main() -> None:
             )
         )
     try:
-        manifest = archive.read_archive(args.slug)
+        manifest = archive.read_archive(archive_slug)
     except CamsRequestError as exc:
         if exc.code != "data_unavailable":
             raise
-        manifest = {"schema_version": 1, "event_slug": args.slug, "bbox": bbox, "layers": {}}
+        manifest = {"schema_version": 1, "event_slug": archive_slug, "bbox": bbox, "layers": {}}
     for layer_id, dataset, request in requests:
         digest = hashlib.sha256(json.dumps(request, sort_keys=True).encode()).hexdigest()[:24]
         source = source_dir / (digest + (".nc" if layer_id == "burnt_carbon" else ".zip"))

@@ -258,10 +258,14 @@ def get_current_context(tool_ctx: dict) -> dict[str, Any]:
         "page_count": scenes.get("pageCount"),
         "selected_scene_id": scenes.get("selectedSceneId"),
         "scene_visible": scenes.get("sceneVisible"),
+        "scenes": scenes.get("scenes", []),
+        "providers": scenes.get("providers", []),
     }
     if allowed is not None and "app.feature.satellite_exploration" not in allowed:
         scene_search = {}
     return {
+        "action_catalog": ctx.get("action_catalog", []),
+        "jobs": ctx.get("jobs", []),
         "aoi_present": bool(ctx.get("aoi")),
         "aoi_name": ctx.get("aoi_name"),
         "area_ha": ctx.get("area_ha"),

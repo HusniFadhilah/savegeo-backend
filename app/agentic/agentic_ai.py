@@ -7,6 +7,8 @@ produce the same plan schema, then pass through the validator here.
 """
 from __future__ import annotations
 
+from app.agentic.action_catalog import APPLICATION_CONTROL_PROMPT
+
 import logging
 import re
 import time
@@ -2129,6 +2131,10 @@ If nothing is available for what the user asked, still return valid JSON with an
 """.strip()
 
 
+
+GEOAI_SYSTEM_PROMPT += APPLICATION_CONTROL_PROMPT
+
+
 def _extract_json_object(raw: str) -> dict:
     """Best-effort JSON object extraction from a model's final text turn -
     same tolerance strategy as plan_with_ai's local _parse (markdown fences,
@@ -2354,6 +2360,8 @@ def _call_gemini_tools(api_key: str, model: str, user_input: str,
 
 
 _GEOAI_UI_TARGETS = {
+    "select_aoi": {"aoi.active"},
+    "select_field": {"crop.field"},
     "open_module": {"navigation.module"},
     "set_map_view": {"map.main"},
     "set_analysis_type": {"carbon.analysisType"},
@@ -2368,7 +2376,7 @@ _GEOAI_UI_TARGETS = {
         "scenes.cloudMax", "scenes.search", "scenes.page", "scenes.pageSize",
         "crop.index", "crop.periodMode",
     },
-    "run_analysis": {"carbon.analysis", "lc_change.analysis", "crop.analysis", "disaster.dem"},
+    "run_analysis": {"carbon.analysis", "lc_change.analysis", "crop.analysis", "disaster.dem", "disaster.event"},
     "toggle_layer": {"results.layer"},
     "set_provider": {"scenes.provider"},
     "set_date_range": {"scenes.dateRange", "crop.dateRange"},
@@ -2392,7 +2400,7 @@ def validate_geoai_actions(
         return [], ["Format actions dari AI tidak valid."]
     valid: list[dict] = []
     warnings: list[str] = []
-    for action in actions[:12]:
+    for action in actions[:40]:
         if not isinstance(action, dict):
             warnings.append("Satu action AI bukan objek JSON dan diabaikan.")
             continue
@@ -2433,6 +2441,11 @@ def validate_geoai_actions(
                 required = {"app.feature.vegetation_indices"}
             elif str(target).startswith("carbon.landcover"):
                 required = {"app.feature.land_cover"}
+            elif target == "carbon.analysis":
+                selected_type = next((a["parameters"]["value"] for a in reversed(valid) if a.get("action") == "set_analysis_type"),
+                                     ((page_state.get("ui") or {}).get("carbon") or {}).get("analysisType", "carbon"))
+                required = {"carbon": {"app.feature.carbon_stock"}, "vegetation": {"app.feature.vegetation_indices"},
+                            "landcover": {"app.feature.land_cover"}, "combined": {"app.feature.carbon_stock", "app.feature.land_cover", "app.feature.vegetation_indices"}}.get(selected_type, {"invalid"})
             elif str(target).startswith("carbon."):
                 required = {"app.feature.carbon_stock"}
             if required and not required.issubset(allowed_features):
@@ -2476,6 +2489,22 @@ def validate_geoai_actions(
         ui_state = page_state.get("ui") if isinstance(page_state.get("ui"), dict) else {}
         scene_state = ui_state.get("scenes") if isinstance(ui_state.get("scenes"), dict) else {}
         crop_state = ui_state.get("crop") if isinstance(ui_state.get("crop"), dict) else {}
+        if name == "select_aoi" and (not isinstance(params.get("query"), str) or not 3 <= len(params["query"].strip()) <= 200):
+            warnings.append("Nama AOI harus 3-200 karakter.")
+            continue
+        has_planned_aoi = any(a.get("action") == "select_aoi" for a in valid)
+        if name == "select_field" and (type(params.get("field_id")) is not int or params["field_id"] not in crop_state.get("availableFieldIds", [])):
+            warnings.append("Field tidak tersedia pada katalog saat ini.")
+            continue
+        if name == "run_analysis" and target == "disaster.event":
+            from datetime import date as _date
+            try:
+                dates = [_date.fromisoformat(params[k]) for k in ("before_start", "before_end", "after_start", "after_end")]
+                if params.get("event_type") not in {"flood", "fire", "landslide"} or not dates[0] < dates[1] <= dates[2] < dates[3]:
+                    raise ValueError("invalid event period")
+            except (KeyError, TypeError, ValueError):
+                warnings.append("Jenis bencana dan empat tanggal sebelum/sesudah wajib diisi secara berurutan.")
+                continue
         if name == "open_module" and (not isinstance(value, str) or value not in {
             "carbon", "lc-change", "imagery", "disaster", "crop-monitoring", "guide", "about"
         }):
@@ -2505,13 +2534,13 @@ def validate_geoai_actions(
             except (KeyError, TypeError, ValueError):
                 warnings.append("Rentang tanggal scene tidak valid.")
                 continue
-        if name == "search_scenes" and not (context.get("aoi") or page_state.get("has_aoi")):
+        if name == "search_scenes" and not (has_planned_aoi or context.get("aoi") or page_state.get("has_aoi")):
             warnings.append("AOI diperlukan sebelum pencarian scene.")
             continue
         if name == "show_scene":
             scene_id = params.get("scene_id")
             visible = params.get("visible")
-            if type(visible) is not bool or (visible and (not isinstance(scene_id, str) or scene_id not in scene_state.get("availableSceneIds", []))):
+            if type(visible) is not bool or (visible and (not isinstance(scene_id, str) or scene_id not in scene_state.get("availableSceneIds", []) and not (scene_id == "latest" and any(a.get("action") == "search_scenes" for a in valid)))):
                 warnings.append("Scene tidak ada pada hasil saat ini atau parameter visibilitas tidak valid.")
                 continue
         if name == "accordion" and type(params.get("open")) is not bool:
@@ -2583,11 +2612,11 @@ def validate_geoai_actions(
                 warnings.append("Dataset perubahan tutupan lahan tidak ada dalam state aplikasi.")
                 continue
         if name == "run_analysis":
-            if target == "crop.analysis" and not crop_state.get("fieldId"):
+            if target == "crop.analysis" and not (crop_state.get("fieldId") or any(a.get("action") == "select_field" for a in valid)):
                 warnings.append("Field tanaman belum dipilih; analisis tidak dijalankan.")
                 continue
             disaster_state = ui_state.get("disaster") if isinstance(ui_state.get("disaster"), dict) else {}
-            if target == "disaster.dem" and not disaster_state.get("aoiExists"):
+            if target in {"disaster.dem", "disaster.event"} and not (has_planned_aoi or context.get("aoi") or page_state.get("has_aoi") or disaster_state.get("aoiExists")):
                 warnings.append("AOI bencana belum tersedia; analisis DEM tidak dijalankan.")
                 continue
             carbon_state = ui_state.get("carbon") if isinstance(ui_state.get("carbon"), dict) else {}
@@ -2598,7 +2627,7 @@ def validate_geoai_actions(
                     for accepted in valid
                 )
             )
-            if target not in {"crop.analysis", "disaster.dem"} and not direct_carbon and not (context.get("aoi") or page_state.get("has_aoi")):
+            if target not in {"crop.analysis", "disaster.dem", "disaster.event"} and not direct_carbon and not (has_planned_aoi or context.get("aoi") or page_state.get("has_aoi")):
                 warnings.append("AOI belum tersedia; analisis tidak dijalankan.")
                 continue
         valid.append({
@@ -2608,6 +2637,10 @@ def validate_geoai_actions(
             "reason": str(action.get("reason") or "")[:300],
             "expected_state": action.get("expected_state") if isinstance(action.get("expected_state"), dict) else {},
         })
+    # A rejected parameter must not silently run a workflow with old defaults.
+    if warnings and any(a.get("action") in {"run_analysis", "search_scenes", "show_scene"} for a in valid):
+        valid = [a for a in valid if a.get("action") not in {"run_analysis", "search_scenes", "show_scene"}]
+        warnings.append("Workflow tidak dijalankan karena ada parameter/perintah yang ditolak. Perbaiki parameter lalu coba lagi.")
     return valid, warnings
 
 
@@ -2708,7 +2741,17 @@ def geoai_with_ai(message: str, context: dict, db, history: list[dict] | None = 
         )
         warnings = result.get("warnings")
         result["warnings"] = (warnings if isinstance(warnings, list) else []) + action_warnings
-        if any(action.get("action") == "run_analysis" for action in result["actions"]):
+        if result["actions"]:
+            result["message"] = "Saya akan menjalankan langkah berikut melalui aplikasi."
+        # Analysis can incur substantial computation; review the concrete queue first.
+        scene_ui = ((page_state or {}).get("ui") or {}).get("scenes") or {}
+        provider_key = next((a.get("parameters", {}).get("value") for a in reversed(result["actions"]) if a.get("action") == "set_provider"), scene_ui.get("provider"))
+        commercial = any(p.get("key") == provider_key and (p.get("capabilities") or {}).get("commercial")
+                         for p in scene_ui.get("providers", []) if isinstance(p, dict))
+        paid_scene_request = commercial and any(a.get("action") in {"search_scenes", "show_scene"} for a in result["actions"])
+        if paid_scene_request:
+            result["warnings"].append("Provider komersial dipilih. Periksa lisensi/biaya sebelum menjalankan pencarian atau menampilkan scene.")
+        if paid_scene_request or any(action.get("action") == "run_analysis" for action in result["actions"]):
             result["needs_confirmation"] = True
         return result
     except Exception as exc:

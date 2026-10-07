@@ -367,6 +367,8 @@ def get_disaster_event_map(data: dict) -> dict:
         before_end = _date_or_default(data.get("before_end"), today - timedelta(days=31))
         before_start = _date_or_default(data.get("before_start"), today - timedelta(days=91))
 
+        if not before_start < before_end <= after_start < after_end:
+            raise AnalysisError("Rentang sebelum/sesudah harus berurutan dan tidak tumpang tindih", 400)
         aoi = create_geometry_from_payload(data["aoi"])
 
         if event_type == "flood":

@@ -21,9 +21,9 @@ def test_accepts_valid_control_and_rejects_unavailable_dataset():
     accepted, warnings = validate_geoai_actions(
         actions, {"available_carbon_datasets": ["WCMC"], "has_aoi": True}, {"aoi": {"type": "Polygon"}}
     )
-    assert [a["action"] for a in accepted] == ["set_parameter", "run_analysis"]
+    assert [a["action"] for a in accepted] == ["set_parameter"]
     assert accepted[0]["expected_state"] == {"analysisYear": 2024}
-    assert len(warnings) == 1
+    assert len(warnings) == 2
 
 
 def test_rejects_invalid_temporal_and_map_inputs():

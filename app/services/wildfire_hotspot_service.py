@@ -7,7 +7,7 @@ import json
 import threading
 from collections.abc import Iterable
 
-from sqlalchemy import select
+from sqlalchemy import Date, Float, cast, func, select
 from sqlalchemy.orm import Session
 
 from app.db.models.disaster_event import DisasterEvent
@@ -328,3 +328,93 @@ def has_event_rows(db: Session, event_id: int) -> bool:
 
 def summarize(features: list[dict]) -> dict:
     return firms_service._summary(features)
+
+
+def summarize_event(
+    db: Session,
+    event_id: int,
+    from_date: dt.date | str,
+    to_date: dt.date | str,
+    sensor: str | None = None,
+    confidence_categories: set[str] | None = None,
+) -> dict:
+    """Aggregate persisted observations in SQL without loading their geometries."""
+    start = _date(from_date, dt.datetime.now(dt.UTC).date())
+    end = _date(to_date, start)
+    start_at = dt.datetime.combine(start, dt.time.min, tzinfo=dt.UTC)
+    end_at = dt.datetime.combine(end + dt.timedelta(days=1), dt.time.min, tzinfo=dt.UTC)
+    confidence = func.lower(
+        func.coalesce(
+            WildfireHotspot.stats["confidence_label"].as_string(),
+            WildfireHotspot.stats["confidence_category"].as_string(),
+        )
+    )
+    frp = cast(WildfireHotspot.stats["frp"].as_string(), Float)
+    acquired_at = WildfireHotspot.acquired_at
+    date = cast(acquired_at, Date)
+    stmt = (
+        select(
+            date.label("date"),
+            WildfireHotspot.source.label("source"),
+            confidence.label("confidence"),
+            func.count().label("hotspot_count"),
+            func.count(frp).label("frp_count"),
+            func.sum(frp).label("frp_sum"),
+            func.max(frp).label("frp_max"),
+            func.max(acquired_at).label("latest"),
+        )
+        .where(
+            WildfireHotspot.event_id == event_id,
+            WildfireHotspot.is_published.is_(True),
+            acquired_at >= start_at,
+            acquired_at < end_at,
+        )
+    )
+    normalized_sensor = sensor.casefold() if sensor else None
+    if normalized_sensor:
+        stmt = stmt.where(func.lower(WildfireHotspot.stats["instrument"].as_string()) == normalized_sensor)
+    if confidence_categories is not None:
+        stmt = stmt.where(confidence.in_(confidence_categories))
+    rows = db.execute(
+        stmt.group_by(date, WildfireHotspot.source, confidence)
+    ).all()
+
+    total = high = nominal = low = frp_count = 0
+    frp_sum = 0.0
+    frp_max = 0.0
+    latest: dt.datetime | None = None
+    by_day: dict[str, int] = {}
+    by_source: dict[str, int] = {}
+    for row in rows:
+        count = int(row.hotspot_count or 0)
+        total += count
+        category = row.confidence
+        if category == "high":
+            high += count
+        elif category == "nominal":
+            nominal += count
+        elif category == "low":
+            low += count
+        if row.date is not None:
+            day = row.date.isoformat()
+            by_day[day] = by_day.get(day, 0) + count
+        source = str(row.source or "unknown")
+        by_source[source] = by_source.get(source, 0) + count
+        frp_count += int(row.frp_count or 0)
+        frp_sum += float(row.frp_sum or 0)
+        frp_max = max(frp_max, float(row.frp_max or 0))
+        if row.latest is not None and (latest is None or row.latest > latest):
+            latest = row.latest
+
+    return {
+        "total_hotspots": total,
+        "high_confidence_hotspots": high,
+        "nominal_confidence_hotspots": nominal,
+        "low_confidence_hotspots": low,
+        "total_frp": round(frp_sum, 3),
+        "average_frp": round(frp_sum / frp_count, 3) if frp_count else None,
+        "max_frp": round(frp_max, 3),
+        "latest_detection_utc": latest.isoformat().replace("+00:00", "Z") if latest else None,
+        "by_day": [{"date": day, "count": by_day[day]} for day in sorted(by_day)],
+        "by_source": [{"source": source, "count": by_source[source]} for source in sorted(by_source)],
+    }

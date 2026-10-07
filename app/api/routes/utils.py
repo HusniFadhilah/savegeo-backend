@@ -116,6 +116,12 @@ def geocode_search(q: str = "", limit: int = 8):
         gj = d.get("geojson")
         if gj and gj.get("type") not in ("Polygon", "MultiPolygon"):
             gj = None
+        if gj:
+            from app.services.gee_common import _validate_geojson
+            try:
+                _validate_geojson(gj)
+            except ValueError:
+                gj = None
         out.append({
             "osm_id": d.get("osm_id"),
             "lat": float(d["lat"]),

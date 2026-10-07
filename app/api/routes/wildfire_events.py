@@ -304,6 +304,7 @@ def _stored_wildfire_data(
     to: str | None,
     sensor: str | None = None,
     confidence: str | None = None,
+    include_features: bool = True,
 ) -> tuple[list[dict], dict, dict]:
     """Read the persisted cache, initializing it once when necessary."""
     try:
@@ -315,20 +316,35 @@ def _stored_wildfire_data(
 
     start_date, end_date = _period_dates(event, from_date, to)
     normalized_sensor = None if not sensor or sensor.casefold() == "all" else sensor
-    features = wildfire_hotspot_service.list_event_features(
-        db,
-        event.id,
-        start_date,
-        end_date,
-        sensor=normalized_sensor,
-        confidence_categories=_confidence_categories(confidence),
+    features = (
+        wildfire_hotspot_service.list_event_features(
+            db,
+            event.id,
+            start_date,
+            end_date,
+            sensor=normalized_sensor,
+            confidence_categories=_confidence_categories(confidence),
+        )
+        if include_features
+        else []
     )
     # A populated cache can validly return no rows for a sensor/confidence
     # filter, so don't fall back to legacy curated rows in that case.
     has_persisted_rows = wildfire_hotspot_service.has_event_rows(db, event.id)
 
     if has_persisted_rows:
-        summary = wildfire_hotspot_service.summarize(features)
+        summary = (
+            wildfire_hotspot_service.summarize(features)
+            if include_features
+            else wildfire_hotspot_service.summarize_event(
+                db,
+                event.id,
+                start_date,
+                end_date,
+                sensor=normalized_sensor,
+                confidence_categories=_confidence_categories(confidence),
+            )
+        )
         burned_area = _published_burned_area(db, event)
         summary.update(
             {
@@ -359,8 +375,9 @@ def _stored_wildfire_data(
     burned_area = _published_burned_area(db, event)
     summary = _summary(hotspots, event)
     summary.update(_burned_area_summary_fields(burned_area))
+    legacy_features = [feature for hotspot in hotspots if (feature := _feature(hotspot))]
     return (
-        [feature for hotspot in hotspots if (feature := _feature(hotspot))],
+        legacy_features if include_features else [],
         summary,
         {
             "source": "curated",
@@ -493,22 +510,33 @@ def get_wildfire_hotspots(
     confidence: str | None = None,
     region_level: str | None = None,
     region_code: str | None = None,
+    include_features: bool = Query(True),
     viewer=Depends(get_current_disaster_viewer),
     db: Session = Depends(get_db),
 ):
     event = _event(db, slug)
-    features, summary, metadata = _stored_wildfire_data(db, event, from_date, to, sensor, confidence)
+    needs_region_filter = bool(region_level or region_code)
+    features, summary, metadata = _stored_wildfire_data(
+        db,
+        event,
+        from_date,
+        to,
+        sensor,
+        confidence,
+        include_features=include_features or needs_region_filter,
+    )
     if region_level or region_code:
         features = _filter_by_admin_region(event, features, region_level, region_code)
         summary = wildfire_hotspot_service.summarize(features)
         summary.update({"affected_regions": 1, "burned_area_ha": None, "burned_area_source": None})
         metadata = {**metadata, "region_level": region_level, "region_code": region_code}
-    map_features, truncated = _map_features(features)
+    map_features, truncated = _map_features(features) if include_features else ([], False)
     metadata = {
         **metadata,
-        "total_features": len(features),
+        "total_features": int(summary.get("total_hotspots", len(features))),
         "returned_features": len(map_features),
         "truncated_for_map": truncated,
+        "features_included": include_features,
     }
     return {
         "features": map_features,
@@ -664,13 +692,14 @@ def get_wildfire_emissions_summary(
 def get_wildfire_emissions_archive(
     slug: str,
     response: Response,
+    scope: str = Query("event", pattern="^(event|world)$"),
     viewer=Depends(get_current_disaster_viewer),
     db: Session = Depends(get_db),
 ):
     _event(db, slug)
     response.headers["Cache-Control"] = "private, no-store"
     try:
-        return cams_archive_service.public_archive(slug)
+        return cams_archive_service.public_archive("world" if scope == "world" else slug)
     except cams_emissions_service.CamsRequestError as exc:
         raise HTTPException(exc.status_code, detail={"code": exc.code, "message": str(exc)}) from None
 
@@ -709,13 +738,14 @@ def get_wildfire_emissions_point(
     response: Response,
     lat: float = Query(..., ge=-90, le=90),
     lon: float = Query(..., ge=-180, le=180),
+    scope: str = Query("event", pattern="^(event|world)$"),
     viewer=Depends(get_current_disaster_viewer),
     db: Session = Depends(get_db),
 ):
     _event(db, slug)
     response.headers["Cache-Control"] = "private, no-store"
     try:
-        return cams_archive_service.point(slug, layer_id, frame_id, lat, lon)
+        return cams_archive_service.point("world" if scope == "world" else slug, layer_id, frame_id, lat, lon)
     except cams_emissions_service.CamsRequestError as exc:
         raise HTTPException(exc.status_code, detail={"code": exc.code, "message": str(exc)}) from None
 
@@ -728,12 +758,13 @@ def get_wildfire_emissions_tile(
     z: int,
     x: int,
     y: int,
+    scope: str = Query("event", pattern="^(event|world)$"),
     viewer=Depends(get_current_disaster_viewer),
     db: Session = Depends(get_db),
 ):
     _event(db, slug)
     try:
-        content = cams_archive_service.tile(slug, layer_id, frame_id, z, x, y)
+        content = cams_archive_service.tile("world" if scope == "world" else slug, layer_id, frame_id, z, x, y)
     except cams_emissions_service.CamsRequestError as exc:
         raise HTTPException(exc.status_code, detail={"code": exc.code, "message": str(exc)}) from None
     return Response(
