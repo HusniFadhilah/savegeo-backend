@@ -291,6 +291,43 @@ def event_publication_check(db, event: object) -> CapabilityCheck:
     """Check the minimum event contract before an admin marks it published."""
     from app.repositories import disaster_repo
 
+    if getattr(event, "disaster_type", None) == "forest_fire":
+        # The wildfire explorer is sourced from persisted hotspot detections
+        # and administrative boundaries. It does not depend on an AOI or a
+        # conventional pre/post-image analysis result, so applying that
+        # publication gate would make valid monitoring events unpublishable.
+        from app.services import wildfire_hotspot_service
+
+        reasons: list[str] = []
+        if not getattr(event, "name", None) or not getattr(event, "disaster_type", None):
+            reasons.append("Metadata kejadian belum lengkap")
+        if not getattr(event, "source", None) and not getattr(event, "source_ids", None):
+            reasons.append("Sumber resmi kejadian belum tersedia")
+        if not getattr(event, "slug", None):
+            reasons.append("Slug kejadian karhutla belum tersedia")
+        if not (getattr(event, "start_date", None) or getattr(event, "monitoring_from", None)):
+            reasons.append("Periode pemantauan kejadian belum tersedia")
+
+        provinces = getattr(event, "province", None) or []
+        province_codes = getattr(event, "province_codes", None) or []
+        if not provinces or not province_codes or len(provinces) != len(province_codes):
+            reasons.append("Cakupan provinsi dan kode batas wilayah belum lengkap")
+        if not getattr(event, "boundary_source", None):
+            reasons.append("Sumber batas administrasi belum tersedia")
+        if not getattr(event, "methodology", None):
+            reasons.append("Metodologi pemantauan belum tersedia")
+        if not (
+            getattr(event, "last_data_at", None)
+            or getattr(event, "hotspot_last_synced_at", None)
+        ):
+            reasons.append("Waktu pembaruan hotspot belum tersedia")
+        if not wildfire_hotspot_service.has_event_rows(db, getattr(event, "id", None)):
+            reasons.append("Data hotspot terverifikasi belum tersedia")
+
+        if reasons:
+            return CapabilityCheck(False, "not_available", tuple(reasons))
+        return CapabilityCheck(True, "validated", ())
+
     reasons: list[str] = []
     if not getattr(event, "name", None) or not getattr(event, "disaster_type", None):
         reasons.append("Metadata kejadian belum lengkap")
