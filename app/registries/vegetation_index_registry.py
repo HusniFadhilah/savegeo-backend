@@ -59,7 +59,7 @@ VEGETATION_INDEX_CATALOG: dict[str, dict[str, Any]] = {
         },
         "use_cases": ["Monitoring kesehatan vegetasi umum", "Pertanian (fase tumbuh tanaman)", "Kehutanan (kerapatan tajuk)", "Deteksi degradasi lahan"],
         "limitations": ["Jenuh (saturasi) pada vegetasi sangat rapat (>0.8)", "Sensitif terhadap latar tanah pada vegetasi jarang", "Terpengaruh sisa awan tipis/aerosol"],
-        "suitable_sensors": ["Sentinel-2", "Landsat 8/9", "PlanetScope"],
+        "suitable_sensors": ["Sentinel-2", "Landsat 4/5/7/8/9", "PlanetScope"],
         "landsat_compatible": True,
         "palette": ["#8B4513", "#FFFF00", "#90EE90", "#006400"],
         "classification": [
@@ -86,7 +86,7 @@ VEGETATION_INDEX_CATALOG: dict[str, dict[str, Any]] = {
         },
         "use_cases": ["Monitoring biomassa tinggi/hutan rapat", "Area dengan aerosol/atmosfer bervariasi", "Perkebunan skala besar"],
         "limitations": ["Formula lebih kompleks, butuh band biru berkualitas baik", "Kurang umum dipakai untuk interpretasi awam dibanding NDVI"],
-        "suitable_sensors": ["Sentinel-2", "Landsat 8/9", "PlanetScope"],
+        "suitable_sensors": ["Sentinel-2", "Landsat 4/5/7/8/9", "PlanetScope"],
         "landsat_compatible": True,
         "palette": ["#8B4513", "#FFFF00", "#90EE90", "#006400"],
         "classification": [
@@ -113,7 +113,7 @@ VEGETATION_INDEX_CATALOG: dict[str, dict[str, Any]] = {
         },
         "use_cases": ["Pertanian fase awal tanam (tanah masih terlihat)", "Lahan semi-arid/vegetasi jarang", "Rehabilitasi lahan tahap awal"],
         "limitations": ["Faktor L=0.5 asumsi kerapatan sedang, tidak optimal di semua kondisi", "Kurang sensitif di vegetasi sangat rapat dibanding EVI"],
-        "suitable_sensors": ["Sentinel-2", "Landsat 8/9", "PlanetScope"],
+        "suitable_sensors": ["Sentinel-2", "Landsat 4/5/7/8/9", "PlanetScope"],
         "landsat_compatible": True,
         "palette": ["#8B4513", "#FFFF00", "#90EE90", "#006400"],
         "classification": [
@@ -140,7 +140,7 @@ VEGETATION_INDEX_CATALOG: dict[str, dict[str, Any]] = {
         },
         "use_cases": ["Estimasi kerapatan tajuk pada vegetasi jarang-sedang", "Lahan pertanian/rehabilitasi dengan variasi tanah tinggi"],
         "limitations": ["Perhitungan lebih berat (melibatkan akar kuadrat)", "Tetap kurang optimal pada tajuk sangat rapat (>0.8 NDVI-equivalent)"],
-        "suitable_sensors": ["Sentinel-2", "Landsat 8/9", "PlanetScope"],
+        "suitable_sensors": ["Sentinel-2", "Landsat 4/5/7/8/9", "PlanetScope"],
         "landsat_compatible": True,
         "palette": ["#8B4513", "#FFFF00", "#90EE90", "#006400"],
         "classification": [
@@ -167,7 +167,7 @@ VEGETATION_INDEX_CATALOG: dict[str, dict[str, Any]] = {
         },
         "use_cases": ["Deteksi kekeringan / stres air tanaman", "Monitoring irigasi pertanian", "Early warning kebakaran (vegetasi kering rentan terbakar)"],
         "limitations": ["Dipengaruhi kelembapan tanah di bawah kanopi jarang", "Butuh band SWIR (tidak semua sensor punya resolusi SWIR setara)"],
-        "suitable_sensors": ["Sentinel-2", "Landsat 8/9"],
+        "suitable_sensors": ["Sentinel-2", "Landsat 4/5/7/8/9"],
         "landsat_compatible": True,
         "palette": ["#8B4513", "#D2691E", "#90EE90", "#006400"],
         "classification": [
@@ -194,7 +194,7 @@ VEGETATION_INDEX_CATALOG: dict[str, dict[str, Any]] = {
         },
         "use_cases": ["Deteksi badan air", "Kelembapan vegetasi/lahan basah"],
         "limitations": ["Bisa keliru dengan bayangan atau area terbangun gelap", "Kurang presisi untuk badan air kecil/sempit pada resolusi 10-30m"],
-        "suitable_sensors": ["Sentinel-2", "Landsat 8/9", "PlanetScope"],
+        "suitable_sensors": ["Sentinel-2", "Landsat 4/5/7/8/9", "PlanetScope"],
         "landsat_compatible": True,
         "palette": ["#8B4513", "#F5DEB3", "#87CEEB", "#0000FF"],
         "classification": [
@@ -220,7 +220,7 @@ VEGETATION_INDEX_CATALOG: dict[str, dict[str, Any]] = {
         },
         "use_cases": ["Deteksi badan air pada area urban", "Pemetaan lahan basah"],
         "limitations": ["Butuh band SWIR", "Kurang relevan untuk analisis kesehatan vegetasi murni"],
-        "suitable_sensors": ["Sentinel-2", "Landsat 8/9"],
+        "suitable_sensors": ["Sentinel-2", "Landsat 4/5/7/8/9"],
         "landsat_compatible": True,
         "palette": ["#FFFFE0", "#98FB98", "#4682B4", "#000080"],
         "classification": [
@@ -245,7 +245,7 @@ VEGETATION_INDEX_CATALOG: dict[str, dict[str, Any]] = {
         },
         "use_cases": ["Deteksi urbanisasi/ekspansi terbangun", "Konteks tambahan analisis vegetasi (non-vegetasi mask)"],
         "limitations": ["Bisa keliru dengan tanah terbuka kering (mirip signature spektral)"],
-        "suitable_sensors": ["Sentinel-2", "Landsat 8/9"],
+        "suitable_sensors": ["Sentinel-2", "Landsat 4/5/7/8/9"],
         "landsat_compatible": True,
         "palette": ["#006400", "#90EE90", "#FFD700", "#FF0000"],
         "classification": [
@@ -270,7 +270,7 @@ VEGETATION_INDEX_CATALOG: dict[str, dict[str, Any]] = {
         },
         "use_cases": ["Deteksi bekas kebakaran (dNBR pre/post untuk severity)", "Monitoring regenerasi hutan pasca kebakaran/tebang", "Kehutanan dan karbon (degradasi tajuk)"],
         "limitations": ["Butuh citra pre-fire untuk severity akurat (dNBR), NBR tunggal hanya indikasi kasar", "Bisa terpengaruh bayangan awan/topografi"],
-        "suitable_sensors": ["Sentinel-2", "Landsat 8/9"],
+        "suitable_sensors": ["Sentinel-2", "Landsat 4/5/7/8/9"],
         "landsat_compatible": True,
         "palette": ["#8B0000", "#DAA520", "#9ACD32", "#006400"],
         "classification": [
@@ -297,7 +297,7 @@ VEGETATION_INDEX_CATALOG: dict[str, dict[str, Any]] = {
         },
         "use_cases": ["Deteksi lahan gundul/tanah terbuka", "Monitoring deforestasi/pembukaan lahan", "Rehabilitasi lahan (baseline sebelum tanam)"],
         "limitations": ["Bisa keliru dengan area terbangun (signature spektral mirip tanah kering)"],
-        "suitable_sensors": ["Sentinel-2", "Landsat 8/9"],
+        "suitable_sensors": ["Sentinel-2", "Landsat 4/5/7/8/9"],
         "landsat_compatible": True,
         "palette": ["#006400", "#90EE90", "#DEB887", "#8B4513"],
         "classification": [
@@ -350,7 +350,7 @@ VEGETATION_INDEX_CATALOG: dict[str, dict[str, Any]] = {
         },
         "use_cases": ["Pertanian presisi (status nitrogen tanaman)", "Monitoring pertumbuhan tanaman pangan/perkebunan"],
         "limitations": ["Rentang nilai tidak dibatasi -1..1 (rasio, bisa besar) — perlu normalisasi visual berbeda dari indeks ND", "Sensitif terhadap sudut pengambilan citra dan kalibrasi radiometrik"],
-        "suitable_sensors": ["Sentinel-2", "Landsat 8/9", "PlanetScope"],
+        "suitable_sensors": ["Sentinel-2", "Landsat 4/5/7/8/9", "PlanetScope"],
         "landsat_compatible": True,
         "palette": ["#8B4513", "#FFFF00", "#9ACD32", "#006400"],
         "classification": [
@@ -376,7 +376,7 @@ VEGETATION_INDEX_CATALOG: dict[str, dict[str, Any]] = {
         },
         "use_cases": ["Area dengan gangguan atmosfer/aerosol/asap tinggi", "Monitoring regional skala luas dengan variasi kondisi atmosfer"],
         "limitations": ["Butuh band biru berkualitas baik", "Perbaikan atas NDVI relatif kecil pada citra dengan koreksi atmosfer yang sudah baik (mis. Sentinel-2 SR)"],
-        "suitable_sensors": ["Sentinel-2", "Landsat 8/9", "PlanetScope"],
+        "suitable_sensors": ["Sentinel-2", "Landsat 4/5/7/8/9", "PlanetScope"],
         "landsat_compatible": True,
         "palette": ["#8B4513", "#FFFF00", "#90EE90", "#006400"],
         "classification": [
@@ -403,7 +403,7 @@ VEGETATION_INDEX_CATALOG: dict[str, dict[str, Any]] = {
         },
         "use_cases": ["Analisis dari drone/kamera RGB tanpa sensor NIR", "Cek cepat kehijauan dari citra visual"],
         "limitations": ["Kurang presisi dibanding indeks berbasis NIR", "Sensitif terhadap variasi pencahayaan/warna tanah"],
-        "suitable_sensors": ["Sentinel-2", "Landsat 8/9", "Drone RGB", "PlanetScope"],
+        "suitable_sensors": ["Sentinel-2", "Landsat 4/5/7/8/9", "Drone RGB", "PlanetScope"],
         "landsat_compatible": True,
         "palette": ["#8B4513", "#FFFF00", "#90EE90", "#006400"],
         "classification": [
@@ -429,7 +429,7 @@ VEGETATION_INDEX_CATALOG: dict[str, dict[str, Any]] = {
         },
         "use_cases": ["Deteksi dini stres tanaman sebelum gejala visual jelas", "Pertanian presisi (screening kesehatan tanaman)"],
         "limitations": ["Interpretasi kurang intuitif dibanding NDVI (rasio, bukan indeks -1..1)", "Butuh validasi lapangan untuk memastikan penyebab stres"],
-        "suitable_sensors": ["Sentinel-2", "Landsat 8/9", "PlanetScope"],
+        "suitable_sensors": ["Sentinel-2", "Landsat 4/5/7/8/9", "PlanetScope"],
         "landsat_compatible": True,
         "palette": ["#006400", "#9ACD32", "#DAA520", "#8B0000"],
         "classification": [
@@ -455,7 +455,7 @@ VEGETATION_INDEX_CATALOG: dict[str, dict[str, Any]] = {
         },
         "use_cases": ["Perkiraan kerapatan tajuk untuk estimasi biomassa/karbon kasar", "Monitoring pertumbuhan tanaman perkebunan/hutan tanaman"],
         "limitations": ["Proksi empiris generik, TIDAK dikalibrasi per jenis vegetasi/lokasi — hindari klaim akurasi tinggi", "Untuk LAI akurat sebaiknya gunakan model inversi khusus (mis. PROSAIL) atau data lapangan"],
-        "suitable_sensors": ["Sentinel-2", "Landsat 8/9", "PlanetScope"],
+        "suitable_sensors": ["Sentinel-2", "Landsat 4/5/7/8/9", "PlanetScope"],
         "landsat_compatible": True,
         "palette": ["#8B4513", "#FFFF00", "#9ACD32", "#006400"],
         "classification": [

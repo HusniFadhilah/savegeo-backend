@@ -13,7 +13,7 @@ class SatelliteProviderEntry(Base):
     """Admin-editable overlay on top of the static satellite provider catalog
     (app/registries/satellite_provider_registry.py), same pattern as
     DatasetEntry for the carbon/landcover registries. `key` must match one of
-    the registry's three known providers ("sentinel2"/"landsat8"/"landsat9")
+    the registry's known providers (Sentinel-2 and Landsat 4/5/7/8/9)
     so a row is looked up by key and merged over the static registry entry -
     see app/repositories/satellite_provider_repo.py. A row can override every
     field, including the GEE collection id and the generic-role->native-band
@@ -21,8 +21,8 @@ class SatelliteProviderEntry(Base):
     is now only the zero-DB-row fallback/seed, not the sole source of truth.
     All columns nullable; a null column falls back to the static registry
     default. The cloud-masking *algorithm* choice (Sentinel-2 QA60 bitmask vs
-    Landsat QA_PIXEL bitmask) still keys off which of the three known
-    providers this row overrides, not a DB field - a genuinely new provider
+    Landsat QA_PIXEL bitmask) still keys off whether this is Sentinel-2 or a
+    Landsat-family provider, not a DB field - a genuinely new provider
     with a different cloud-mask scheme needs a code change, not just a row.
     """
 

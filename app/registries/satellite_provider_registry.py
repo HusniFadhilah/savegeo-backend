@@ -8,7 +8,7 @@ id and the band-role map, can be overridden per-row in the DB, and a
 DB-only row with a key not listed here works too (a brand-new provider added
 purely through the database). This module exists so the app still works with
 zero DB rows (fresh install, table wiped, etc) and so there is a known-good
-reference for what "sentinel2"/"landsat8"/"landsat9" mean by default.
+reference for Sentinel-2 and Landsat 4/5/7/8/9 by default.
 
 Pure metadata only - no `ee` dependency here (mirrors
 vegetation_index_registry.py's separation of concerns). GEE-touching
@@ -59,6 +59,60 @@ SATELLITE_PROVIDERS: dict[str, dict[str, Any]] = {
             "re1": "B5", "re2": "B6", "re3": "B7",
             "nir": "B8", "nir_narrow": "B8A",
             "swir1": "B11", "swir2": "B12",
+        },
+    },
+    "landsat4": {
+        "key": "landsat4",
+        "name": "Landsat 4 (TM)",
+        "provider": "USGS / NASA",
+        "gee_collection": "LANDSAT/LT04/C02/T1_L2",
+        "resolution_m": 30,
+        "resolution_label": "30 m (multispektral)",
+        "revisit_days": 16,
+        "swath_km": 185,
+        "launch": "1982",
+        "start_year": 1982,
+        "bands_available": ["Blue", "Green", "Red", "NIR", "SWIR1", "SWIR2", "Thermal 1"],
+        "description": "Arsip surface reflectance Landsat 4 TM Collection 2 Level 2, 30 m, tersedia mulai Agustus 1982.",
+        "band_role_map": {
+            "blue": "SR_B1", "green": "SR_B2", "red": "SR_B3",
+            "nir": "SR_B4", "swir1": "SR_B5", "swir2": "SR_B7",
+        },
+    },
+    "landsat5": {
+        "key": "landsat5",
+        "name": "Landsat 5 (TM)",
+        "provider": "USGS / NASA",
+        "gee_collection": "LANDSAT/LT05/C02/T1_L2",
+        "resolution_m": 30,
+        "resolution_label": "30 m (multispektral)",
+        "revisit_days": 16,
+        "swath_km": 185,
+        "launch": "1984",
+        "start_year": 1984,
+        "bands_available": ["Blue", "Green", "Red", "NIR", "SWIR1", "SWIR2", "Thermal 1"],
+        "description": "Arsip surface reflectance Landsat 5 TM Collection 2 Level 2, 30 m, tersedia mulai Maret 1984.",
+        "band_role_map": {
+            "blue": "SR_B1", "green": "SR_B2", "red": "SR_B3",
+            "nir": "SR_B4", "swir1": "SR_B5", "swir2": "SR_B7",
+        },
+    },
+    "landsat7": {
+        "key": "landsat7",
+        "name": "Landsat 7 (ETM+)",
+        "provider": "USGS / NASA",
+        "gee_collection": "LANDSAT/LE07/C02/T1_L2",
+        "resolution_m": 30,
+        "resolution_label": "30 m (multispektral)",
+        "revisit_days": 16,
+        "swath_km": 185,
+        "launch": "1999",
+        "start_year": 1999,
+        "bands_available": ["Blue", "Green", "Red", "NIR", "SWIR1", "SWIR2", "Thermal 1", "Thermal 2"],
+        "description": "Arsip surface reflectance Landsat 7 ETM+ Collection 2 Level 2, 30 m. Scene sejak 31 Mei 2003 dapat memiliki celah SLC-off.",
+        "band_role_map": {
+            "blue": "SR_B1", "green": "SR_B2", "red": "SR_B3",
+            "nir": "SR_B4", "swir1": "SR_B5", "swir2": "SR_B7",
         },
     },
     "landsat8": {

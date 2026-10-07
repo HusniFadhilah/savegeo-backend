@@ -175,7 +175,7 @@ def _composite_for_period(
             aoi, start_date, end_date, cloud_threshold,
             technique=cloud_mask_technique, collection_id=collection_id,
         ).map(lambda img: img.divide(10000))
-    else:  # landsat8 / landsat9 (Collection 2 Level-2 surface reflectance)
+    else:  # Landsat 4/5/7/8/9 Collection 2 Level-2 surface reflectance
         collection = (
             ee.ImageCollection(collection_id)
             .filterBounds(aoi).filterDate(start_date, end_date)

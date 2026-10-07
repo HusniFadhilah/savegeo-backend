@@ -10,7 +10,7 @@ that model - mixing them into the vegetation catalog would be wrong. This
 catalog instead tags each entry with a `visualization` strategy so
 imagery_service.py's scene-tile builder knows how to render it:
 
-  - "rgb": true-color composite from 3 named bands (Sentinel-2, Landsat 8/9,
+  - "rgb": true-color composite from 3 named bands (Sentinel-2, Landsat 4/5/7/8/9,
     Sentinel-3 OLCI) - same idea as the vegetation catalog's RGB tiles.
   - "sar": Sentinel-1 backscatter (VV/VH, already in dB in this GEE
     collection) - grayscale VV by default, or a VV/VH/VV-VH false-color
