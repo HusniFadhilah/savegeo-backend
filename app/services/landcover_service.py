@@ -18,6 +18,7 @@ import logging
 from datetime import UTC, date, datetime, timedelta
 
 import ee
+from pyproj import CRS
 
 from app.core.config import get_settings
 from app.registries.landcover_dataset_registry import (
@@ -25,14 +26,13 @@ from app.registries.landcover_dataset_registry import (
     LAND_COVER_LEGENDS,
     LAND_COVER_NATIVE_SCALE,
     LAND_COVER_VIS,
+    MAPBIOMAS_41_ASSET,
     _landcover_year_bound,
     glad_glcluc_geotiff_uri,
-    mapbiomas_indonesia_geotiff_uri,
     should_skip_lulc_class,
     supported_glc_fcs30d_year,
 )
 from app.services.arcgis_helpers import compute_arcgis_landcover_summary
-from app.services.geosave_landcover_service import probe_geotiff
 from app.services.gee_common import (
     AnalysisError,
     build_date_range,
@@ -41,6 +41,9 @@ from app.services.gee_common import (
 )
 
 logger = logging.getLogger(__name__)
+# EE's projection database does not recognize EPSG:6933 by code. Its WKT
+# definition uses the identical global equal-area grid and parses in EE.
+LC_EQUAL_AREA_CRS = CRS.from_epsg(6933).to_wkt(version="WKT1_GDAL")
 
 # Legacy defaults (env-var backed in Flask; no DB-backed system_config override
 # ported yet, so these mirror `os.getenv("DEFAULT_YEAR_MIN", 2015)` /
@@ -65,7 +68,7 @@ def get_direct_landcover_reference_layer(
     if dataset not in LAND_COVER_DATASET_OPTIONS:
         raise AnalysisError(f"Dataset land cover '{dataset}' tidak ditemukan.", 404)
     meta = LAND_COVER_DATASET_OPTIONS[dataset]
-    if meta.get("provider_type", "").startswith("arcgis") and not meta.get("gee_id"):
+    if meta.get("provider_type", "").startswith("arcgis") and not meta.get("gee_id") and not meta.get("analysis_dataset"):
         legend = {
             str(class_value): {
                 "label": class_info.get("label"),
@@ -89,7 +92,8 @@ def get_direct_landcover_reference_layer(
 
     # A global rectangle is only used to keep the existing dataset loaders'
     # filterBounds/clip calls valid; no area reduction or AOI statistics run.
-    world = ee.Geometry.Rectangle([-179.999, -85, 179.999, 85], geodesic=False)
+    bounds = [94.7, -11.1, 141.1, 6.2] if dataset in {"AlphaEarth_RF", "Sentinel1_2_RF"} and meta.get("coverage") == "Indonesia" else [-179.999, -85, 179.999, 85]
+    world = ee.Geometry.Rectangle(bounds, proj="EPSG:4326", geodesic=False)
     image, metadata = get_landcover_image(
         dataset,
         int(year),
@@ -121,6 +125,10 @@ def get_direct_landcover_reference_layer(
         "resolution": f"{LAND_COVER_NATIVE_SCALE.get(dataset, meta.get('resolution', 30))}m",
         "provider_type": metadata.get("provider_type", meta.get("provider_type")),
         "date_range": metadata.get("date_range"),
+        "collection_version": metadata.get("collection_version"),
+        "model_version": metadata.get("model_version"),
+        "quality_note": metadata.get("quality_note"),
+        "analysis_source": metadata.get("analysis_source"),
         "legend": legend,
         "vis_params": visual_params,
         "direct": True,
@@ -149,6 +157,15 @@ def clamp_landcover_year(dataset: str, year: int) -> int:
 
 DW_PROB_BANDS = ["water", "trees", "grass", "flooded_vegetation", "crops", "shrub_and_scrub", "built", "bare", "snow_and_ice"]
 
+
+def _dw_class_confidence(collection, labels):
+    """Mean probability of the selected modal class, not any class at any time."""
+    probabilities = collection.select(DW_PROB_BANDS).mean()
+    confidence = ee.Image(0)
+    for code, band in enumerate(DW_PROB_BANDS):
+        confidence = confidence.where(labels.eq(code), probabilities.select(band))
+    return confidence.updateMask(labels.mask()).rename("confidence")
+
 # Used only to report "% low-confidence pixels" as a diagnostic when the
 # caller hasn't set an explicit dw_probability_threshold - the review that
 # flagged this (finding #8: no DW confidence surfaced) wants it visible even
@@ -166,7 +183,8 @@ def _dw_confidence_stats(dw_collection, aoi, scale: int, threshold: float | None
     settings = get_settings()
     effective_threshold = threshold if (threshold is not None and 0 < threshold < 1) else _DW_DIAGNOSTIC_CONFIDENCE_THRESHOLD
     try:
-        max_prob = dw_collection.select(DW_PROB_BANDS).reduce(ee.Reducer.max()).reduce(ee.Reducer.max()).rename("confidence").clip(aoi)
+        labels = dw_collection.select("label").mode()
+        max_prob = _dw_class_confidence(dw_collection, labels).clip(aoi)
         stats = max_prob.reduceRegion(
             reducer=ee.Reducer.mean().combine(ee.Reducer.minMax(), sharedInputs=True),
             geometry=aoi, scale=scale, maxPixels=int(settings.max_pixels), bestEffort=True, tileScale=4,
@@ -256,7 +274,7 @@ def _exclusive_end_date(date_str: str) -> str:
     return (date.fromisoformat(date_str) + timedelta(days=1)).isoformat()
 
 
-def get_landcover_image(
+def _load_landcover_image(
     dataset: str,
     year: int,
     aoi,
@@ -300,8 +318,8 @@ def get_landcover_image(
         if _dw_size == 0:
             raise ValueError(f"No Sentinel-2 land-cover data found for {effective_year} ({dw_start_date}-{dw_end_date})")
         label_mode = dw.select("label").reduce(ee.Reducer.mode()).rename("landcover")
-        if dw_probability_threshold is not None and 0 < dw_probability_threshold < 1:
-            max_prob = dw.select(DW_PROB_BANDS).reduce(ee.Reducer.max()).reduce(ee.Reducer.max())
+        if dw_probability_threshold is not None and 0 <= dw_probability_threshold <= 1:
+            max_prob = _dw_class_confidence(dw, label_mode)
             confidence_mask = max_prob.gte(dw_probability_threshold)
             label_mode = label_mode.updateMask(confidence_mask)
         image = label_mode.clip(aoi)
@@ -337,6 +355,7 @@ def get_landcover_image(
         return image, {
             "dataset": dataset,
             "dataset_name": f"ESA WorldCover v{200 if esa_year >= esa_threshold else 100}",
+            "collection_version": "v200" if esa_year >= esa_threshold else "v100",
             "requested_year": requested_year,
             "year": esa_year,
             "date_range": {"start": f"{esa_year}-01-01", "end": f"{esa_year}-12-31"},
@@ -463,38 +482,17 @@ def get_landcover_image(
             "date_range": {"start": f"{fnf_year}-01-01", "end": f"{fnf_year}-12-31"},
         }
 
-    if dataset == "MapBiomas_Indonesia":
-        uri, mbi_meta = mapbiomas_indonesia_geotiff_uri(requested_year)
-        mbi_year = mbi_meta["year"]
-        image = ee.Image.loadGeoTIFF(uri).clip(aoi).rename("landcover")
+    if dataset in {"MapBiomas_Indonesia", "GeoSave_MapBiomas_Indonesia"}:
+        image = ee.Image(MAPBIOMAS_41_ASSET).select(f"classification_{effective_year}").rename("landcover").clip(aoi)
         return image, {
-            "dataset": dataset,
-            "dataset_name": f"MapBiomas Indonesia LANDY {mbi_meta['collection']}",
-            "requested_year": requested_year,
-            "year": mbi_year,
-            "date_range": {"start": f"{mbi_year}-01-01", "end": f"{mbi_year}-12-31"},
-            "source_uri": uri,
+            "dataset": dataset, "dataset_name": LAND_COVER_DATASET_OPTIONS[dataset]["name"],
+            "requested_year": requested_year, "year": effective_year,
+            "date_range": {"start": f"{effective_year}-01-01", "end": f"{effective_year}-12-31"},
+            "source_uri": MAPBIOMAS_41_ASSET, "classification_backend": "MapBiomas_Indonesia",
+            "collection_version": "4.1", "class_schema": "MAPBIOMAS_INDONESIA_41_13",
         }
 
     # ── New provider types ──────────────────────────────────────────────
-
-    if dataset == "GeoSave_MapBiomas_Indonesia":
-        uri, mbi_meta = mapbiomas_indonesia_geotiff_uri(requested_year)
-        mbi_year = mbi_meta["year"]
-        geosave_probe = probe_geotiff(uri)
-        image = ee.Image.loadGeoTIFF(uri).clip(aoi).rename("landcover")
-        return image, {
-            "dataset": dataset,
-            "dataset_name": f"GeoSave MapBiomas Indonesia LANDY {mbi_meta['collection']}",
-            "requested_year": requested_year,
-            "year": mbi_year,
-            "date_range": {"start": f"{mbi_year}-01-01", "end": f"{mbi_year}-12-31"},
-            "provider_type": "geosave_geotiff",
-            "source_kind": "geosave_geotiff",
-            "classification_backend": "MapBiomas_Indonesia",
-            "source_uri": uri,
-            "geosave": geosave_probe.to_dict(),
-        }
 
     if dataset == "JRC_TMF":
         band_name = f"Dec{effective_year}"
@@ -553,6 +551,67 @@ def get_landcover_image(
     raise ValueError(f"Unknown dataset: {dataset}")
 
 
+def get_landcover_image(
+    dataset: str, year: int, aoi, start_month: int = 1, end_month: int = 12,
+    dw_probability_threshold: float | None = None, start_date: str | None = None,
+    end_date: str | None = None, include_diagnostics: bool = True,
+):
+    """One categorical image contract for datasets, classifiers, and model assets."""
+    from app.services.landcover_model_service import MODEL_KEYS, get_model_image, refresh_model_catalog
+
+    if dataset in MODEL_KEYS:
+        refresh_model_catalog()
+    if dataset not in LAND_COVER_DATASET_OPTIONS:
+        raise AnalysisError(f"Dataset land cover '{dataset}' tidak ditemukan.", 404)
+    info = LAND_COVER_DATASET_OPTIONS[dataset]
+    if info.get("available") is False:
+        raise AnalysisError(info.get("availability_reason", "Model belum dikonfigurasi."), 409)
+    if dw_probability_threshold is not None and not 0 <= float(dw_probability_threshold) <= 1:
+        raise AnalysisError("Ambang confidence harus 0–1.", 400)
+    if dataset in MODEL_KEYS:
+        if start_date and end_date:
+            start, end = start_date, _exclusive_end_date(end_date)
+        else:
+            start, end = build_date_range(int(year), start_month, end_month)
+        image, metadata = get_model_image(dataset, int(year), aoi, start, end, dw_probability_threshold)
+    else:
+        analysis_dataset = info.get("analysis_dataset", dataset)
+        image, metadata = _load_landcover_image(
+            analysis_dataset, year, aoi, start_month, end_month,
+            dw_probability_threshold, start_date, end_date, include_diagnostics,
+        )
+        metadata = {**metadata, "dataset": dataset}
+        if analysis_dataset != dataset:
+            metadata.update({"dataset_name": info["name"], "analysis_source": analysis_dataset, "provider_type": "gee_public_asset", "source_kind": "gee"})
+    metadata.setdefault("collection_version", info.get("collection_version", info.get("gee_id", dataset)))
+    metadata.setdefault("class_schema", info.get("class_schema", dataset))
+    metadata.setdefault("provider_type", info.get("provider_type"))
+    metadata.setdefault("coverage", info.get("coverage", "Global"))
+    metadata["native_scale"] = LAND_COVER_NATIVE_SCALE.get(dataset, 30)
+    metadata["temporal_resolution"] = "period" if info.get("monthly") else "annual"
+    if int(metadata["year"]) != int(year):
+        metadata["fallback_reason"] = f"Tahun {year} tidak tersedia; peta yang ditampilkan berasal dari {metadata['year']}."
+    codes = [int(code) for code in LAND_COVER_LEGENDS[dataset] if int(code) not in info.get("nodata_classes", [])]
+    valid = image.remap(codes, [1] * len(codes), 0)
+    return image.updateMask(valid).rename("landcover"), metadata
+
+
+def _comparison_grid(from_image, to_image, from_meta: dict, to_meta: dict, scale: int, include_improbable_classes: bool = False):
+    if (from_meta.get("year"), from_meta.get("date_range")) == (to_meta.get("year"), to_meta.get("date_range")):
+        raise AnalysisError("Dua periode memakai raster tahun efektif yang sama. Pilih dua tahun/periode yang tersedia dan berbeda.", 422)
+    for field in ("class_schema", "model_version", "collection_version"):
+        if from_meta.get(field) != to_meta.get(field):
+            raise AnalysisError(f"Versi/schema model berbeda ({field}); gunakan satu versi model untuk kedua periode.", 422)
+    projection = ee.Projection(LC_EQUAL_AREA_CRS).atScale(scale)
+    before = from_image.toInt32().reproject(projection)
+    after = to_image.toInt32().reproject(projection)
+    codes = [int(code) for code, value in LAND_COVER_LEGENDS[from_meta["dataset"]].items() if not should_skip_lulc_class(value["label"], include_improbable_classes)]
+    before = before.updateMask(before.remap(codes, [1] * len(codes), 0))
+    after = after.updateMask(after.remap(codes, [1] * len(codes), 0))
+    valid = before.mask().And(after.mask())
+    return before.updateMask(valid), after.updateMask(valid)
+
+
 def summarize_landcover_classes(dataset: str, image, aoi, lc_scale: int, include_improbable_classes: bool = False, band_name=None):
     settings = get_settings()
     lc_scale = max(int(lc_scale), LAND_COVER_NATIVE_SCALE.get(dataset, int(lc_scale)))
@@ -564,7 +623,8 @@ def summarize_landcover_classes(dataset: str, image, aoi, lc_scale: int, include
         geometry=aoi,
         scale=lc_scale,
         maxPixels=int(settings.max_pixels),
-        bestEffort=True,
+        crs=LC_EQUAL_AREA_CRS,
+        bestEffort=False,
         tileScale=4,
     ).getInfo()
 
@@ -630,7 +690,21 @@ def summarize_landcover_image(dataset: str, image, aoi, lc_scale: int, metadata:
         "source_kind": metadata.get("source_kind"),
         "classification_backend": metadata.get("classification_backend"),
         "source_uri": metadata.get("source_uri"),
+        "analysis_source": metadata.get("analysis_source"),
         "geosave": metadata.get("geosave"),
+        "fallback_reason": metadata.get("fallback_reason"),
+        "collection_version": metadata.get("collection_version"),
+        "class_schema": metadata.get("class_schema"),
+        "model_version": metadata.get("model_version"),
+        "temporal_resolution": metadata.get("temporal_resolution"),
+        "native_scale": metadata.get("native_scale"),
+        "quality_note": metadata.get("quality_note"),
+        "training_sample_count": metadata.get("training_sample_count"),
+        "trained_class_codes": metadata.get("trained_class_codes"),
+        "missing_training_classes": metadata.get("missing_training_classes"),
+        "validation_kind": metadata.get("validation_kind"),
+        "confidence_available": metadata.get("confidence_available", False),
+        "confidence_calibrated": metadata.get("confidence_calibrated"),
     }
 
 
@@ -639,176 +713,67 @@ def summarize_landcover_image(dataset: str, image, aoi, lc_scale: int, metadata:
 # ─────────────────────────────────────────────
 
 def analyze_landcover(data: dict) -> dict:
-    if not data:
-        raise AnalysisError("Body JSON kosong atau tidak valid", 400)
-    if not data.get("aoi"):
-        raise AnalysisError("aoi is required", 400)
-
-    settings = get_settings()
-    aoi = create_geometry_from_payload(data["aoi"])
+    if not data or not data.get("aoi"):
+        raise AnalysisError("AOI diperlukan untuk analisis land cover.", 400)
+    from app.services.landcover_model_service import refresh_model_catalog
+    refresh_model_catalog()
     datasets = data.get("datasets", ["Dynamic_World"])
-    dw_probability_threshold = data.get("dw_probability_threshold")
-    if dw_probability_threshold is not None:
-        dw_probability_threshold = float(dw_probability_threshold)
-    lc_scale = int(data.get("scale", settings.default_landcover_scale))
-    include_improbable_classes = bool(data.get("include_improbable_classes", False))
-    results: dict = {}
-
-    # Resolve date params - supports specific date range or year/month
-    explicit_start = data.get("start_date")  # "YYYY-MM-DD"
-    explicit_end = data.get("end_date")  # "YYYY-MM-DD"
-    if explicit_start and explicit_end:
-        from datetime import date as _date
-
-        sd = _date.fromisoformat(explicit_start)
-        year = sd.year
-        start_month = sd.month
-        end_month = _date.fromisoformat(explicit_end).month
-        dw_start_date = explicit_start
-        dw_end_date = _exclusive_end_date(explicit_end)
-        dw_display_end_date = explicit_end
-        dw_year = year
-    else:
-        year = int(data.get("year", 2022))
-        start_month = int(data.get("start_month", 1))
-        end_month = int(data.get("end_month", 12))
-        dw_year = clamp_landcover_year("Dynamic_World", year)
-        dw_start_date, dw_end_date = build_date_range(dw_year, start_month, end_month)
-        dw_display_end_date = dw_end_date
-
-    # Dynamic World (gee_near_real_time - supports current year and beyond)
-    if "Dynamic_World" in datasets:
-        dw = ee.ImageCollection("GOOGLE/DYNAMICWORLD/V1").filterDate(dw_start_date, dw_end_date).filterBounds(aoi)
-        _dw_size = dw.size().getInfo()
-        if _dw_size > 0:
-            classification = dw.select("label").reduce(ee.Reducer.mode()).clip(aoi)
-            if dw_probability_threshold is not None and 0 < dw_probability_threshold < 1:
-                max_prob = dw.select(DW_PROB_BANDS).reduce(ee.Reducer.max()).reduce(ee.Reducer.max())
-                classification = classification.updateMask(max_prob.gte(dw_probability_threshold))
-            summary = summarize_landcover_classes(
-                "Dynamic_World", classification, aoi, lc_scale,
-                include_improbable_classes, band_name="label_mode"
-            )
-            if summary:
-                classes, total_area_ha, effective_scale = summary
-                vis = {"min": 0, "max": 8, "palette": ["#419BDF", "#397D49", "#88B053", "#7A87C6", "#E49635", "#DFC35A", "#C4281B", "#A59B8F", "#B39FE1"]}
-                tile = get_tile_url(classification, vis, "Dynamic World")
-                results["Dynamic_World"] = {
-                    "classes": classes, "tile_url": tile["tile_url"] if tile else None,
-                    "total_area_ha": total_area_ha,
-                    "resolution": f"{effective_scale}m",
-                    "dataset_name": "Dynamic World",
-                    "requested_year": year,
-                    "year": dw_year,
-                    "date_range": {"start": dw_start_date, "end": dw_display_end_date},
-                    "provider_type": "gee_near_real_time",
-                    "dw_probability_threshold": dw_probability_threshold,
-                    "confidence": _dw_confidence_stats(dw, aoi, effective_scale, dw_probability_threshold),
-                    "coverage_note": _dw_coverage_note(dw_start_date, dw_display_end_date, _dw_size),
-                }
-
-    # ESA WorldCover
-    if "ESA_WorldCover" in datasets:
+    if not isinstance(datasets, list) or not 1 <= len(datasets) <= 12:
+        raise AnalysisError("Pilih 1–12 dataset land cover.", 400)
+    aoi = create_geometry_from_payload(data["aoi"])
+    start, end = data.get("start_date"), data.get("end_date")
+    year = int(data.get("year", datetime.now(UTC).year))
+    if start and end:
+        first, last = date.fromisoformat(start), date.fromisoformat(end)
+        if first > last:
+            raise AnalysisError("Tanggal awal harus sebelum tanggal akhir.", 400)
+        year = first.year
+    start_month, end_month = int(data.get("start_month", 1)), int(data.get("end_month", 12))
+    if not 1 <= start_month <= end_month <= 12:
+        raise AnalysisError("Rentang bulan tidak valid.", 400)
+    results, failures = {}, []
+    for dataset in dict.fromkeys(datasets):
         try:
-            esa_threshold = _ESA_THRESHOLD_YEAR
-            esa_year = clamp_landcover_year("ESA_WorldCover", year)
-            col_id = "ESA/WorldCover/v200" if esa_year >= esa_threshold else "ESA/WorldCover/v100"
-            esa_clipped = ee.ImageCollection(col_id).first().select("Map").clip(aoi)
-            summary = summarize_landcover_classes(
-                "ESA_WorldCover", esa_clipped, aoi, lc_scale,
-                include_improbable_classes, band_name="Map"
-            )
-            if summary:
-                classes, total_area_ha, effective_scale = summary
-                vis = {"min": 10, "max": 100, "palette": ["006400", "ffbb22", "ffff4c", "f096ff", "fa0000", "b4b4b4", "f0f0f0", "0032c8", "0096a0", "00cf75", "fae6a0"]}
-                rgb_map = esa_clipped.visualize(**vis).getMapId()
-                results["ESA_WorldCover"] = {
-                    "classes": classes, "tile_url": rgb_map["tile_fetcher"].url_format,
-                    "total_area_ha": total_area_ha,
-                    "resolution": f"{effective_scale}m", "year": esa_year,
-                    "requested_year": year,
-                    "dataset_name": f"ESA WorldCover v{200 if esa_year >= esa_threshold else 100}",
-                    "date_range": {"start": f"{esa_year}-01-01", "end": f"{esa_year}-12-31"},
-                }
-        except Exception as e:  # noqa: BLE001
-            logger.error(f"ESA WorldCover error: {e}")
-
-    # ESRI Land Cover (annual; fallback for requests beyond latest)
-    if "ESRI_LandCover" in datasets:
-        try:
-            esri_year = clamp_landcover_year("ESRI_LandCover", year)
-            esri_fallback_reason = None
-            if year != esri_year:
-                esri_fallback_reason = (
-                    f"Latest annual Esri LULC available is {esri_year}; "
-                    f"annual product for {year} not yet released. "
-                    "Use Dynamic_World for near-real-time current-year LULC."
-                )
-            col_id = _ESRI_COLLECTION_ID
-            esri_col = ee.ImageCollection(col_id).filterDate(f"{esri_year}-01-01", f"{esri_year}-12-31").filterBounds(aoi)
-            if esri_col.size().getInfo() == 0:
-                esri_col = ee.ImageCollection(col_id).filterDate(f"{esri_year}-01-01", f"{esri_year}-12-31")
-            esri_clipped = esri_col.mosaic().clip(aoi)
-            band_name = esri_clipped.bandNames().getInfo()[0]
-            summary = summarize_landcover_classes(
-                "ESRI_LandCover", esri_clipped, aoi, lc_scale,
-                include_improbable_classes, band_name=band_name
-            )
-            if summary:
-                classes, total_area_ha, effective_scale = summary
-                visual_image, visual_params = landcover_visual_image("ESRI_LandCover", esri_clipped.select(band_name))
-                tile = get_tile_url(visual_image, visual_params, "ESRI 10m Annual LULC v3")
-                results["ESRI_LandCover"] = {
-                    "classes": classes, "tile_url": tile["tile_url"] if tile else None,
-                    "total_area_ha": total_area_ha,
-                    "resolution": f"{effective_scale}m", "year": esri_year,
-                    "requested_year": year,
-                    "dataset_name": "ESRI 10m Annual LULC v3",
-                    "date_range": {"start": f"{esri_year}-01-01", "end": f"{esri_year}-12-31"},
-                    "fallback_reason": esri_fallback_reason,
-                }
-        except Exception as e:  # noqa: BLE001
-            logger.error(f"ESRI error: {e}")
-
-    handled_datasets = {"Dynamic_World", "ESA_WorldCover", "ESRI_LandCover"}
-    for dataset in datasets:
-        if dataset not in handled_datasets:
-            ds_meta = LAND_COVER_DATASET_OPTIONS.get(dataset, {})
-            if ds_meta.get("provider_type", "").startswith("arcgis") and not ds_meta.get("gee_id"):
-                try:
-                    results[dataset] = compute_arcgis_landcover_summary(
-                        dataset, ds_meta, data["aoi"], year
-                    )
-                except Exception as arc_err:  # noqa: BLE001
-                    logger.error(f"ArcGIS {dataset} analysis error: {arc_err}")
-                    results[dataset] = {
-                        "error": str(arc_err),
-                        "provider_type": ds_meta.get("provider_type"),
-                        "arcgis_item_id": ds_meta.get("arcgis_item_id"),
-                        "status": "arcgis_error",
-                    }
+            info = LAND_COVER_DATASET_OPTIONS.get(dataset)
+            if info is None:
+                raise AnalysisError(f"Dataset '{dataset}' tidak tersedia.", 400)
+            if info.get("provider_type", "").startswith("arcgis") and not info.get("analysis_dataset"):
+                results[dataset] = compute_arcgis_landcover_summary(dataset, info, data["aoi"], year)
                 continue
-            try:
-                lc_image, metadata = get_landcover_image(
-                    dataset,
-                    year,
-                    aoi,
-                    start_month,
-                    end_month,
-                    dw_probability_threshold=dw_probability_threshold,
-                    start_date=explicit_start,
-                    end_date=explicit_end,
-                )
-                summary = summarize_landcover_image(dataset, lc_image, aoi, lc_scale, metadata, include_improbable_classes)
-                if summary:
-                    results[dataset] = summary
-            except Exception as e:  # noqa: BLE001
-                logger.error(f"{dataset} error: {e}")
-                results[dataset] = {"error": str(e)}
-
-    success_count = sum(1 for v in results.values() if "error" not in v)
-    if not results or success_count == 0 and not any("status" in v for v in results.values()):
-        raise AnalysisError("Tidak ada data land cover yang berhasil diproses", 404)
+            image, metadata = get_landcover_image(
+                dataset, year, aoi, start_month, end_month,
+                dw_probability_threshold=data.get("confidence_threshold", data.get("dw_probability_threshold")),
+                start_date=start, end_date=end,
+            )
+            scale = max(int(data.get("scale", LAND_COVER_NATIVE_SCALE.get(dataset, 30))), LAND_COVER_NATIVE_SCALE.get(dataset, 30))
+            summary = summarize_landcover_image(dataset, image, aoi, scale, metadata, bool(data.get("include_improbable_classes", False)))
+            if not summary:
+                raise AnalysisError("Tidak ada piksel kelas valid pada AOI/periode.", 404)
+            if dataset == "Dynamic_World":
+                summary.update({"confidence": metadata.get("confidence"), "coverage_note": metadata.get("coverage_note"), "dw_probability_threshold": metadata.get("dw_probability_threshold")})
+                mode = data.get("dw_mode", "mode")
+                if mode in {"probability", "hillshade"}:
+                    period = metadata["date_range"]
+                    dw = ee.ImageCollection("GOOGLE/DYNAMICWORLD/V1").filterBounds(aoi).filterDate(period["start"], _exclusive_end_date(period["end"]))
+                    confidence = _dw_class_confidence(dw, image).clip(aoi)
+                    if mode == "probability":
+                        tile = get_tile_url(confidence, {"min": 0, "max": 1, "palette": ["ffffff", "228b22"]}, "Dynamic World confidence")
+                    else:
+                        visual, params = landcover_visual_image(dataset, image)
+                        shade = ee.Terrain.hillshade(confidence.multiply(100)).divide(255)
+                        tile = get_tile_url(visual.visualize(**params).divide(255).multiply(shade), {"min": 0, "max": 0.6}, "Dynamic World hillshade")
+                    if tile:
+                        summary["tile_url"] = tile["tile_url"]
+            results[dataset] = summary
+        except AnalysisError as exc:
+            failures.append(exc)
+            results[dataset] = {"error": str(exc), "available": False}
+        except Exception as exc:
+            logger.warning("Land cover dataset %s failed (%s)", dataset, type(exc).__name__)
+            failures.append(AnalysisError("Layanan raster gagal memproses dataset; coba kecilkan AOI atau periksa konfigurasi sumber.", 502))
+            results[dataset] = {"error": str(exc)}
+    if not any("classes" in entry for entry in results.values()):
+        raise failures[0] if failures else AnalysisError("Tidak ada dataset berhasil diproses.", 404)
     return results
 
 
@@ -831,8 +796,8 @@ def analyze_landcover_transition(data: dict) -> dict:
             extra={"dataset": dataset, "supports_transition": False},
         )
 
-    start_year = int(data.get("start_year", data.get("year", datetime.now(UTC).year - 1)))
-    end_year = int(data.get("end_year", data.get("year", datetime.now(UTC).year)))
+    start_year = int(data.get("from_year", data.get("start_year", data.get("year", datetime.now(UTC).year - 1))))
+    end_year = int(data.get("to_year", data.get("end_year", data.get("year", datetime.now(UTC).year))))
     if start_year >= end_year:
         raise AnalysisError("start_year harus lebih kecil dari end_year", 400)
 
@@ -841,27 +806,36 @@ def analyze_landcover_transition(data: dict) -> dict:
     dw_probability_threshold = data.get("dw_probability_threshold")
     if dw_probability_threshold is not None:
         dw_probability_threshold = float(dw_probability_threshold)
-    lc_scale = int(data.get("scale", settings.default_landcover_scale))
+    lc_scale = int(data.get("scale", LAND_COVER_NATIVE_SCALE.get(dataset, settings.default_landcover_scale)))
     lc_scale = max(lc_scale, LAND_COVER_NATIVE_SCALE.get(dataset, lc_scale))
     include_improbable_classes = bool(data.get("include_improbable_classes", False))
     if not (1 <= start_month <= 12 and 1 <= end_month <= 12 and start_month <= end_month):
         raise AnalysisError("Rentang bulan tidak valid", 400)
 
     aoi = create_geometry_from_payload(data["aoi"])
-    legend = LAND_COVER_LEGENDS[dataset]
-    years = list(range(start_year, end_year + 1))
+    years = sorted(set(int(year) for year in data.get("years", [start_year, end_year] if "from_year" in data else list(range(start_year, end_year + 1)))))
+    if not 2 <= len(years) <= 50:
+        raise AnalysisError("Pilih 2–50 tahun berbeda untuk transisi.", 400)
     images = {}
     metadata = {}
 
     for year in years:
-        image, meta = get_landcover_image(dataset, year, aoi, start_month, end_month)
+        prefix = "from" if year == years[0] else "to" if year == years[-1] else None
+        image, meta = get_landcover_image(
+            dataset, year, aoi, start_month, end_month,
+            dw_probability_threshold=data.get("confidence_threshold", dw_probability_threshold),
+            start_date=data.get(f"{prefix}_start_date") if prefix else None,
+            end_date=data.get(f"{prefix}_end_date") if prefix else None,
+        )
         images[year] = image
         metadata[year] = meta
 
     pairs = []
+    legend = LAND_COVER_LEGENDS[dataset]
     class_totals: dict = {}
     for prev_year, next_year in itertools.pairwise(years):
-        transition_image = images[prev_year].toInt16().multiply(1000).add(images[next_year].toInt16()).rename("transition")
+        before, after = _comparison_grid(images[prev_year], images[next_year], metadata[prev_year], metadata[next_year], lc_scale, include_improbable_classes)
+        transition_image = before.multiply(1000).add(after).rename("transition")
         area_by_transition = (
             ee.Image.pixelArea().divide(10000).rename("area_ha")
             .addBands(transition_image)
@@ -871,15 +845,16 @@ def analyze_landcover_transition(data: dict) -> dict:
             geometry=aoi,
             scale=lc_scale,
             maxPixels=int(settings.max_pixels),
-            bestEffort=True,
+            crs=LC_EQUAL_AREA_CRS,
+            bestEffort=False,
             tileScale=4,
         ).getInfo()
 
         raw_groups = grouped.get("groups", []) if grouped else []
         flows = []
-        total_area = 0
-        changed_area = 0
-        stable_area = 0
+        total_area = 0.0
+        changed_area = 0.0
+        stable_area = 0.0
 
         for item in raw_groups:
             transition_key = item.get("transition")
@@ -927,6 +902,8 @@ def analyze_landcover_transition(data: dict) -> dict:
             flow["percentage"] = round((flow["area"] / total_area) * 100, 2) if total_area else 0
         flows.sort(key=lambda item: item["area"], reverse=True)
 
+        if total_area <= 0:
+            raise AnalysisError("Tidak ada piksel valid bersama pada kedua periode.", 422)
         pairs.append({
             "from_year": prev_year,
             "to_year": next_year,
@@ -961,6 +938,12 @@ def analyze_landcover_transition(data: dict) -> dict:
         "month_range": {"start_month": start_month, "end_month": end_month},
         "pairs": pairs,
         "net_changes": net_changes,
+        "method": "pixel_transition",
+        "comparison_crs": "EPSG:6933",
+        "collection_version": metadata[years[0]].get("collection_version"),
+        "model_version": metadata[years[0]].get("model_version"),
+        "class_schema": metadata[years[0]].get("class_schema"),
+        "source_metadata": metadata,
     }
 
 
@@ -1044,6 +1027,7 @@ def analyze_landcover_change_map(data: dict) -> dict:
             dw_probability_threshold=dw_probability_threshold,
         )
 
+    from_image, to_image = _comparison_grid(from_image, to_image, from_meta, to_meta, lc_scale, bool(data.get("include_improbable_classes", False)))
     changed = from_image.neq(to_image).rename("changed").selfMask().clip(aoi)
     stable = from_image.eq(to_image).rename("stable").selfMask().clip(aoi)
     to_changed = to_image.updateMask(changed).clip(aoi)
@@ -1054,7 +1038,8 @@ def analyze_landcover_change_map(data: dict) -> dict:
         geometry=aoi,
         scale=lc_scale,
         maxPixels=int(settings.max_pixels),
-        bestEffort=True,
+        crs=LC_EQUAL_AREA_CRS,
+        bestEffort=False,
         tileScale=4,
     ).getInfo()
     stable_area = area_ha.updateMask(stable).reduceRegion(
@@ -1062,7 +1047,8 @@ def analyze_landcover_change_map(data: dict) -> dict:
         geometry=aoi,
         scale=lc_scale,
         maxPixels=int(settings.max_pixels),
-        bestEffort=True,
+        crs=LC_EQUAL_AREA_CRS,
+        bestEffort=False,
         tileScale=4,
     ).getInfo()
 
@@ -1104,6 +1090,9 @@ def analyze_landcover_change_map(data: dict) -> dict:
         "stable_area_ha": round(stable_ha, 2),
         "changed_percentage": round((changed_ha / total_ha) * 100, 2) if total_ha else 0,
         "stable_percentage": round((stable_ha / total_ha) * 100, 2) if total_ha else 0,
+        "total_area_ha": round(total_ha, 2),
+        "comparison_crs": "EPSG:6933",
+        "source_metadata": {"from": from_meta, "to": to_meta},
     }
 
 
@@ -1290,6 +1279,7 @@ def analyze_landcover_hotspots(data: dict) -> dict:
             dw_probability_threshold=dw_probability_threshold,
         )
 
+    from_image, to_image = _comparison_grid(from_image, to_image, from_meta, to_meta, lc_scale, bool(data.get("include_improbable_classes", False)))
     changed = from_image.neq(to_image)
     transition_band = (
         from_image.toInt32().multiply(_TRANSITION_CODE_MULTIPLIER)
@@ -1306,7 +1296,8 @@ def analyze_landcover_hotspots(data: dict) -> dict:
         labelProperty="transition",
         reducer=ee.Reducer.countEvery(),
         maxPixels=int(settings.max_pixels),
-        bestEffort=True,
+        crs=LC_EQUAL_AREA_CRS,
+        bestEffort=False,
         tileScale=4,
     )
     vectors = vectors.map(lambda f: f.set("area_ha", f.geometry().area(1).divide(10000)))
@@ -1317,8 +1308,6 @@ def analyze_landcover_hotspots(data: dict) -> dict:
     # per-pixel probability surface. Other datasets have no per-pixel
     # confidence source, so `confidence` stays null for them (not fabricated).
     if dataset == "Dynamic_World" or dataset in _GEOSAVE_DYNAMIC_WORLD_DATASETS:
-        dw_prob_bands = ["water", "trees", "grass", "flooded_vegetation",
-                          "crops", "shrub_and_scrub", "built", "bare", "snow_and_ice"]
         if to_start and to_end:
             confidence_start, confidence_end = to_start, _exclusive_end_date(to_end)
         elif explicit_start and explicit_end:
@@ -1330,8 +1319,14 @@ def analyze_landcover_hotspots(data: dict) -> dict:
             ee.ImageCollection("GOOGLE/DYNAMICWORLD/V1")
             .filterDate(confidence_start, confidence_end).filterBounds(aoi)
         )
-        confidence_image = dw_to.select(dw_prob_bands).reduce(ee.Reducer.max()).reduce(ee.Reducer.max()).rename("confidence")
-        vectors = confidence_image.reduceRegions(collection=vectors, reducer=ee.Reducer.mean(), scale=lc_scale, tileScale=4)
+        confidence_image = _dw_class_confidence(dw_to, to_image)
+        vectors = confidence_image.reduceRegions(collection=vectors, reducer=ee.Reducer.mean(), scale=lc_scale, crs=LC_EQUAL_AREA_CRS, tileScale=4)
+    elif to_meta.get("confidence_available"):
+        from app.services.landcover_model_service import get_model_image
+        period = to_meta["date_range"]
+        _, _, confidence_image = get_model_image(dataset, to_meta["year"], aoi, period["start"], _exclusive_end_date(period["end"]), dw_probability_threshold, with_confidence=True)
+        if confidence_image is not None:
+            vectors = confidence_image.updateMask(to_image.mask()).reduceRegions(collection=vectors, reducer=ee.Reducer.mean(), scale=lc_scale, crs=LC_EQUAL_AREA_CRS, tileScale=4)
 
     try:
         raw_features = vectors.getInfo().get("features", [])
@@ -1382,6 +1377,9 @@ def analyze_landcover_hotspots(data: dict) -> dict:
         "vector_scale": vector_scale,
         "min_area_ha": min_area_ha,
         "hotspot_count": len(hotspots),
-        "confidence_available": dataset == "Dynamic_World",
+        "confidence_available": dataset == "Dynamic_World" or dataset in _GEOSAVE_DYNAMIC_WORLD_DATASETS or bool(to_meta.get("confidence_available")),
+        "confidence_calibrated": to_meta.get("confidence_calibrated"),
+        "comparison_crs": "EPSG:6933",
+        "source_metadata": {"from": from_meta, "to": to_meta},
         "hotspots": hotspots,
     }

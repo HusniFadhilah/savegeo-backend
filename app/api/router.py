@@ -28,6 +28,7 @@ from app.api.routes import (
     imagery_tiles,
     geospatial,
     landcover,
+    landcover_models,
     maps,
     models,
     regions,
@@ -61,6 +62,7 @@ api_router.include_router(carbon_calibration.router)
 api_router.include_router(carbon_calibration.public_router)
 api_router.include_router(chloris.router)
 api_router.include_router(landcover.router)
+api_router.include_router(landcover_models.router)
 api_router.include_router(disaster.router)
 api_router.include_router(wildfire_events.router)
 api_router.include_router(disaster_events.router)

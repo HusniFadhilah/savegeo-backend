@@ -179,6 +179,7 @@ class Settings(BaseSettings):
     default_carbon_scale: int = 10
     default_vegetation_scale: int = 10
     default_landcover_scale: int = 30
+    landcover_model_config_path: str = "var/landcover-models.json"
     max_pixels: int = 1_000_000_000
     carbon_co2_factor: float = 3.6667  # 44/12
     carbon_vis_min: float = 0

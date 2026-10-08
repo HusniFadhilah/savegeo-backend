@@ -790,6 +790,68 @@ LAND_COVER_DATASET_OPTIONS: dict[str, dict] = {
 
 
 # ─────────────────────────────────────────────
+# Versioned sources and model adapters used by every LULC workflow.
+# Keep the old keys for saved URLs and assistant commands.
+MAPBIOMAS_41_ASSET = "projects/mapbiomas-public/assets/indonesia/lulc/collection4_1/mapbiomas_indonesia_collection41_coverage_v1"
+MAPBIOMAS_CLASS_CODES = [3, 5, 9, 13, 21, 24, 25, 30, 31, 33, 35, 40, 76]
+MAPBIOMAS_DETAIL_LEGEND = {
+    str(code): LAND_COVER_LEGENDS["MapBiomas_Indonesia"][str(code)].copy()
+    for code in MAPBIOMAS_CLASS_CODES
+}
+for _key in ("MapBiomas_Indonesia", "GeoSave_MapBiomas_Indonesia"):
+    LAND_COVER_LEGENDS[_key] = {code: value.copy() for code, value in MAPBIOMAS_DETAIL_LEGEND.items()}
+    LAND_COVER_DATASET_OPTIONS[_key].update({
+        "name": "MapBiomas Indonesia Collection 4.1" if _key == "MapBiomas_Indonesia" else "GeoSave MapBiomas Indonesia Collection 4.1",
+        "year_min": 1990, "year_max": 2024, "supported_years": list(range(1990, 2025)),
+        "gee_id": MAPBIOMAS_41_ASSET, "provider_type": "gee_public_asset",
+        "raster_url_template": None, "collection_version": "4.1", "monthly": False,
+        "description": "13 kelas Indonesia: hutan, mangrove, hutan rawa gambut, sawit, HTI, sawah, pertanian, tambang, urban, tambak, dan air. Tahunan 1990–2024.",
+        "model": "MapBiomas Collection 4.1: Random Forest dan U-Net untuk tema sawit/HTI, dengan penyaringan temporal.",
+        "accuracy": "Validasi lokal independen Collection 4.1 perlu diperiksa; angka Collection 2 tidak mewakili koleksi ini.",
+        "class_schema": "MAPBIOMAS_INDONESIA_41_13", "coverage": "Indonesia",
+        "limitations": ["Produk tahunan; tidak menyediakan klasifikasi bulanan.", "Gap filling dan temporal filtering dapat memengaruhi waktu kejadian."],
+    })
+LAND_COVER_DATASET_OPTIONS["GLC_FCS30D"].update({
+    "supported_years": [1985, 1990, 1995] + list(range(2000, 2023)),
+    "collection_version": "GLC_FCS30D-2022", "class_schema": "GLC_FCS30D_35",
+    "accuracy": "Validasi global 2020: OA 80.88% ±0.27% (10 kelas utama), 73.04% ±0.30% (17 kelas LCCS); bukan akurasi seluruh 35 subkelas atau perubahan lokal.",
+})
+LAND_COVER_DATASET_OPTIONS["ESRI_LandCover"].update({
+    "supported_years": list(range(2017, 2026)), "collection_version": "annual-2017-2025",
+    "class_schema": "ESRI_9_CLASS", "nodata_classes": [0, 10],
+})
+LAND_COVER_DATASET_OPTIONS["ESRI_LULC_LivingAtlas"].update({
+    "analysis_dataset": "ESRI_LandCover", "supported_years": list(range(2017, 2026)),
+    "collection_version": "annual-2017-2025", "nodata_classes": [0, 10],
+    "model": "Esri/Impact Observatory annual LULC. Adapter katalog Living Atlas; peta dan analisis per piksel memakai salinan EE dari seri yang sama.",
+    "limitations": ["Peta dan analisis memakai aset Esri EE agar grid/tahun konsisten; bukan layer visual ArcGIS terpisah."],
+})
+for _key, _name, _url, _scale in (
+    ("AlphaEarth_RF", "SAVEGEO AlphaEarth + Random Forest", "https://developers.google.com/earth-engine/datasets/catalog/GOOGLE_SATELLITE_EMBEDDING_V1_ANNUAL", 10),
+    ("Sentinel1_2_RF", "SAVEGEO Sentinel-1/2 + Random Forest", "https://developers.google.com/earth-engine/guides/classification", 10),
+    ("TerraMind_LULC", "TerraMind LULC (model terlatih)", "https://huggingface.co/ibm-esa-geospatial/TerraMind-1.0-base", 10),
+    ("TESSERA_LULC", "TESSERA LULC (classifier terlatih)", "https://github.com/ucam-eo/tessera", 10),
+    ("Prithvi_LULC", "Prithvi EO 2.0 LULC (model terlatih)", "https://huggingface.co/ibm-nasa-geospatial/Prithvi-EO-2.0-600M-TL", 30),
+    ("Copernicus_LCFM10", "Copernicus LCFM / EvoNet LCM-10", "https://land.copernicus.eu/en/products/global-dynamic-land-cover/land-cover-2020-raster-10-m-global-annual", 10),
+):
+    LAND_COVER_LEGENDS[_key] = {code: value.copy() for code, value in MAPBIOMAS_DETAIL_LEGEND.items()}
+    LAND_COVER_NATIVE_SCALE[_key] = _scale
+    LAND_COVER_VIS[_key] = {"min": 0, "max": 12, "palette": [entry["color"].lstrip("#") for entry in MAPBIOMAS_DETAIL_LEGEND.values()]}
+    _builtin = _key in {"AlphaEarth_RF", "Sentinel1_2_RF"}
+    LAND_COVER_DATASET_OPTIONS[_key] = {
+        "name": _name, "provider": "SAVEGEO / model provider", "source": _name,
+        "provider_type": "gee_classifier" if _builtin else "trained_model_asset",
+        "resolution": f"{_scale}m", "year_min": 2017, "year_max": 2025 if _key == "AlphaEarth_RF" else "present",
+        "monthly": _key == "Sentinel1_2_RF", "supports_summary": True, "supports_transition": True,
+        "official_url": _url, "requires_auth": False, "coverage": "Indonesia" if _builtin else "Model coverage",
+        "class_schema": "MAPBIOMAS_INDONESIA_41_13", "available": _builtin,
+        "availability_reason": None if _builtin else "Konfigurasikan hasil model terlatih di Admin → Model Land Cover.",
+        "model_status": "reference_trained" if _builtin else "needs_configuration",
+        "description": "Classifier dengan label referensi MapBiomas 4.1; validasi lokal independen belum tersedia." if _builtin else "Adapter hasil klasifikasi model berversi; aktif setelah aset prediksi dan kelas dikonfigurasi.",
+        "accuracy": "Akurasi lokal independen belum tersedia.", "limitations": [],
+    }
+
+
 # Tropical improbable LULC labels (skip by default for Indonesia)
 # ─────────────────────────────────────────────
 
@@ -885,6 +947,8 @@ def get_dataset_list(
 
     Each entry contains a compact summary suitable for discovery responses.
     """
+    from app.services.landcover_model_service import refresh_model_catalog
+    refresh_model_catalog()
     result = []
     for key, info in LAND_COVER_DATASET_OPTIONS.items():
         dataset_provider = info.get("provider_type", "gee_official")
@@ -922,9 +986,15 @@ def get_dataset_list(
             "limitations":        info.get("limitations", []),
             "arcgis_item_id":     info.get("arcgis_item_id"),
             "native_scale":       LAND_COVER_NATIVE_SCALE.get(key),
-            "class_count":        len(LAND_COVER_LEGENDS.get(key, {})),
+            "class_count":        sum(int(code) not in info.get("nodata_classes", []) for code in LAND_COVER_LEGENDS.get(key, {})),
             "description":        info.get("description"),
             "attribution":        info.get("attribution"),
+            "available":          info.get("available", True),
+            "availability_reason": info.get("availability_reason"),
+            "model_status":       info.get("model_status"),
+            "monthly":            info.get("monthly", False),
+            "supported_years":    info.get("supported_years"),
+            "collection_version": info.get("collection_version"),
         })
 
     return result

@@ -30,7 +30,7 @@ async def direct_landcover_reference_layer(
     try:
         from app.registries.landcover_dataset_registry import LAND_COVER_DATASET_OPTIONS
         meta = LAND_COVER_DATASET_OPTIONS.get(dataset, {})
-        needs_ee = not (meta.get("provider_type", "").startswith("arcgis") and not meta.get("gee_id"))
+        needs_ee = bool(meta.get("analysis_dataset")) or not (meta.get("provider_type", "").startswith("arcgis") and not meta.get("gee_id"))
         if needs_ee and not getattr(request.app.state, "ee_initialized", False):
             raise HTTPException(status_code=503, detail="Google Earth Engine belum diinisialisasi untuk dataset ini.")
         return landcover_service.get_direct_landcover_reference_layer(
