@@ -12,11 +12,12 @@ from shapely.geometry import Point, shape
 from shapely.ops import unary_union
 from shapely.prepared import PreparedGeometry, prep
 
+from app.services.wildfire_catalog import EVENT_ISLANDS, PROVINCE_MASK_EVENTS
+
 KALIMANTAN_GEOMETRY_PATH = (
     Path(__file__).resolve().parents[1] / "static" / "geo" / "islands" / "Kalimantan.geojson"
 )
 SUMATRA_GEOMETRY_PATH = KALIMANTAN_GEOMETRY_PATH.with_name("Sumatra.geojson")
-EVENT_ISLANDS = {"kalimantan-2026": "Kalimantan", "sumatra-2026": "Sumatra"}
 
 
 def _ring_contains(point: tuple[float, float], ring: list[Any]) -> bool:
@@ -129,7 +130,36 @@ def is_feature_in_event_scope(event: object, feature: dict[str, Any]) -> bool:
     island = EVENT_ISLANDS.get(slug) if isinstance(slug, str) else None
     if island is None:
         return True
+    if slug in PROVINCE_MASK_EVENTS:
+        codes = tuple(str(code) for code in (getattr(event, "province_codes", None) or []))
+        region = _prepared_provinces(codes)
+        point = _point_from_geojson(feature)
+        return point is not None and region.covers(Point(*point))
     geometry = feature.get("geometry")
     if not isinstance(geometry, dict):
         return False
     return is_sumatra_geometry(geometry) if island == "Sumatra" else is_kalimantan_geometry(geometry)
+
+
+def prepare_event_scope(event: object) -> None:
+    """Check new province masks before issuing expensive upstream queries."""
+    if getattr(event, "slug", None) in PROVINCE_MASK_EVENTS:
+        _prepared_provinces(tuple(str(code) for code in (getattr(event, "province_codes", None) or [])))
+
+
+@lru_cache(maxsize=8)
+def _prepared_provinces(codes: tuple[str, ...]) -> PreparedGeometry:
+    """Require validated boundaries before ingesting a new monitoring scope.
+
+    CAMS sync writes these polygons first. Missing files stop synchronization;
+    neighbouring countries or ocean detections must never pass an absent mask.
+    """
+    from app.services.cams_archive_service import event_directory
+
+    if not codes:
+        raise ValueError("Event needs province codes before FIRMS synchronization")
+    directory = event_directory("world").parent / "boundaries"
+    polygons = [make_valid(shape(json.loads((directory / f"province-{code}.json").read_text(encoding="utf-8")))) for code in codes]
+    if any(polygon.is_empty or polygon.geom_type not in {"Polygon", "MultiPolygon"} for polygon in polygons):
+        raise ValueError("Event province boundary is not a valid polygon")
+    return prep(make_valid(unary_union(polygons)))

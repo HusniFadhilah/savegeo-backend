@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from app.db.models.disaster_event import DisasterEvent
 from app.db.models.wildfire_hotspot import WildfireHotspot
 from app.services import firms_service
-from app.services.wildfire_geometry import is_feature_in_event_scope
+from app.services.wildfire_geometry import is_feature_in_event_scope, prepare_event_scope
 
 _INITIAL_SYNC_LOCK = threading.RLock()
 # Start with FIRMS' five-day request window, then subdivide any response that
@@ -195,6 +195,7 @@ def sync_event_hotspots(
     """
     start, end = _event_period(event, from_date, to_date)
     bbox = _event_bbox(event)
+    prepare_event_scope(event)
     fetched: list[dict] = []
     errors: list[dict] = []
     for chunk_start, chunk_end in _date_chunks(start, end):

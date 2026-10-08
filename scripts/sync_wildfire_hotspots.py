@@ -16,13 +16,14 @@ def main() -> None:
     parser.add_argument("--slug", required=True)
     parser.add_argument("--from", dest="start", type=date.fromisoformat, required=True)
     parser.add_argument("--to", dest="end", type=date.fromisoformat, required=True)
+    parser.add_argument("--include-unpublished", action="store_true", help="Prepare draft/ready-for-review event data before verified publication")
     args = parser.parse_args()
     if args.end < args.start:
         parser.error("--to must not be earlier than --from")
     with SessionLocal() as db:
         event = db.execute(select(DisasterEvent).where(
             DisasterEvent.slug == args.slug, DisasterEvent.disaster_type == "forest_fire",
-            DisasterEvent.status == "published",
+            DisasterEvent.status.in_(["published", "draft", "ready_for_review"] if args.include_unpublished else ["published"]),
         )).scalar_one()
         print(f"Syncing {event.slug}: {args.start} to {args.end}", flush=True)
         result = sync_event_hotspots(db, event, args.start, args.end)

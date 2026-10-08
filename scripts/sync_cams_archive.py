@@ -19,6 +19,7 @@ from shapely.ops import unary_union
 from shapely.prepared import prep
 
 from app.services import cams_archive_service as archive
+from app.services.wildfire_catalog import PROVINCE_MASK_EVENTS
 from app.services.cams_emissions_service import (
     FluxCell,
     GFAS_DATASET_ID,
@@ -341,6 +342,8 @@ def main() -> None:
             }
         )
         print(f"Validated province boundary {code}", flush=True)
+    if archive_slug in PROVINCE_MASK_EVENTS and any(not box(*bbox).covers(geometry(region["geometry"])) for region in regions):
+        raise CamsRequestError("AOI event tidak mencakup seluruh batas provinsi", 422, "boundary_coverage_mismatch")
     source_dir = directory.parent / "sources"
     source_dir.mkdir(exist_ok=True)
     adapter = None

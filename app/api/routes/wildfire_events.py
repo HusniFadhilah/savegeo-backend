@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response
 from fastapi.responses import FileResponse
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.security import get_current_disaster_viewer
@@ -31,6 +31,7 @@ from app.services import (
 )
 
 from app.core.viewer_features import require_feature
+from app.services.wildfire_catalog import OFFICIAL_REPORTS
 
 router = APIRouter(
     prefix="/disasters/wildfires",
@@ -422,28 +423,22 @@ def list_wildfire_events(
             # The persisted cache remains readable when NASA FIRMS is
             # temporarily unavailable.
             pass
-        persisted_stats = list(
-            db.execute(
-                select(WildfireHotspot.stats).where(
-                    WildfireHotspot.event_id == event.id,
-                    WildfireHotspot.is_published.is_(True),
-                )
-            ).scalars()
-        )
-        count = len(persisted_stats)
-        high_confidence_count = sum(
-            str(
-                (stats or {}).get("confidence_category", (stats or {}).get("confidence_label", ""))
-            ).casefold()
-            == "high"
-            for stats in persisted_stats
-        )
-        if count == 0:
-            curated_rows = db.execute(
-                select(Hotspot).where(Hotspot.event_id == event.id, Hotspot.is_published.is_(True))
+        confidence = func.lower(func.coalesce(
+            WildfireHotspot.stats["confidence_category"].as_string(),
+            WildfireHotspot.stats["confidence_label"].as_string(),
+        ))
+        count, high_confidence_count = db.execute(
+            select(func.count(), func.count().filter(confidence == "high")).where(
+                WildfireHotspot.event_id == event.id,
+                WildfireHotspot.is_published.is_(True),
             )
-            count = len(curated_rows.scalars().all())
+        ).one()
+        if count == 0:
+            count = db.execute(select(func.count()).select_from(Hotspot).where(
+                Hotspot.event_id == event.id, Hotspot.is_published.is_(True)
+            )).scalar_one()
         data = event.to_dict()
+        data["official_reports"] = OFFICIAL_REPORTS.get(event.slug or "", [])
         burned_area = _published_burned_area(db, event)
         data.update(
             {
@@ -473,6 +468,7 @@ def list_wildfire_events(
 def get_wildfire_event(slug: str, viewer=Depends(get_current_disaster_viewer), db: Session = Depends(get_db)):
     event = _event(db, slug)
     data = event.to_dict()
+    data["official_reports"] = OFFICIAL_REPORTS.get(event.slug or "", [])
     burned_area = _published_burned_area(db, event)
     data["status"] = _public_status(event)
     data["title"] = data["name"]

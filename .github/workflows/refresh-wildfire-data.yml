@@ -7,7 +7,7 @@ on:
         description: Published wildfire event
         required: true
         type: choice
-        options: [sumatra-2026, kalimantan-2026]
+        options: [sumatra-2026, kalimantan-2026, jawa-2026, sulawesi-2026, bali-nusa-tenggara-2026, maluku-2026, papua-2026, other-indonesia-2026]
       hotspot_from:
         description: FIRMS start date (YYYY-MM-DD, maximum 90 days)
         required: true
@@ -40,7 +40,7 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     environment: production
     env:
       DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
@@ -70,7 +70,8 @@ jobs:
                       'VPN_CONFIG_B64','VPN_AUTH_B64','SSH_KNOWN_HOSTS','SSH_PASSWORD']
           if any(not os.environ.get(key) for key in required):
               raise SystemExit('Required production operation secret is missing')
-          if os.environ['EVENT_SLUG'] not in {'sumatra-2026','kalimantan-2026'}:
+          if os.environ['EVENT_SLUG'] not in {'sumatra-2026','kalimantan-2026','jawa-2026','sulawesi-2026',
+                                           'bali-nusa-tenggara-2026','maluku-2026','papua-2026','other-indonesia-2026'}:
               raise SystemExit('Unsupported wildfire event')
           if os.environ['REFRESH_HOTSPOTS'] not in {'true','false'}:
               raise SystemExit('Invalid hotspot refresh option')
@@ -132,34 +133,46 @@ jobs:
           cat > "$RUNNER_TEMP/refresh-wildfire.sh" <<'REMOTE_SYNC'
           set -euo pipefail
           cd "$1"
-          slug="$2"
+          slugs="$2"
+          if [ "$slugs" = "other-indonesia-2026" ]; then
+            slugs="jawa-2026 sulawesi-2026 bali-nusa-tenggara-2026 maluku-2026 papua-2026"
+          fi
           hotspot_from="$3"
           hotspot_to="$4"
           cams_from="$5"
           cams_to="$6"
-          if [ "$7" = "true" ]; then
+          for slug in $slugs; do
+            # Archive sync validates/caches province masks before FIRMS filtering.
             docker compose -f docker-compose.prod.yml exec -T api \
-              python -m scripts.sync_wildfire_hotspots --slug "$slug" --from "$hotspot_from" --to "$hotspot_to" </dev/null
-          fi
-          docker compose -f docker-compose.prod.yml exec -T api \
-            python -m scripts.sync_cams_archive --slug "$slug" --from "$cams_from" --to "$cams_to" --forecast </dev/null
-          docker compose -f docker-compose.prod.yml exec -T api \
-            python /app/var/verify_wildfire_data_operation.py --slug "$slug" \
-              --from "$hotspot_from" --to "$hotspot_to" --output "/app/var/wildfire-$slug-verification.json" </dev/null
+              python -m scripts.sync_cams_archive --slug "$slug" --from "$cams_from" --to "$cams_to" --forecast </dev/null
+            if [ "$7" = "true" ]; then
+              docker compose -f docker-compose.prod.yml exec -T api \
+                python -m scripts.sync_wildfire_hotspots --slug "$slug" --from "$hotspot_from" --to "$hotspot_to" --include-unpublished </dev/null
+            fi
+            docker compose -f docker-compose.prod.yml exec -T api \
+              python /app/var/verify_wildfire_data_operation.py --slug "$slug" \
+                --from "$hotspot_from" --to "$hotspot_to" --publish --output "/app/var/wildfire-$slug-verification.json" </dev/null
+          done
           REMOTE_SYNC
           sshpass -e ssh -p "$DEPLOY_SSH_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
             "bash -s -- '$BACKEND_REMOTE_DIR' '$EVENT_SLUG' '$HOTSPOT_FROM' '$HOTSPOT_TO' '$CAMS_FROM' '$CAMS_TO' '$REFRESH_HOTSPOTS'" \
             < "$RUNNER_TEMP/refresh-wildfire.sh"
           mkdir -p operation-report
-          sshpass -e scp -P "$DEPLOY_SSH_PORT" \
-            "$DEPLOY_USER@$DEPLOY_HOST:$BACKEND_REMOTE_DIR/var/wildfire-$EVENT_SLUG-verification.json" \
-            operation-report/verification.json
+          slugs="$EVENT_SLUG"
+          if [ "$slugs" = "other-indonesia-2026" ]; then
+            slugs="jawa-2026 sulawesi-2026 bali-nusa-tenggara-2026 maluku-2026 papua-2026"
+          fi
+          for slug in $slugs; do
+            sshpass -e scp -P "$DEPLOY_SSH_PORT" \
+              "$DEPLOY_USER@$DEPLOY_HOST:$BACKEND_REMOTE_DIR/var/wildfire-$slug-verification.json" \
+              "operation-report/$slug.json"
+          done
 
       - name: Upload production data verification
         uses: actions/upload-artifact@v4
         with:
           name: wildfire-production-${{ inputs.slug }}
-          path: operation-report/verification.json
+          path: operation-report/*.json
           if-no-files-found: error
 
       - name: Disconnect operation VPN

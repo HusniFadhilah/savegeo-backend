@@ -7,8 +7,11 @@ from pathlib import Path
 import pytest
 
 
-@pytest.mark.parametrize("refresh_hotspots,expected_commands", [("true", 3), ("false", 2)])
-def test_remote_docker_commands_cannot_consume_remaining_ssh_script(tmp_path, refresh_hotspots, expected_commands):
+@pytest.mark.parametrize("slug,refresh_hotspots,expected_commands", [
+    ("sumatra-2026", "true", 3), ("sumatra-2026", "false", 2),
+    ("other-indonesia-2026", "true", 15), ("other-indonesia-2026", "false", 10),
+])
+def test_remote_docker_commands_cannot_consume_remaining_ssh_script(tmp_path, slug, refresh_hotspots, expected_commands):
     bash = shutil.which("bash")
     if os.name == "nt":
         git_bash = Path("C:/Program Files/Git/bin/bash.exe")
@@ -22,7 +25,7 @@ def test_remote_docker_commands_cannot_consume_remaining_ssh_script(tmp_path, re
     # The mock deliberately drains stdin, matching interactive docker exec.
     launcher = (
         'docker() { cat >/dev/null; printf x >> "$TASK_DOCKER_CALLS"; }; export -f docker; '
-        'bash -s -- . sumatra-2026 2026-08-01 2026-10-07 2026-09-29 2026-10-06 ' + refresh_hotspots
+        'bash -s -- . ' + slug + ' 2026-08-01 2026-10-07 2026-09-29 2026-10-06 ' + refresh_hotspots
     )
     result = subprocess.run(
         [bash, "-c", launcher], input=textwrap.dedent(remote), text=True, capture_output=True,

@@ -8,7 +8,7 @@ import io
 import json
 import math
 import sys
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -25,14 +25,16 @@ from app.db.models.disaster_event import DisasterEvent  # noqa: E402
 from app.db.session import SessionLocal  # noqa: E402
 from app.services import cams_archive_service as cams, wildfire_hotspot_service as hotspots  # noqa: E402
 from app.services.wildfire_geometry import is_feature_in_event_scope  # noqa: E402
+from app.services.wildfire_catalog import EVENT_ISLANDS  # noqa: E402
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--slug', required=True, choices=['sumatra-2026', 'kalimantan-2026'])
+    parser.add_argument('--slug', required=True, choices=sorted(EVENT_ISLANDS))
     parser.add_argument('--from', dest='start', type=date.fromisoformat, required=True)
     parser.add_argument('--to', dest='end', type=date.fromisoformat, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--publish', action='store_true', help='Publish a prepared draft only after all verification succeeds')
     args = parser.parse_args()
     if args.end < args.start:
         parser.error('--to must not be earlier than --from')
@@ -44,12 +46,22 @@ def main() -> None:
 
     with SessionLocal() as db:
         event = db.execute(select(DisasterEvent).where(DisasterEvent.slug == args.slug)).scalar_one()
-        if event.status != 'published' or not event.hotspot_last_synced_at:
-            raise RuntimeError('Published event and completed FIRMS synchronization are required')
+        if not event.hotspot_last_synced_at:
+            raise RuntimeError('Completed FIRMS synchronization is required')
+        if event.status != 'published':
+            if not args.publish or event.status not in {'draft', 'ready_for_review'}:
+                raise RuntimeError('Event is not eligible for verified publication')
+            # Visible only inside this transaction until the final commit. A
+            # failed boundary/raster/API check rolls the draft status back.
+            event.status = 'published'
+            event.is_public = True
+            event.published_at = datetime.now(UTC)
+            db.flush()
         data = route.get_wildfire_event(args.slug, viewer=None, db=db)['event']
         record('event', {key: data.get(key) for key in [
             'slug', 'status', 'province_codes', 'provinces', 'bbox', 'published_at',
             'updated_at', 'last_data_at', 'last_synced_at',
+            'official_reports', 'boundary_source', 'limitations',
         ]})
         summary = hotspots.summarize_event(db, event.id, args.start, args.end)
         if not summary['total_hotspots']:
@@ -66,7 +78,7 @@ def main() -> None:
         if not all(is_feature_in_event_scope(event, feature) for feature in payload['features']):
             raise RuntimeError('Hotspot map contains observations outside the island')
         record('hotspot_map', {'metadata': payload['metadata'], 'from': map_start, 'to': args.end.isoformat()})
-        island = 'Sumatra' if args.slug == 'sumatra-2026' else 'Kalimantan'
+        island = EVENT_ISLANDS[args.slug]
         codes = set(event.province_codes)
         options = regions.get_provinces(island=island)
         if set(options.values()) != codes:
@@ -83,13 +95,16 @@ def main() -> None:
         manifest = cams.read_archive(args.slug)
         for layer_id in ['burnt_carbon', 'organic_aod']:
             frames = manifest['layers'][layer_id]['frames']
+            if not frames:
+                raise RuntimeError('CAMS layer has no archived frames')
             for frame in frames:
                 path = cams.event_directory(args.slug) / frame['filename']
                 if hashlib.sha256(path.read_bytes()).hexdigest() != frame['sha256']:
                     raise RuntimeError('Archived raster checksum mismatch')
                 if {region['code'] for region in frame['regions']} != codes:
                     raise RuntimeError('CAMS province coverage is incomplete')
-            observed = max((frame for frame in frames if not frame.get('is_forecast')), key=lambda f: f['valid_at'])
+            observed = max((frame for frame in frames if not frame.get('is_forecast')),
+                           key=lambda f: (f['maximum_display_value'], f['valid_at']))
             with rasterio.open(cams.event_directory(args.slug) / observed['filename']) as source:
                 values = source.read(1, masked=True)
                 index = np.unravel_index(np.ma.argmax(values), values.shape)
@@ -107,12 +122,18 @@ def main() -> None:
             )
             pixels = np.array(Image.open(io.BytesIO(tile.body)).convert('RGBA'))
             visible = int(np.count_nonzero(pixels[:, :, 3]))
-            if tile.status_code != 200 or not visible or not math.isfinite(native) or native <= 0:
+            expected = native * cams.LAYER_DEFINITIONS[layer_id]['multiplier']
+            if (tile.status_code != 200 or not math.isfinite(native) or native < 0
+                    or not point['data_available']
+                    or not math.isclose(point['value'], expected, rel_tol=1e-5, abs_tol=1e-10)
+                    or (native > 0 and not visible)):
                 raise RuntimeError('CAMS tile is missing real raster data')
             record(layer_id, {
                 'frames': len(frames), 'from': frames[0]['valid_at'], 'to': frames[-1]['valid_at'],
                 'forecast_frames': sum(bool(frame.get('is_forecast')) for frame in frames),
                 'verified_raster_checksums': len(frames), 'point_sample': point,
+                'sampled_frame': observed['valid_at'], 'data_state': 'positive' if native > 0 else 'valid_zero',
+                'missing_requested_days': manifest['layers'][layer_id].get('missing_requested_days', []),
                 'tile': {'status': tile.status_code, 'content_type': tile.media_type,
                          'visible_pixels': visible, 'z': z, 'x': x, 'y': y},
             })
@@ -129,6 +150,8 @@ def main() -> None:
             raise RuntimeError('World aerosol data is unavailable outside the event')
         record('world_aerosol', {'bbox': world['bbox'], 'frames': len(world['layers']['organic_aod']['frames']),
                                  'point_outside_event': point})
+        if args.publish:
+            db.commit()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, default=str), encoding='utf-8')
 
