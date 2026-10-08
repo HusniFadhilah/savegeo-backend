@@ -4,6 +4,8 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import os
+import shutil
 import sys
 from collections import Counter
 from pathlib import Path
@@ -19,6 +21,28 @@ from app.repositories import disaster_repo
 from app.services.disaster_capability_service import validate_persisted_result
 from app.services.disaster_completeness_service import build_completeness
 from app.services.samgeo_service import capabilities
+
+
+def runtime_resources():
+    memory = {}
+    source = Path("/proc/meminfo")
+    if source.exists():
+        for line in source.read_text().splitlines():
+            name, value = line.split(":", 1)
+            if name in {"MemTotal", "MemAvailable"}:
+                memory[name] = int(value.strip().split()[0])*1024
+    limits = {}
+    for name, source in {
+        "memory_limit_bytes": "/sys/fs/cgroup/memory.max",
+        "memory_used_bytes": "/sys/fs/cgroup/memory.current",
+    }.items():
+        path = Path(source)
+        if path.exists():
+            value = path.read_text().strip()
+            limits[name] = int(value) if value.isdigit() else None
+    disk = shutil.disk_usage(Path("var"))
+    return {"cpu_count": os.cpu_count(), "host_memory_bytes": memory,
+            "container_memory_bytes": limits, "disk_free_bytes": disk.free}
 
 
 def build_report(db):
@@ -54,7 +78,7 @@ def build_report(db):
         })
     return {"generated_at": dt.datetime.now(dt.UTC).isoformat(), "mode": "read_only",
             "counts": dict(Counter(e["type"] for e in events)), "events": events,
-            "models": list_models(), "segmentation_runtime": capabilities()}
+            "models": list_models(), "segmentation_runtime": capabilities(), "runtime_resources": runtime_resources()}
 
 
 def main():
