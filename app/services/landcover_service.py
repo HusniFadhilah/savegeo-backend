@@ -65,6 +65,9 @@ def get_direct_landcover_reference_layer(
     end_date: str | None = None,
 ) -> dict:
     """Build a global LULC tile layer without AOI statistics."""
+    from app.services.landcover_model_service import MODEL_KEYS, refresh_model_catalog
+    if dataset in MODEL_KEYS:
+        refresh_model_catalog()
     if dataset not in LAND_COVER_DATASET_OPTIONS:
         raise AnalysisError(f"Dataset land cover '{dataset}' tidak ditemukan.", 404)
     meta = LAND_COVER_DATASET_OPTIONS[dataset]
