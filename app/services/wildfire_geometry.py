@@ -7,9 +7,16 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from shapely import make_valid
+from shapely.geometry import Point, shape
+from shapely.ops import unary_union
+from shapely.prepared import PreparedGeometry, prep
+
 KALIMANTAN_GEOMETRY_PATH = (
     Path(__file__).resolve().parents[1] / "static" / "geo" / "islands" / "Kalimantan.geojson"
 )
+SUMATRA_GEOMETRY_PATH = KALIMANTAN_GEOMETRY_PATH.with_name("Sumatra.geojson")
+EVENT_ISLANDS = {"kalimantan-2026": "Kalimantan", "sumatra-2026": "Sumatra"}
 
 
 def _ring_contains(point: tuple[float, float], ring: list[Any]) -> bool:
@@ -64,6 +71,27 @@ def kalimantan_geometry() -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+@lru_cache(maxsize=2)
+def _prepared_island(island: str) -> PreparedGeometry | None:
+    """Prepare the land mask once, avoiding a polygon scan for every hotspot."""
+    if island == "Kalimantan":
+        payload = kalimantan_geometry()
+    elif island == "Sumatra":
+        try:
+            payload = json.loads(SUMATRA_GEOMETRY_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+    else:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("type") == "FeatureCollection":
+        region = unary_union([shape(feature["geometry"]) for feature in payload["features"]])
+    else:
+        region = shape(payload.get("geometry", payload))
+    return prep(make_valid(region))
+
+
 def _point_from_geojson(geojson: dict[str, Any]) -> tuple[float, float] | None:
     geometry = geojson.get("geometry", geojson)
     if not isinstance(geometry, dict) or geometry.get("type") != "Point":
@@ -79,16 +107,29 @@ def _point_from_geojson(geojson: dict[str, Any]) -> tuple[float, float] | None:
 
 def is_kalimantan_geometry(geojson: dict[str, Any]) -> bool:
     """Check a stored hotspot geometry; fail open if the asset is unavailable."""
-    region = kalimantan_geometry()
+    region = _prepared_island("Kalimantan")
     if region is None:
         return True
     point = _point_from_geojson(geojson)
-    return point is not None and geometry_contains(point, region)
+    return point is not None and region.covers(Point(*point))
+
+
+def is_sumatra_geometry(geojson: dict[str, Any]) -> bool:
+    """Exclude nearby Malaysia/Java and ocean cells from Sumatra hotspots."""
+    region = _prepared_island("Sumatra")
+    if region is None:
+        return True
+    point = _point_from_geojson(geojson)
+    return point is not None and region.covers(Point(*point))
 
 
 def is_feature_in_event_scope(event: object, feature: dict[str, Any]) -> bool:
-    """Apply the Kalimantan mask only to the canonical Kalimantan event."""
-    if getattr(event, "slug", None) != "kalimantan-2026":
+    """Apply the configured island mask to canonical wildfire monitoring events."""
+    slug = getattr(event, "slug", None)
+    island = EVENT_ISLANDS.get(slug) if isinstance(slug, str) else None
+    if island is None:
         return True
     geometry = feature.get("geometry")
-    return isinstance(geometry, dict) and is_kalimantan_geometry(geometry)
+    if not isinstance(geometry, dict):
+        return False
+    return is_sumatra_geometry(geometry) if island == "Sumatra" else is_kalimantan_geometry(geometry)

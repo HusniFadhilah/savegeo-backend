@@ -212,3 +212,18 @@ def test_http_tile_and_download_keep_authentication_and_private_headers(archive,
     app.dependency_overrides.pop(wildfire_events.get_current_disaster_viewer)
     assert client.get(f"{prefix}/tiles/organic_aod/{identifier}/0/0/0.png").status_code == 401
     assert client.get(f"{prefix}/point/organic_aod/{identifier}?lat=60&lon=0").status_code == 401
+
+
+def test_ingest_rejects_a_kalimantan_file_for_sumatra(tmp_path):
+    xr = pytest.importorskip("xarray")
+    data = xr.Dataset(
+        {"omaod550": (("valid_time", "latitude", "longitude"), np.full((1, 2, 2), 0.4))},
+        coords={"valid_time": [np.datetime64("2026-10-06T12:00:00")], "latitude": [0.4, 0], "longitude": [110, 110.4]},
+    )
+    data.omaod550.attrs = {"GRIB_paramId": 210210, "GRIB_stepType": "instant", "units": "1"}
+    source = tmp_path / "kalimantan.nc"
+    data.to_netcdf(source)
+    regions = [{"code": "14", "name": "Riau", "geometry": mapping(box(100, -1, 104, 2))}]
+    with pytest.raises(CamsRequestError) as captured:
+        ingest_file(source, tmp_path, "organic_aod", regions, [94.9, -6.1, 109.3, 6.1], {"date": "2026-10-06/2026-10-06"})
+    assert captured.value.code == "source_coverage_mismatch"

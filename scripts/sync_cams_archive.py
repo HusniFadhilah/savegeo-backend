@@ -139,12 +139,27 @@ def ingest_file(
             )
         if variable.attrs.get("GRIB_stepType") != ("avg" if layer_id == "burnt_carbon" else "instant"):
             raise CamsRequestError("Interval variabel ADS tidak sesuai", 502, "source_interval_mismatch")
-        if bbox == WORLD_BBOX and float(ds.longitude.max()) > 180:
+        if float(ds.longitude.max()) > 180:
             ds = ds.assign_coords(longitude=((ds.longitude + 180) % 360) - 180).sortby("longitude")
         west, south, east, north = bbox
+        expected_spacing = 0.1 if layer_id == "burnt_carbon" else 0.4
+        half_cell = expected_spacing / 2
+        latitude_covered = (
+            float(ds.latitude.max()) + half_cell >= north - 1e-5
+            and float(ds.latitude.min()) - half_cell <= south + 1e-5
+        )
+        longitude_covered = (
+            float(ds.longitude.min()) - half_cell <= west + 1e-5
+            and float(ds.longitude.max()) + half_cell >= east - 1e-5
+        ) if bbox != WORLD_BBOX else (
+            float(ds.longitude.max() - ds.longitude.min()) + expected_spacing >= 360 - 1e-5
+        )
+        if not latitude_covered or not longitude_covered:
+            raise CamsRequestError(
+                "Berkas ADS tidak mencakup seluruh wilayah yang diminta", 502, "source_coverage_mismatch"
+            )
         ds = ds.sel(latitude=slice(north + 1, south - 1), longitude=slice(west - 1, east + 1))
         lat, lon = ds.latitude.values, ds.longitude.values
-        expected_spacing = 0.1 if layer_id == "burnt_carbon" else 0.4
         if (
             len(lat) < 2
             or len(lon) < 2
@@ -325,6 +340,7 @@ def main() -> None:
                 "geometry": mapping(boundary),
             }
         )
+        print(f"Validated province boundary {code}", flush=True)
     source_dir = directory.parent / "sources"
     source_dir.mkdir(exist_ok=True)
     adapter = None
