@@ -24,6 +24,10 @@ on:
         description: CAMS/GFAS end date (YYYY-MM-DD)
         required: true
         type: string
+      refresh_hotspots:
+        description: Fetch FIRMS observations before updating CAMS/GFAS
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -48,6 +52,7 @@ jobs:
       HOTSPOT_TO: ${{ inputs.hotspot_to }}
       CAMS_FROM: ${{ inputs.cams_from }}
       CAMS_TO: ${{ inputs.cams_to }}
+      REFRESH_HOTSPOTS: ${{ inputs.refresh_hotspots }}
     steps:
       - uses: actions/checkout@v4
 
@@ -67,6 +72,8 @@ jobs:
               raise SystemExit('Required production operation secret is missing')
           if os.environ['EVENT_SLUG'] not in {'sumatra-2026','kalimantan-2026'}:
               raise SystemExit('Unsupported wildfire event')
+          if os.environ['REFRESH_HOTSPOTS'] not in {'true','false'}:
+              raise SystemExit('Invalid hotspot refresh option')
           if not re.fullmatch(r'/[A-Za-z0-9_./-]+',os.environ['BACKEND_REMOTE_DIR']):
               raise SystemExit('Invalid backend directory')
           if not os.environ['DEPLOY_SSH_PORT'].isdigit() or not 1 <= int(os.environ['DEPLOY_SSH_PORT']) <= 65535:
@@ -130,16 +137,18 @@ jobs:
           hotspot_to="$4"
           cams_from="$5"
           cams_to="$6"
+          if [ "$7" = "true" ]; then
+            docker compose -f docker-compose.prod.yml exec -T api \
+              python -m scripts.sync_wildfire_hotspots --slug "$slug" --from "$hotspot_from" --to "$hotspot_to" </dev/null
+          fi
           docker compose -f docker-compose.prod.yml exec -T api \
-            python -m scripts.sync_wildfire_hotspots --slug "$slug" --from "$hotspot_from" --to "$hotspot_to"
-          docker compose -f docker-compose.prod.yml exec -T api \
-            python -m scripts.sync_cams_archive --slug "$slug" --from "$cams_from" --to "$cams_to" --forecast
+            python -m scripts.sync_cams_archive --slug "$slug" --from "$cams_from" --to "$cams_to" --forecast </dev/null
           docker compose -f docker-compose.prod.yml exec -T api \
             python /app/var/verify_wildfire_data_operation.py --slug "$slug" \
-              --from "$hotspot_from" --to "$hotspot_to" --output "/app/var/wildfire-$slug-verification.json"
+              --from "$hotspot_from" --to "$hotspot_to" --output "/app/var/wildfire-$slug-verification.json" </dev/null
           REMOTE_SYNC
           sshpass -e ssh -p "$DEPLOY_SSH_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
-            "bash -s -- '$BACKEND_REMOTE_DIR' '$EVENT_SLUG' '$HOTSPOT_FROM' '$HOTSPOT_TO' '$CAMS_FROM' '$CAMS_TO'" \
+            "bash -s -- '$BACKEND_REMOTE_DIR' '$EVENT_SLUG' '$HOTSPOT_FROM' '$HOTSPOT_TO' '$CAMS_FROM' '$CAMS_TO' '$REFRESH_HOTSPOTS'" \
             < "$RUNNER_TEMP/refresh-wildfire.sh"
           mkdir -p operation-report
           sshpass -e scp -P "$DEPLOY_SSH_PORT" \
