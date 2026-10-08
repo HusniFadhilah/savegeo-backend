@@ -40,6 +40,7 @@ def list_datasets(
     module: str | None = None,
     provider: str | None = None,
     include_unavailable: bool = False,
+    include_advanced: bool = False,
     viewer: AdminUser | User = Depends(get_current_app_viewer),
     db: Session = Depends(get_db),
 ):
@@ -51,7 +52,7 @@ def list_datasets(
     if code == FEATURE_CODES["carbon_stock"]:
         datasets = get_carbon_dataset_list(db, provider=provider, require_model=not include_unavailable)
     else:
-        datasets = get_dataset_list(module="landcover", provider=provider)
+        datasets = get_dataset_list(module="landcover", provider=provider, include_advanced=include_advanced)
         if not include_unavailable:
             datasets = [entry for entry in datasets if entry.get("available", True)]
     return {"datasets": datasets, "count": len(datasets)}

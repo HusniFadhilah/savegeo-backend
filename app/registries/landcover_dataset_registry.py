@@ -852,6 +852,37 @@ for _key, _name, _url, _scale in (
     }
 
 
+# Curated discovery: aliases remain addressable for saved analyses, but are
+# never offered as independent evidence. Published sources have distinct uses;
+# trained adapters and coarse/specialist products require an explicit opt-in.
+LAND_COVER_PRIMARY_KEYS = (
+    "MapBiomas_Indonesia", "Dynamic_World", "ESRI_LandCover",
+    "GLC_FCS30D", "ESA_WorldCover",
+)
+for _key, _info in LAND_COVER_DATASET_OPTIONS.items():
+    _info["recommended"] = _key in LAND_COVER_PRIMARY_KEYS
+    _info["selection_tier"] = (
+        "alias" if _info.get("alias_of") else
+        "legacy" if _info.get("deprecated") else
+        "primary" if _key in LAND_COVER_PRIMARY_KEYS else
+        "experimental" if _key in {"AlphaEarth_RF", "Sentinel1_2_RF", "TerraMind_LULC", "TESSERA_LULC", "Prithvi_LULC", "Copernicus_LCFM10"} else
+        "specialist" if _key in {"JAXA_FNF4", "JRC_TMF", "DEA_Mangroves"} else
+        "reference"
+    )
+LAND_COVER_DATASET_OPTIONS["GLAD_GLCLUC"].update({
+    "available": False, "selection_tier": "unverified",
+    "availability_reason": "URI raster dan skema kelas belum diverifikasi; tidak ditawarkan untuk analisis operasional.",
+})
+LAND_COVER_DATASET_OPTIONS["ESA_WorldCover"].update({
+    "supported_years": [2020, 2021],
+    "limitations": ["Peta referensi per tahun; v100 (2020) dan v200 (2021) memakai algoritma berbeda sehingga bukan pasangan change detection yang konsisten."],
+})
+LAND_COVER_DATASET_OPTIONS["ESRI_LandCover"]["limitations"] = [
+    "Peta dan statistik menggunakan satu salinan EE Esri/Impact Observatory; alias Living Atlas bukan dataset pembanding independen.",
+    "Produk tahunan tersedia 2017–2025; permintaan di luar rentang harus memeriksa tahun efektif.",
+]
+
+
 # Tropical improbable LULC labels (skip by default for Indonesia)
 # ─────────────────────────────────────────────
 
@@ -942,6 +973,7 @@ def glad_glcluc_geotiff_uri(year: int) -> tuple[str, dict]:
 def get_dataset_list(
     module: str | None = None,
     provider: str | None = None,
+    include_advanced: bool = False,
 ) -> list[dict]:
     """Return filtered list of datasets for /api/datasets endpoint.
 
@@ -951,6 +983,10 @@ def get_dataset_list(
     refresh_model_catalog()
     result = []
     for key, info in LAND_COVER_DATASET_OPTIONS.items():
+        if info.get("alias_of") or info.get("deprecated"):
+            continue
+        if not include_advanced and not info.get("recommended", False):
+            continue
         dataset_provider = info.get("provider_type", "gee_official")
 
         if module is not None and module != "landcover":
@@ -982,6 +1018,8 @@ def get_dataset_list(
             "deprecated":        bool(info.get("deprecated", False)),
             "replacement_key":   info.get("replacement_key"),
             "alias_of":          info.get("alias_of"),
+            "recommended":       info.get("recommended", False),
+            "selection_tier":    info.get("selection_tier"),
             "official_url":       info.get("official_url"),
             "limitations":        info.get("limitations", []),
             "arcgis_item_id":     info.get("arcgis_item_id"),

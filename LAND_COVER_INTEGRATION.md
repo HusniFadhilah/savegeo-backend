@@ -2,6 +2,31 @@
 
 ## Available sources
 
+### Curated operational choices
+
+The default land-cover picker and agent dataset discovery offer five distinct
+published sources: MapBiomas Indonesia 4.1 (detailed Indonesian annual LULC),
+Dynamic World (recent month/date monitoring), Esri annual (global 10 m annual
+maps), GLC_FCS30D (long historical series and detailed classes), and ESA
+WorldCover (single-year reference). The change picker excludes WorldCover:
+2020 and 2021 use different algorithm versions. This is a selection by use
+case and operational readiness, not a claim that one product is most accurate
+for every AOI or class.
+
+GeoSave Dynamic World, GeoSave MapBiomas, and Esri Living Atlas are aliases;
+the pickers use their canonical keys and deduplicate multi-source requests.
+Saved alias URLs remain supported. Legacy JAXA FNF and FROM-GLC10 are omitted
+from new selections. Coarse/reference products, forest/mangrove specialists,
+and trained model adapters require the explicit advanced option. Reference RF
+models have not undergone independent local validation. GLAD is unavailable
+until its raster URI and actual class schema have been verified.
+
+`GET /api/landcover/datasets` retains the full compatibility catalog with
+`recommended` and `selection_tier`. `GET /api/datasets?module=landcover` returns
+the primary sources; `include_advanced=true` adds canonical advanced sources
+and `include_unavailable=true` also exposes unavailable entries. Aliases and
+deprecated entries are not independent discovery choices.
+
 | Source | Native pixels | Years | Schema / use |
 | --- | --- | --- | --- |
 | MapBiomas Indonesia 4.1 | 30 m | 1990–2024 | 13 detailed Indonesian classes; annual monitoring |
