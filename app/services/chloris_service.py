@@ -105,7 +105,7 @@ def resolve_chloris_download(product: str = DEFAULT_PRODUCT, year: int | None = 
             product=normalized_product,
             date=str(entry.get("date")) if entry.get("date") is not None else None,
             format=str(entry.get("format")) if entry.get("format") is not None else None,
-            metadata=entry,
+            metadata={**entry, "source": "chloris_reporting_unit"},
         )
     except Exception as exc:  # noqa: BLE001 - public STAC fallback is attempted below
         licensed_error = exc

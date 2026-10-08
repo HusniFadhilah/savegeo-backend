@@ -57,6 +57,23 @@ logger = logging.getLogger(__name__)
 _DATASET_HEALTH_CACHE: dict[str, tuple[float, dict]] = {}
 
 
+def _chloris_source_note(source: str | None) -> str:
+    """Describe the raster actually used without exposing signed or private URLs."""
+    notes = {
+        "chloris_reporting_unit": "Sumber: GeoTIFF Chloris dari reporting unit berlisensi.",
+        "direct_env_url": "Sumber: URL GeoTIFF Chloris yang dikonfigurasi di server.",
+        "planetary_computer_stac": (
+            "Sumber: koleksi Chloris-Biomass di Microsoft Planetary Computer "
+            "(2003–2019, sekitar 4,6 km; lisensi CC BY-NC-SA 4.0)."
+        ),
+        "registry_raster_url": "Sumber: raster_url Chloris yang dikonfigurasi di registry.",
+    }
+    return notes.get(
+        source or "",
+        "Sumber raster dipasang sebagai konfigurasi Chloris di server; periksa URL sumber di konfigurasi backend.",
+    )
+
+
 def get_direct_carbon_reference_layer(
     dataset_key: str,
     dataset_year: int = 2020,
@@ -109,6 +126,7 @@ def get_direct_carbon_reference_layer(
     source_year = effective_year if isinstance(effective_year, int) else dataset_year
     ingestion = meta.get("ingestion_method")
     tile_url = None
+    source = None
     if ingestion == "cog_rasterio":
         tile_query = [f"year={source_year}"]
         if vis_min is not None:
@@ -126,6 +144,7 @@ def get_direct_carbon_reference_layer(
     elif ingestion == "chloris_downloads_index" and use_public_chloris_tiles:
         from app.services.chloris_service import resolve_planetary_computer_tile_url
 
+        source = "planetary_computer_stac"
         tile_url = resolve_planetary_computer_tile_url(
             year=source_year,
             vis_min=vis_min if vis_min is not None else meta.get("vis_min", 0),
@@ -144,7 +163,13 @@ def get_direct_carbon_reference_layer(
         )
     else:
         if ingestion in {"cloud_geotiff_ee", "chloris_downloads_index"}:
-            image = load_external_carbon_reference_ee(dataset_key, source_year, roi=None)
+            if ingestion == "chloris_downloads_index":
+                image, source_metadata = load_external_carbon_reference_ee(
+                    dataset_key, source_year, roi=None, return_metadata=True
+                )
+                source = source_metadata.get("source")
+            else:
+                image = load_external_carbon_reference_ee(dataset_key, source_year, roi=None)
         elif dataset_key in CARBON_DATASET_REGISTRY:
             image = load_carbon_reference_ee(dataset_key, source_year, roi=None)
         else:
@@ -177,16 +202,13 @@ def get_direct_carbon_reference_layer(
         },
         "direct": True,
         "statistics_available": False,
-        "load_note": (
-            "Menggunakan tile publik Planetary Computer (2003–2019, sekitar 4,6 km; "
-            "lisensi CC BY-NC-SA 4.0) karena Earth Engine tidak tersedia."
-            if use_public_chloris_tiles
-            else (
+        **({"source": source, "load_note": _chloris_source_note(source)} if ingestion == "chloris_downloads_index" else {}),
+        **({
+            "load_note": (
                 "SoilGrids tidak menyediakan tile global; pilih AOI dan jalankan mode "
                 "referensi untuk statistik sampling."
-                if ingestion == "soilgrids_rest" else None
             )
-        ),
+        } if ingestion == "soilgrids_rest" else {}),
     }
 
 

@@ -33,7 +33,7 @@ CARBON_DATASET_REGISTRY: dict[str, dict] = {
         "year_range":  [2010, 2010],
         "transform":   "none",
         "description": "Global above- and belowground biomass carbon density circa 2010. Training target for WCMC-compatible models.",
-        "notes":       "Band name varies between 'carbon_tonnes_per_ha' and 'carbon'. Already in C units — no 0.47 needed.",
+        "notes":       "Official Earth Engine band: carbon_tonnes_per_ha. Already in C units — no 0.47 needed.",
     },
     "ESA_CCI": {
         "key":         "ESA_CCI",
@@ -668,6 +668,7 @@ def load_external_carbon_reference_ee(
     key: str,
     dataset_year: int | None = None,
     roi=None,
+    return_metadata: bool = False,
 ):
     """Load an external cloud GeoTIFF carbon reference via ee.Image.loadGeoTIFF().
 
@@ -697,31 +698,51 @@ def load_external_carbon_reference_ee(
             "Use ExternalRasterProvider for REST/rasterio-based datasets."
         )
 
-    raster_url = (
-        os.getenv(f"{key}_URL")
-        or os.getenv(f"{key.upper()}_URL")
-        or meta.get("raster_url")
-    )
     resolved_metadata: dict = {}
-    if not raster_url and ingestion_method == "chloris_downloads_index":
+    if ingestion_method == "chloris_downloads_index":
         from app.services.chloris_service import resolve_chloris_download
 
-        try:
+        configured_url = (
+            os.getenv(f"{key}_URL")
+            or os.getenv(f"{key.upper()}_URL")
+            or os.getenv("CHLORIS_STOCK_URL")
+        )
+        if configured_url:
             resolved = resolve_chloris_download(
                 product=meta.get("chloris_product", "stock"),
                 year=dataset_year,
             )
             raster_url = resolved.url
             resolved_metadata = resolved.metadata
-        except Exception as exc:  # noqa: BLE001 - surface a user-actionable setup error
-            raise ValueError(
-                f"Could not resolve Chloris download for '{key}'. "
-                "Set CHLORIS_AGB_STOCK_URL/CHLORIS_STOCK_URL directly, or configure "
-                "CHLORIS_DATA_PATH, or configure CHLORIS_ORGANIZATION_ID plus "
-                "CHLORIS_REFRESH_TOKEN/CHLORIS_ID_TOKEN. The public Planetary Computer "
-                "fallback requires pystac-client and planetary-computer. Original error: "
-                f"{exc}"
-            ) from exc
+        elif meta.get("raster_url"):
+            raster_url = meta["raster_url"]
+            resolved_metadata = {"source": "registry_raster_url"}
+        else:
+            try:
+                resolved = resolve_chloris_download(
+                    product=meta.get("chloris_product", "stock"),
+                    year=dataset_year,
+                )
+                raster_url = resolved.url
+                resolved_metadata = resolved.metadata
+            except Exception as exc:  # noqa: BLE001 - surface a user-actionable setup error
+                raise ValueError(
+                    f"Could not resolve Chloris download for '{key}'. "
+                    "Set CHLORIS_AGB_STOCK_URL/CHLORIS_STOCK_URL directly, or configure "
+                    "CHLORIS_DATA_PATH, or configure CHLORIS_ORGANIZATION_ID plus "
+                    "CHLORIS_REFRESH_TOKEN/CHLORIS_ID_TOKEN. The public Planetary Computer "
+                    "fallback requires pystac-client and planetary-computer. Original error: "
+                    f"{exc}"
+                ) from exc
+    else:
+        raster_url = (
+            os.getenv(f"{key}_URL")
+            or os.getenv(f"{key.upper()}_URL")
+            or meta.get("raster_url")
+        )
+
+    if ingestion_method == "chloris_downloads_index" and not raster_url:
+        raise ValueError(f"No raster URL could be resolved for '{key}'.")
 
     if not raster_url:
         raise ValueError(
@@ -730,7 +751,11 @@ def load_external_carbon_reference_ee(
             "(gs://... or HTTPS COG), or set 'raster_url' in CARBON_EXTERNAL_REGISTRY."
         )
 
-    logger.info(f"Loading external carbon reference via GEE: {key} from {raster_url}")
+    logger.info(
+        "Loading external carbon reference via GEE: %s (source=%s)",
+        key,
+        resolved_metadata.get("source", "configured_raster_url"),
+    )
     try:
         img = ee.Image.loadGeoTIFF(raster_url).select(0).rename("agb")
     except Exception as load_err:
@@ -768,7 +793,7 @@ def load_external_carbon_reference_ee(
         except ValueError:
             pass
 
-    return img
+    return (img, resolved_metadata) if return_metadata else img
 
 
 def is_arcgis_carbon_dataset(key: str) -> bool:
@@ -919,16 +944,12 @@ def load_carbon_reference_ee(
 # ─────────────────────────────────────────────
 
 def _loader_wcmc(entry, dataset_year, roi, unmask, ee):
-    collection = ee.ImageCollection(entry["gee_id"])
-    img = collection.first()
-    band_names = img.bandNames().getInfo()
-    logger.info(f"WCMC available bands: {band_names}")
-    if "carbon_tonnes_per_ha" in band_names:
-        return img.select("carbon_tonnes_per_ha").rename("agb")
-    if "carbon" in band_names:
-        return img.select("carbon").rename("agb")
-    logger.warning("WCMC: unexpected band names, selecting band 0")
-    return img.select(0).rename("agb")
+    # The catalog publishes an annual image under /2010 with the documented
+    # `carbon_tonnes_per_ha` band. Avoid bandNames().getInfo() here: it makes a
+    # blocking Earth Engine metadata request on every AOI analysis and was the
+    # source of repeated client-side timeouts for this static 300 m reference.
+    image_id = f"{entry['gee_id']}/{entry.get('year', 2010)}"
+    return ee.Image(image_id).select("carbon_tonnes_per_ha").rename("agb")
 
 
 def _loader_esa_cci(entry, dataset_year, roi, unmask, ee):

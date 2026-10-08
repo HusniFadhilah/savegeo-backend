@@ -28,7 +28,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     def __init__(self, app, settings: Settings):
         super().__init__(app)
         self.settings = settings
-        self._rate_windows: dict[str, deque[float]] = defaultdict(deque)
+        self._rate_windows: dict[tuple[str, str], deque[float]] = defaultdict(deque)
 
     def _problem(
         self, request: Request, status_code: int, detail: str, headers: dict[str, str] | None = None
@@ -53,14 +53,32 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     def _rate_limited(self, request: Request) -> bool:
         if request.url.path in {"/api/health", "/docs", "/redoc", "/openapi.json"}:
             return False
-        if not request.url.path.startswith("/api/") or self.settings.rate_limit_requests_per_minute <= 0:
+        if not request.url.path.startswith("/api/"):
             return False
+
+        # Leaflet issues one request per visible raster tile. Keep these
+        # authenticated CAMS reads inside their own, higher budget so a global
+        # layer cannot starve ordinary API calls (e.g. region statistics).
+        is_map_tile = (
+            request.method in {"GET", "HEAD"}
+            and request.url.path.startswith("/api/disasters/wildfires/events/")
+            and "/emissions/tiles/" in request.url.path
+        )
+        bucket = "map_tiles" if is_map_tile else "api"
+        limit = (
+            self.settings.rate_limit_map_tiles_per_minute
+            if is_map_tile
+            else self.settings.rate_limit_requests_per_minute
+        )
+        if limit <= 0:
+            return False
+
         client = request.client.host if request.client else "unknown"
         now = time.monotonic()
-        window = self._rate_windows[client]
+        window = self._rate_windows[(client, bucket)]
         while window and now - window[0] >= 60:
             window.popleft()
-        if len(window) >= self.settings.rate_limit_requests_per_minute:
+        if len(window) >= limit:
             return True
         window.append(now)
         return False

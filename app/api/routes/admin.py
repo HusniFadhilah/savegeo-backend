@@ -243,6 +243,7 @@ def list_gee_credentials(request: Request, admin: AdminUser = Depends(require_pe
 
 @router.post("/gee/credentials", status_code=201)
 async def upload_gee_credential(
+    request: Request,
     file: UploadFile = File(...),
     label: str = Form(...),
     notes: str | None = Form(None),
@@ -294,7 +295,7 @@ async def upload_gee_credential(
     audit_service.log_audit(db, admin.id, "credential.create", "gee_credential", cred.id, detail={"label": label, "project_id": project_id})
 
     if activate:
-        gee_service.initialize_ee(db)
+        request.app.state.ee_initialized = gee_service.initialize_ee(db)
 
     return {"message": "Credential uploaded", "credential": cred.to_dict()}
 
@@ -318,7 +319,7 @@ def delete_gee_credential(cred_id: int, admin: AdminUser = Depends(require_permi
 
 
 @router.post("/gee/credentials/{cred_id}/activate")
-def activate_gee_credential(cred_id: int, admin: AdminUser = Depends(require_permission("credential.write")), db: Session = Depends(get_db)):
+def activate_gee_credential(cred_id: int, request: Request, admin: AdminUser = Depends(require_permission("credential.write")), db: Session = Depends(get_db)):
     cred = db.get(GEECredential, cred_id)
     if not cred:
         raise HTTPException(status_code=404, detail="Credential not found")
@@ -326,6 +327,7 @@ def activate_gee_credential(cred_id: int, admin: AdminUser = Depends(require_per
     cred.is_active = True
     db.commit()
     ee_initialized = gee_service.initialize_ee(db)
+    request.app.state.ee_initialized = ee_initialized
     audit_service.log_audit(db, admin.id, "credential.activate", "gee_credential", cred_id, detail={"ee_initialized": ee_initialized})
     return {"message": "Credential activated", "gee_initialized": ee_initialized}
 

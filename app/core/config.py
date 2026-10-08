@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     auth_cookie_samesite: str = "lax"
     csrf_protection_enabled: bool = True
     rate_limit_requests_per_minute: int = 120
+    # Viewport raster requests are numerous and should not consume the budget
+    # reserved for JSON/API operations such as hotspot region statistics.
+    rate_limit_map_tiles_per_minute: int = 600
 
     # --- Mail / SMTP ---
     mail_mailer: str = "smtp"
