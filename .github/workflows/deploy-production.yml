@@ -307,8 +307,27 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Prepare runner disk for inference image scan
+        run: |
+          sudo python3 - <<'PY'
+          from pathlib import Path
+          import shutil
+          # These SDKs are preinstalled on the disposable runner and are unused here.
+          for name in ("/usr/local/lib/android", "/usr/share/dotnet", "/usr/share/swift"):
+              target = Path(name)
+              if target.exists():
+                  if target.resolve() != target:
+                      raise SystemExit("Unexpected SDK path")
+                  shutil.rmtree(target)
+          PY
+          df -h /
+
       - name: Build backend image
-        run: docker build -t savegeo-backend:ci .
+        run: |
+          docker build -t savegeo-backend:ci .
+          # Retain the tagged runtime image; remove intermediate builder cache.
+          docker builder prune --all --force
+          df -h /
 
       - name: Scan backend image
         uses: aquasecurity/trivy-action@master
@@ -324,4 +343,5 @@ jobs:
       - name: Report Trivy findings
         if: failure()
         run: |
+          test -s trivy-results.json || { echo "::error::Trivy failed before producing a vulnerability report"; exit 1; }
           jq '[.Results[]? | {Target, Vulnerabilities: [.Vulnerabilities[]? | {VulnerabilityID, PkgName, PkgPath, InstalledVersion, FixedVersion, Severity}] } | select(.Vulnerabilities | length > 0)]' trivy-results.json
