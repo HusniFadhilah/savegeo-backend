@@ -52,6 +52,23 @@ def choose_pairs(before, after, *, sar):
         (pq[1]["date"]-pq[0]["date"]).days, pq[1]["date"], pq[0]["system:index"], pq[1]["system:index"]))
 
 
+def rank_optical_pairs(pairs, aoi):
+    # Rank the actual intersection, since clear pixels on opposite sides of
+    # an AOI cannot establish a comparison even when each date looks usable.
+    candidates = []
+    for index, (pre, post) in enumerate(pairs[:25]):
+        before, after = [ee.Image("GOOGLE/DYNAMICWORLD/V1/"+side["system:index"]).select("label") for side in (pre, post)]
+        projection = before.projection()
+        valid = before.mask().And(after.reproject(projection).mask()).unmask(0, False).rename("valid")
+        coverage = valid.reduceRegion(ee.Reducer.mean(), aoi, 100, crs=projection, maxPixels=10_000_000).get("valid")
+        candidates.append(ee.Feature(None, {"index": index, "coverage": coverage}))
+    if not candidates:
+        return pairs
+    ranked = ee.FeatureCollection(candidates).getInfo()["features"]
+    return [pairs[int(item["properties"]["index"])] for item in sorted(ranked, key=lambda row: (
+        -(row["properties"].get("coverage") or 0), row["properties"]["index"]))]
+
+
 def tile_check(url, aoi_row):
     lon = (aoi_row.bbox[0]+aoi_row.bbox[2])/2
     lat = (aoi_row.bbox[1]+aoi_row.bbox[3])/2
@@ -175,6 +192,8 @@ def main():
                     before = scenes(collection, aoi, event.event_date-dt.timedelta(days=args.pre_days), event.event_date)
                     after = scenes(collection, aoi, event.event_date, event.event_date+dt.timedelta(days=args.post_days+1))
                     pairs = choose_pairs(before, after, sar=model_id == "flood_change_v2")
+                    if model_id == "dynamic_world_v1":
+                        pairs = rank_optical_pairs(pairs, aoi)
                     product = compute_product(db, event, aoi_row, pairs, model_id, args)
                     item["products"].append(product)
                     print(f"  {model_id}: {product['status']}", flush=True)
