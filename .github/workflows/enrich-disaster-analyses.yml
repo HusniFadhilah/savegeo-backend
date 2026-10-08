@@ -4,12 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: Audit only or calculate real Sentinel indicators with quality checks
+        description: Audit, calculate real Sentinel indicators, or verify inference on event imagery
         required: true
         type: choice
-        options: [audit, enrich]
+        options: [audit, enrich, segmentation]
       event_id:
-        description: Optional published event ID; blank means every flood and earthquake
+        description: Optional event ID; blank enriches all flood/earthquake events or verifies event 5
         type: string
         default: ""
 
@@ -38,7 +38,7 @@ jobs:
         run: |
           python3 - <<'PY'
           import os, re
-          if os.environ["OPERATION"] not in {"audit", "enrich"}:
+          if os.environ["OPERATION"] not in {"audit", "enrich", "segmentation"}:
               raise SystemExit("Unsupported operation")
           if os.environ["EVENT_ID"] and not re.fullmatch(r"[1-9][0-9]{0,8}", os.environ["EVENT_ID"]):
               raise SystemExit("Invalid event ID")
@@ -86,7 +86,7 @@ jobs:
           SSHPASS: ${{ secrets.SSH_PASSWORD }}
         run: |
           set -euo pipefail
-          for script in report_disaster_completeness enrich_disaster_analyses; do
+          for script in report_disaster_completeness enrich_disaster_analyses verify_event_segmentation; do
             sshpass -e scp -P "$DEPLOY_SSH_PORT" "scripts/$script.py" \
               "$DEPLOY_USER@$DEPLOY_HOST:$BACKEND_REMOTE_DIR/var/$script.py"
           done
@@ -102,6 +102,12 @@ jobs:
               python /app/var/enrich_disaster_analyses.py --execute --publish-indicators \
                 --output /app/var/disaster-enrichment.json "${extra[@]}" </dev/null
           fi
+          if [ "$2" = "segmentation" ]; then
+            docker compose -f docker-compose.prod.yml exec -T api \
+              python /app/var/verify_event_segmentation.py --event-id "${3:-5}" \
+                --confidence-threshold 0.25 \
+                --output /app/var/disaster-segmentation-verification.json </dev/null
+          fi
           docker compose -f docker-compose.prod.yml exec -T api \
             python /app/var/report_disaster_completeness.py --output /app/var/disaster-completeness-after.json </dev/null
           REMOTE_ANALYSE
@@ -114,7 +120,10 @@ jobs:
           SSHPASS: ${{ secrets.SSH_PASSWORD }}
         run: |
           mkdir -p operation-report
-          for report in disaster-completeness-before disaster-completeness-after disaster-enrichment; do
+          reports=(disaster-completeness-before disaster-completeness-after)
+          if [ "$OPERATION" = "enrich" ]; then reports+=(disaster-enrichment); fi
+          if [ "$OPERATION" = "segmentation" ]; then reports+=(disaster-segmentation-verification); fi
+          for report in "${reports[@]}"; do
             sshpass -e scp -P "$DEPLOY_SSH_PORT" \
               "$DEPLOY_USER@$DEPLOY_HOST:$BACKEND_REMOTE_DIR/var/$report.json" "operation-report/$report.json" || true
           done

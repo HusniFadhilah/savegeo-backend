@@ -234,7 +234,11 @@ def segment(data: dict, folder: Path) -> dict:
         selected_mask = np.isin(labels, selected_labels) if selected_ids else np.zeros(labels.shape, dtype=bool)
 
     features = []
+    vertex_count = 0
     for geometry, label in shapes(labels, mask=selected_mask, transform=image.transform):
+        vertex_count += sum(len(ring) for ring in geometry["coordinates"])
+        if len(features) >= 5000 or vertex_count > 250_000:
+            raise AnalysisError("Hasil segmentasi terlalu kompleks. Gunakan potongan AOI lebih kecil.", 422)
         features.append({"type": "Feature", "geometry": transform_geom(image.crs, "EPSG:4326", geometry),
                          "properties": {"segment_id": int(label), "model": "SAM ViT-B",
                                         "class_label": data.get("class_label") or data.get("prompt"),

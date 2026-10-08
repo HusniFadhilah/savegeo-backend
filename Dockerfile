@@ -36,6 +36,16 @@ RUN python -m venv --without-pip "${VIRTUAL_ENV}" \
     --exclude='**/*setuptools*' \
     -cf /tmp/python-runtime.tar .
 
+# Keep optional CPU inference packages separate from API dependencies.
+FROM python:3.11-slim-bookworm AS samgeo-builder
+RUN python -m venv /opt/samgeo \
+    && /opt/samgeo/bin/python -m pip install --no-cache-dir \
+       torch==2.13.0 torchvision==0.28.0 \
+       --index-url https://download.pytorch.org/whl/cpu \
+    && /opt/samgeo/bin/python -m pip install --no-cache-dir \
+       segment-geospatial==1.4.2 transformers==5.19.0 \
+    && /opt/samgeo/bin/python -m pip uninstall -y pip setuptools
+
 # Keep compilers and development headers out of the production image. Start
 # from a plain Debian runtime so its system Python metadata cannot reintroduce
 # stale packaging versions; copy only the patched interpreter from the builder.
@@ -68,6 +78,9 @@ COPY --from=builder /tmp/python-runtime.tar /tmp/python-runtime.tar
 RUN tar -C /usr/local -xf /tmp/python-runtime.tar \
     && rm -f /tmp/python-runtime.tar
 COPY --from=builder /opt/venv /opt/venv
+COPY --from=samgeo-builder /opt/samgeo /opt/samgeo
+ENV SAMGEO_PYTHON=/opt/samgeo/bin/python
+RUN /opt/samgeo/bin/python -c "from samgeo import SamGeo; from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection; from torchvision.ops import nms"
 
 COPY pyproject.toml README.md ./
 COPY app ./app
