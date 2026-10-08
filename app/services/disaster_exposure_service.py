@@ -114,10 +114,15 @@ def compute_building_exposure(aoi_geojson: dict[str, Any], parameters: dict[str,
     by_region: dict[str, dict[str, Any]] = defaultdict(lambda: {"buildings_exposed": 0, "footprint_area_ha": 0.0})
     total_buildings = 0
     total_exposed_area = 0.0
+    seen_footprints = set()
     for index, feature in enumerate(buildings):
         footprint = _geometry(feature).intersection(aoi)
         if footprint.is_empty or footprint.geom_type not in {"Polygon", "MultiPolygon"}:
             continue
+        fingerprint = footprint.normalize().wkb
+        if fingerprint in seen_footprints:
+            continue
+        seen_footprints.add(fingerprint)
         total_buildings += 1
         footprint_area = _area_m2(footprint)
         overlap = footprint.intersection(hazard)
@@ -158,7 +163,7 @@ def compute_building_exposure(aoi_geojson: dict[str, Any], parameters: dict[str,
             {"label": "Medium overlap", "color": "#ff9800", "value": "medium_overlap"},
             {"label": "High overlap", "color": "#d32f2f", "value": "high_overlap"},
         ],
-        "quality_flags": {"source_declared": True, "geometry_clipped_to_aoi": True, "damage_not_inferred": True},
+        "quality_flags": {"source_declared": True, "geometry_clipped_to_aoi": True, "duplicate_footprints_removed": True, "damage_not_inferred": True},
         "coverage": {"valid_area_ha": round(_area_m2(aoi) / 10_000, 6), "no_data_area_ha": 0.0, "coverage_pct": 100.0},
         "provenance_source": source,
     }

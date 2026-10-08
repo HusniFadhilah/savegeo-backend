@@ -11,13 +11,19 @@ every route uses to enforce this.
 """
 from __future__ import annotations
 
+import math
+from typing import Literal
+
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
+from shapely.geometry import box, mapping, shape
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.security import get_current_disaster_viewer
 from app.core.viewer_features import require_feature
 from app.db.models.disaster_event import DisasterEvent
+from app.services.disaster_completeness_service import build_completeness
 from app.db.models.hotspot import Hotspot
 from app.db.models.wildfire_hotspot import WildfireHotspot
 from app.db.session import get_db
@@ -25,12 +31,76 @@ from app.registries import disaster_model_registry
 from app.repositories import disaster_repo
 from app.services.disaster_cross_layer_service import get_available_cross_layer_stats
 from app.services import disaster_capability_service, firms_service, wildfire_hotspot_service
+from app.services import samgeo_service
+from app.services.gee_common import AnalysisError, public_analysis_error
 
 router = APIRouter(
     prefix="/disasters",
     tags=["disasters"],
     dependencies=[Depends(require_feature("app.feature.disaster_mapping"))],
 )
+
+
+class EventSegmentationRequest(BaseModel):
+    imagery_id: int
+    mode: Literal["automatic", "prompt_based"] = "prompt_based"
+    class_label: Literal["building", "road", "water", "tree", "crop", "bare_land", "custom_prompt"] = "building"
+    prompt: str | None = Field(default=None, max_length=120)
+    confidence_threshold: float = Field(default=0.5, ge=0, le=1, allow_inf_nan=False)
+    center_crop_m: Literal[500, 1000, 2000] = 1000
+
+
+@router.get("/segmentation/status")
+def event_segmentation_status(viewer=Depends(get_current_disaster_viewer)):
+    return samgeo_service.capabilities()
+
+
+def _segmentation_owner(event_id, viewer):
+    return f"disaster:{event_id}:{type(viewer).__name__}:{viewer.id}"
+
+
+@router.post("/{event_id}/segmentation/jobs", status_code=202)
+def start_event_segmentation(event_id: int, payload: EventSegmentationRequest,
+                             viewer=Depends(get_current_disaster_viewer), db: Session = Depends(get_db)):
+    _get_published_event(db, event_id)
+    image = disaster_repo.get_imagery(db, payload.imagery_id)
+    if image is None or image.event_id != event_id:
+        raise HTTPException(404, "Imagery event tidak ditemukan")
+    if image.source_kind != "local_upload" or not image.local_file_path:
+        raise HTTPException(422, "Segmentasi objek memerlukan GeoTIFF resolusi tinggi milik event; preview tile Sentinel bukan raster RGB")
+    if image.resolution_m is None or image.resolution_m > 3:
+        raise HTTPException(422, "Segmentasi bangunan/jalan memerlukan metadata resolusi citra maksimum 3 m")
+    aoi_row = disaster_repo.get_active_aoi(db, event_id)
+    if aoi_row is None:
+        raise HTTPException(422, "AOI event belum tersedia")
+    geojson = aoi_row.geojson
+    aoi = shape(geojson.get("geometry", geojson))
+    center = aoi.representative_point()
+    half = payload.center_crop_m/2
+    dx, dy = half/(111320*math.cos(math.radians(center.y))), half/111320
+    crop = aoi.intersection(box(center.x-dx, center.y-dy, center.x+dx, center.y+dy))
+    prompt = payload.prompt if payload.class_label == "custom_prompt" else payload.class_label.replace("_", " ")
+    try:
+        return samgeo_service.start_job({
+            "local_file_path": image.local_file_path, "_uploaded_local_file": True,
+            "aoi": {"type": "Feature", "geometry": mapping(crop), "properties": {}},
+            "mode": payload.mode, "prompt": prompt if payload.mode == "prompt_based" else None,
+            "class_label": payload.class_label if payload.mode == "prompt_based" else None,
+            "confidence_threshold": payload.confidence_threshold,
+            "scene_id": image.scene_id or f"event-imagery-{image.id}", "imagery_id": image.id,
+            "acquisition_date": image.acquisition_date.isoformat(), "source_resolution_m": image.resolution_m,
+        }, owner=_segmentation_owner(event_id, viewer))
+    except AnalysisError as exc:
+        raise HTTPException(exc.status_code, public_analysis_error(exc)) from exc
+
+
+@router.get("/{event_id}/segmentation/jobs/{job_id}")
+def get_event_segmentation(event_id: int, job_id: str, viewer=Depends(get_current_disaster_viewer), db: Session = Depends(get_db)):
+    _get_published_event(db, event_id)
+    try:
+        return samgeo_service.get_job(job_id, owner=_segmentation_owner(event_id, viewer))
+    except AnalysisError as exc:
+        raise HTTPException(exc.status_code, public_analysis_error(exc)) from exc
 
 
 def _viewer_imagery_dict(img) -> dict:
@@ -186,10 +256,10 @@ def list_disasters(
                 pass
         data = event.to_dict()
         allowed = _compatible_model_ids(event)
-        data["available_analysis_count"] = sum(
-            1 for run, _ in disaster_repo.list_published_analyses(db, event.id)
-            if run.model_id in allowed
-        )
+        data["available_analysis_count"] = len({
+            run.model_id for run, result in disaster_repo.list_published_analyses(db, event.id)
+            if run.model_id in allowed and disaster_capability_service.validate_persisted_result(db, event, run, result).allowed
+        })
         if event.disaster_type == "forest_fire":
             hotspot_count, high_confidence_count = _wildfire_metrics(db, event)
             data.update(
@@ -273,6 +343,7 @@ def get_disaster_statistics(event_id: int, viewer=Depends(get_current_disaster_v
         },
         "kpis": kpis,
         "cross_layer": cross_layer,
+        "completeness": build_completeness(event.disaster_type, _build_analyses(db, event_id)),
     }
 
 

@@ -1,0 +1,136 @@
+name: Audit and enrich production disaster analyses
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Audit only or calculate real Sentinel indicators with quality checks
+        required: true
+        type: choice
+        options: [audit, enrich]
+      event_id:
+        description: Optional published event ID; blank means every flood and earthquake
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: savegeo-backend-production
+  cancel-in-progress: false
+
+jobs:
+  analyse:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    environment: production
+    env:
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_SSH_PORT: ${{ secrets.DEPLOY_SSH_PORT }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      BACKEND_REMOTE_DIR: ${{ secrets.BACKEND_REMOTE_DIR }}
+      OPERATION: ${{ inputs.operation }}
+      EVENT_ID: ${{ inputs.event_id }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate operation arguments
+        run: |
+          python3 - <<'PY'
+          import os, re
+          if os.environ["OPERATION"] not in {"audit", "enrich"}:
+              raise SystemExit("Unsupported operation")
+          if os.environ["EVENT_ID"] and not re.fullmatch(r"[1-9][0-9]{0,8}", os.environ["EVENT_ID"]):
+              raise SystemExit("Invalid event ID")
+          if not re.fullmatch(r"/[A-Za-z0-9_./-]+", os.environ["BACKEND_REMOTE_DIR"]):
+              raise SystemExit("Invalid backend directory")
+          if not os.environ["DEPLOY_SSH_PORT"].isdigit():
+              raise SystemExit("Invalid SSH port")
+          PY
+
+      - name: Install VPN and SSH tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openvpn sshpass netcat-openbsd
+
+      - name: Connect production VPN
+        env:
+          VPN_CONFIG_B64: ${{ secrets.VPN_CONFIG_B64 }}
+          VPN_AUTH_B64: ${{ secrets.VPN_AUTH_B64 }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$VPN_CONFIG_B64" | base64 --decode > "$RUNNER_TEMP/disaster-client.ovpn"
+          printf '%s' "$VPN_AUTH_B64" | base64 --decode > "$RUNNER_TEMP/disaster-auth.txt"
+          chmod 600 "$RUNNER_TEMP/disaster-client.ovpn" "$RUNNER_TEMP/disaster-auth.txt"
+          sudo openvpn --config "$RUNNER_TEMP/disaster-client.ovpn" \
+            --auth-user-pass "$RUNNER_TEMP/disaster-auth.txt" \
+            --daemon --writepid "$RUNNER_TEMP/disaster-vpn.pid" --log "$RUNNER_TEMP/disaster-vpn.log"
+          for attempt in $(seq 1 30); do
+            nc -z -w 3 "$DEPLOY_HOST" "$DEPLOY_SSH_PORT" && exit 0
+            sleep 3
+          done
+          sudo cat "$RUNNER_TEMP/disaster-vpn.log"
+          exit 1
+
+      - name: Configure SSH host verification
+        env:
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Audit and optionally calculate indicators
+        env:
+          SSHPASS: ${{ secrets.SSH_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for script in report_disaster_completeness enrich_disaster_analyses; do
+            sshpass -e scp -P "$DEPLOY_SSH_PORT" "scripts/$script.py" \
+              "$DEPLOY_USER@$DEPLOY_HOST:$BACKEND_REMOTE_DIR/var/$script.py"
+          done
+          cat > "$RUNNER_TEMP/disaster-analysis.sh" <<'REMOTE_ANALYSE'
+          set -euo pipefail
+          cd "$1"
+          docker compose -f docker-compose.prod.yml exec -T api \
+            python /app/var/report_disaster_completeness.py --output /app/var/disaster-completeness-before.json </dev/null
+          if [ "$2" = "enrich" ]; then
+            extra=()
+            if [ -n "$3" ]; then extra=(--event-id "$3"); fi
+            docker compose -f docker-compose.prod.yml exec -T api \
+              python /app/var/enrich_disaster_analyses.py --execute --publish-indicators \
+                --output /app/var/disaster-enrichment.json "${extra[@]}" </dev/null
+          fi
+          docker compose -f docker-compose.prod.yml exec -T api \
+            python /app/var/report_disaster_completeness.py --output /app/var/disaster-completeness-after.json </dev/null
+          REMOTE_ANALYSE
+          sshpass -e ssh -p "$DEPLOY_SSH_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
+            "bash -s -- '$BACKEND_REMOTE_DIR' '$OPERATION' '$EVENT_ID'" < "$RUNNER_TEMP/disaster-analysis.sh"
+
+      - name: Download operation reports
+        if: always()
+        env:
+          SSHPASS: ${{ secrets.SSH_PASSWORD }}
+        run: |
+          mkdir -p operation-report
+          for report in disaster-completeness-before disaster-completeness-after disaster-enrichment; do
+            sshpass -e scp -P "$DEPLOY_SSH_PORT" \
+              "$DEPLOY_USER@$DEPLOY_HOST:$BACKEND_REMOTE_DIR/var/$report.json" "operation-report/$report.json" || true
+          done
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: disaster-analysis-${{ github.run_id }}
+          path: operation-report/*.json
+          if-no-files-found: error
+
+      - name: Disconnect operation VPN
+        if: always()
+        run: |
+          if [ -s "$RUNNER_TEMP/disaster-vpn.pid" ]; then
+            sudo kill "$(cat "$RUNNER_TEMP/disaster-vpn.pid")" || true
+          fi
+          rm -f "$RUNNER_TEMP/disaster-auth.txt" "$RUNNER_TEMP/disaster-client.ovpn"

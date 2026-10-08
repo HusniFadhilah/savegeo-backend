@@ -117,7 +117,7 @@ def _compute_flood_change(aoi, pre_date: dt.date, post_date: dt.date, scale: int
     }
 
 
-def _s1_composite_v2(aoi, center: dt.date):
+def _s1_composite_v2(aoi, center: dt.date, *, scene_id: str | None = None, projection=None):
     """Build a deterministic VV/VH SAR composite on the same AOI grid."""
     start, end = _window(center)
     base = (
@@ -126,20 +126,30 @@ def _s1_composite_v2(aoi, center: dt.date):
         .filterDate(start, end)
         .filter(ee.Filter.eq("instrumentMode", "IW"))
     )
+    if scene_id:
+        base = base.filter(ee.Filter.eq("system:index", scene_id.rsplit("/", 1)[-1]))
     vv = base.filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VV")).select("VV")
-    vh = base.filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VH")).select("VH")
-    # Prefer VV, but use VH when VV is unavailable. Both branches use the same
-    # median + focal-median speckle treatment and are clipped to the AOI.
+    # A shared threshold is only meaningful with the same polarization.
     if vv.size().getInfo() > 0:
-        return vv.median().focal_median(30, "circle", "meters").clip(aoi), "VV"
-    if vh.size().getInfo() > 0:
-        return vh.median().focal_median(30, "circle", "meters").clip(aoi), "VH"
+        grid = projection or ee.Image(vv.first()).projection()
+        return vv.median().reproject(grid).focal_median(30, "circle", "meters").clip(aoi), "VV"
     return None, None
 
 
-def _compute_flood_change_v2(aoi, pre_date: dt.date, post_date: dt.date, scale: int = 10) -> dict:
-    before, pre_band = _s1_composite_v2(aoi, pre_date)
-    after, post_band = _s1_composite_v2(aoi, post_date)
+def _compute_flood_change_v2(aoi, pre_date: dt.date, post_date: dt.date, scale: int = 10, *, pre_image=None, post_image=None) -> dict:
+    pre_scene = getattr(pre_image, "scene_id", None)
+    post_scene = getattr(post_image, "scene_id", None)
+    if not pre_scene or not post_scene:
+        raise AnalysisError("Scene ID Sentinel-1 pre/post wajib untuk perbandingan orbit dan grid", 422)
+    before_source, after_source = [ee.Image(f"COPERNICUS/S1_GRD/{s.rsplit('/', 1)[-1]}") for s in (pre_scene, post_scene)]
+    orbit_fields = ["orbitProperties_pass", "relativeOrbitNumber_start"]
+    orbit_pre = before_source.toDictionary(orbit_fields).getInfo()
+    orbit_post = after_source.toDictionary(orbit_fields).getInfo()
+    if not all(field in orbit_pre and field in orbit_post and orbit_pre[field] == orbit_post[field] for field in orbit_fields):
+        raise AnalysisError("Pasangan Sentinel-1 harus memiliki arah lintasan dan orbit relatif yang sama", 422)
+    projection = before_source.select("VV").projection()
+    before, pre_band = _s1_composite_v2(aoi, pre_date, scene_id=pre_scene, projection=projection)
+    after, post_band = _s1_composite_v2(aoi, post_date, scene_id=post_scene, projection=projection)
     if before is None or after is None:
         raise AnalysisError("Data Sentinel-1 SAR GRD IW tidak tersedia untuk pre/post", 404)
     threshold = -16.0
@@ -159,11 +169,11 @@ def _compute_flood_change_v2(aoi, pre_date: dt.date, post_date: dt.date, scale: 
     no_data_ha = max(0.0, aoi_area - valid_area)
     class_img = (
         ee.Image(0).where(existing_water, 1).where(new_inundation, 2).where(receded, 3)
-        .updateMask(valid).unmask(0).rename("flood_class")
+        .updateMask(valid).selfMask().clip(aoi).rename("flood_class")
     )
     tile = get_tile_url(
         class_img,
-        {"min": 0, "max": 3, "palette": ["#00000000", "#1565c0", "#e53935", "#90a4ae"]},
+        {"min": 1, "max": 3, "palette": ["#1565c0", "#e53935", "#90a4ae"]},
         "Flood Inundation Change v2",
     )
     if not tile or not tile.get("tile_url"):
@@ -185,7 +195,8 @@ def _compute_flood_change_v2(aoi, pre_date: dt.date, post_date: dt.date, scale: 
             "post_band": post_band,
         },
         "coverage": {"valid_area_ha": valid_area, "no_data_area_ha": no_data_ha, "coverage_pct": round(valid_area / aoi_area * 100, 2)},
-        "quality_flags": {"aoi_clipped": True, "common_grid": True, "speckle_filter": "focal_median_30m", "best_effort": False},
+        "quality_flags": {"aoi_clipped": True, "common_grid": True, "same_orbit": True, "same_polarization": True, "speckle_filter": "focal_median_30m", "best_effort": False},
+        "provenance_details": {"pre_scene_id": pre_scene, "post_scene_id": post_scene, "orbit": orbit_pre, "crs": projection.crs().getInfo(), "resolution_m": scale},
         "legend": [
             {"label": "No data", "color": "#00000000", "value": "no_data"},
             {"label": "Existing water", "color": "#1565c0", "value": "existing_water"},
@@ -494,11 +505,11 @@ def run_analysis(db: Session, run_id: int, force: bool = False) -> dict:
                     db, event, aoi_row, pre_img, post_img, run.model_id, parameters
             )
         elif run.model_id == "dynamic_world_v1":
-            output = compute_segmentation(aoi, pre_date, post_date)
+            output = compute_segmentation(aoi, pre_date, post_date, pre_scene_id=getattr(pre_img, "scene_id", None), post_scene_id=getattr(post_img, "scene_id", None))
         elif run.model_id == "flood_change_v1":
             output = _compute_flood_change(aoi, pre_date, post_date)
         elif run.model_id == "flood_change_v2":
-            output = _compute_flood_change_v2(aoi, pre_date, post_date)
+            output = _compute_flood_change_v2(aoi, pre_date, post_date, pre_image=pre_img, post_image=post_img)
         elif run.model_id == "water_segmentation_v1":
             output = _compute_water_segmentation(aoi, pre_date, post_date)
         elif run.model_id == "water_segmentation_v2":
@@ -515,24 +526,7 @@ def run_analysis(db: Session, run_id: int, force: bool = False) -> dict:
             if parameters.get("landcover_features"):
                 output = compute_landcover_impact(aoi_row.geojson, parameters)
             else:
-                comparison = compute_segmentation(aoi, pre_date, post_date)
-                dynamic = (comparison.get("statistics") or {}).get("comparison") or {}
-                output = {
-                    "tile_url": comparison.get("tile_url"),
-                    "legend": comparison.get("legend", []),
-                    "confidence_summary": comparison.get("confidence_summary"),
-                    "statistics": {
-                        "aoi_area_ha": dynamic.get("aoi_area_ha"),
-                        "valid_area_ha": dynamic.get("valid_area_ha"),
-                        "no_data_area_ha": dynamic.get("no_data_area_ha"),
-                        "coverage_pct": round(dynamic.get("valid_area_ha", 0) / dynamic.get("aoi_area_ha", 1) * 100, 2) if dynamic.get("aoi_area_ha") else None,
-                        "affected_area_ha": dynamic.get("changed_area_ha"),
-                        "classes": dynamic.get("classes", []),
-                        "transitions": dynamic.get("transitions", []),
-                    },
-                    "coverage": {"valid_area_ha": dynamic.get("valid_area_ha"), "no_data_area_ha": dynamic.get("no_data_area_ha"), "coverage_pct": round(dynamic.get("valid_area_ha", 0) / dynamic.get("aoi_area_ha", 1) * 100, 2) if dynamic.get("aoi_area_ha") else None},
-                    "quality_flags": {"aoi_clipped": True, "common_grid": True, "economic_damage_not_inferred": True},
-                }
+                raise AnalysisError("Dampak tutupan lahan banjir memerlukan landcover_features dan geometri genangan bersumber; gunakan Dynamic World untuk perubahan kelas", 422)
         elif run.model_id == "forest_change_v1":
             output = _compute_forest_change(aoi, pre_date, post_date)
         else:
@@ -553,6 +547,9 @@ def run_analysis(db: Session, run_id: int, force: bool = False) -> dict:
             event, aoi_row, pre_img, post_img, model, parameters=parameters,
         )
         output["provenance"]["quality_flags"] = output.get("quality_flags", {})
+        if output.get("provenance_details"):
+            output["provenance"]["computed_inputs"] = output["provenance_details"]
+            output["provenance"]["crs"] = output["provenance_details"].get("crs", output["provenance"]["crs"])
         if output.get("provenance_source"):
             output["provenance"]["source_datasets"] = [output["provenance_source"]]
             output["provenance"]["source_date"] = output["provenance_source"].get("source_date")

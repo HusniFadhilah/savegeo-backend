@@ -94,6 +94,7 @@ def build_report(db) -> tuple[dict[str, Any], list[dict], dict[int, DisasterAOI 
     result_field_names = (
         "id", "run_id", "tile_url", "statistics", "features", "legend", "confidence_summary",
         "is_published", "published_at", "published_by", "publication_version", "created_at",
+        "provenance", "validation_status", "limitations", "stale_reason", "coverage",
     )
     result_fields = [getattr(AnalysisResult, name) for name in result_field_names if name in result_columns]
     if not result_fields:
@@ -101,8 +102,7 @@ def build_report(db) -> tuple[dict[str, Any], list[dict], dict[int, DisasterAOI 
     else:
         result_rows = db.execute(select(*result_fields)).mappings().all()
     results = {
-        row["run_id"]: SimpleNamespace(**{name: row.get(name) for name in result_field_names},
-                                        provenance=None, validation_status=None, limitations=None, stale_reason=None)
+        row["run_id"]: SimpleNamespace(**{name: row.get(name) for name in result_field_names})
         for row in result_rows
     }
 

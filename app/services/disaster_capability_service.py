@@ -11,6 +11,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import math
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
@@ -248,10 +249,12 @@ def validate_persisted_result(
         return CapabilityCheck(False, "not_available", ("Hasil belum dipublikasikan",))
     has_statistics = bool(getattr(result, "statistics", None))
     has_output = bool(getattr(result, "tile_url", None))
-    if model.get("output_type") == "feature_collection":
+    if model.get("output_type") == "feature_collection" or str(model.get("output_type", "")).startswith("polygon"):
         has_output = has_output or bool(getattr(result, "features", None))
     if not has_statistics or not has_output:
         return CapabilityCheck(False, "not_available", ("Output atau statistik hasil belum lengkap",))
+    if getattr(run, "status", None) not in {"completed", "review_required", "published"}:
+        return CapabilityCheck(False, "not_available", ("Analisis belum selesai",))
     provenance = getattr(result, "provenance", None) or {}
     required = {
         "event_id", "aoi_id", "pre_imagery_id", "post_imagery_id", "imagery", "model_id", "model_version", "input_fingerprint",
@@ -282,7 +285,7 @@ def validate_persisted_result(
     coverage = getattr(result, "coverage", None) or (getattr(result, "statistics", None) or {}).get("coverage")
     if coverage is not None:
         coverage_pct = coverage.get("coverage_pct")
-        if coverage_pct is not None and (not isinstance(coverage_pct, (int, float)) or coverage_pct <= 0):
+        if coverage_pct is not None and (isinstance(coverage_pct, bool) or not isinstance(coverage_pct, (int, float)) or not math.isfinite(coverage_pct) or not 0 < coverage_pct <= 100.5):
             return CapabilityCheck(False, "review_required", ("Coverage valid tidak tersedia; hasil tidak dapat dipublikasikan",))
     return CapabilityCheck(True, inputs.status, ())
 

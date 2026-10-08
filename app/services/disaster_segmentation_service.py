@@ -9,10 +9,12 @@ from app.services.gee_common import AnalysisError, get_tile_url
 PROBABILITY_BANDS = ["water", "trees", "grass", "flooded_vegetation", "crops", "shrub_and_scrub", "built", "bare", "snow_and_ice"]
 
 
-def _prediction(aoi, date):
+def _prediction(aoi, date, scene_id=None):
     # Exactly the configured acquisition date, not a silent +/- date fallback.
     day = ee.Date(date.isoformat())
     col = ee.ImageCollection("GOOGLE/DYNAMICWORLD/V1").filterBounds(aoi).filterDate(day, day.advance(1, "day"))
+    if scene_id:
+        col = col.filter(ee.Filter.eq("system:index", scene_id.rsplit("/", 1)[-1]))
     provenance = ee.Dictionary({"scene_ids": col.aggregate_array("system:index"),
         "algorithm_versions": col.aggregate_array("dynamicworld_algorithm_version").distinct(),
         "qa_versions": col.aggregate_array("qa_algorithm_version").distinct()}).getInfo()
@@ -53,10 +55,10 @@ def class_statistics(schema, pre_groups, post_groups, aoi_area):
     return rows
 
 
-def compute_segmentation(aoi, pre_date, post_date):
+def compute_segmentation(aoi, pre_date, post_date, *, pre_scene_id=None, post_scene_id=None):
     model = get_model("dynamic_world_v1")
-    pre, pre_meta = _prediction(aoi, pre_date)
-    post, post_meta = _prediction(aoi, post_date)
+    pre, pre_meta = _prediction(aoi, pre_date, pre_scene_id)
+    post, post_meta = _prediction(aoi, post_date, post_scene_id)
     for key in ("algorithm_versions", "qa_versions"):
         if len(pre_meta[key]) != 1 or set(pre_meta[key]) != set(post_meta[key]):
             raise AnalysisError(f"Versi model/preprocessing pre/post tidak konsisten ({key}); pilih pasangan imagery lain", 422)
@@ -119,5 +121,8 @@ def compute_segmentation(aoi, pre_date, post_date):
         "unchanged_area_ha": sum(t["area_ha"] for t in transitions if t["pre_class_id"] == t["post_class_id"]),
         "coverage_note": "Statistik memakai irisan piksel valid pre/post; awan dan no-data dikeluarkan pada kedua sisi. Perubahan warna menunjukkan kelas tujuan, bukan penyebab kerusakan."}
     return {"tile_url": tiles["post_tile_url"], "legend": model["classes"],
-        "statistics": {"aoi_area_ha": aoi_area, "changed_area_ha": comparison["changed_area_ha"], "comparison": comparison},
+        "coverage": {"valid_area_ha": covered, "no_data_area_ha": max(0, aoi_area-covered), "coverage_pct": covered/aoi_area*100},
+        "quality_flags": {"common_grid": True, "common_valid_mask": True, "same_algorithm": True, "aoi_clipped": True, "damage_not_inferred": True},
+        "provenance_details": {"pre": pre_meta, "post": post_meta, "crs": comparison["crs"], "resolution_m": 10},
+        "statistics": {"aoi_area_ha": aoi_area, "changed_area_ha": comparison["changed_area_ha"], "valid_area_ha": covered, "no_data_area_ha": comparison["no_data_area_ha"], "coverage_pct": covered/aoi_area*100, "comparison": comparison},
         "confidence_summary": {"type": "top1_class_probability", "note": "Probabilitas kelas tutupan lahan, bukan confidence kerusakan bencana"}}

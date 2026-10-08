@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -10,6 +11,8 @@ import sys
 import threading
 import time
 from uuid import UUID, uuid4
+from pyproj import Geod
+from shapely.geometry import shape
 
 import numpy as np
 import rasterio
@@ -44,14 +47,17 @@ def _python() -> str:
 def capabilities() -> dict:
     try:
         result = subprocess.run(
-            [_python(), "-c", "import importlib.util; raise SystemExit(0 if importlib.util.find_spec('samgeo') else 1)"],
+            [_python(), "-c", "import importlib.util,json; print(json.dumps({m:bool(importlib.util.find_spec(m)) for m in ['samgeo','torch','transformers','torchvision','segment_anything']}))"],
             capture_output=True, timeout=15,
         )
-        ready = result.returncode == 0
-    except (OSError, subprocess.TimeoutExpired):
+        modules = json.loads(result.stdout) if result.returncode == 0 else {}
+        ready = all(modules.get(m) for m in ("samgeo", "torch"))
+        prompt_ready = ready and all(modules.get(m) for m in ("transformers", "torchvision", "segment_anything"))
+    except (OSError, subprocess.TimeoutExpired, ValueError):
         ready = False
-    return {"available": ready, "model": "SAM ViT-B / LangSAM", "max_size": 1024,
-            "modes": ["automatic", "prompt_based"], "classes": ["building", "road", "water", "tree", "crop", "bare_land", "custom_prompt"],
+        prompt_ready = False
+    return {"available": ready, "model": "SAM ViT-B / Grounding DINO Tiny", "max_size": 1024,
+            "modes": (["automatic", "prompt_based"] if prompt_ready else ["automatic"]) if ready else [], "classes": ["building", "road", "water", "tree", "crop", "bare_land", "custom_prompt"],
             "message": "" if ready else "SamGeo belum tersedia pada server. Pasang extra samgeo atau atur SAMGEO_PYTHON."}
 
 
@@ -112,6 +118,8 @@ def start_job(data: dict, owner: str = "disaster-viewer") -> dict:
     capability = capabilities()
     if not capability["available"]:
         raise AnalysisError(capability["message"], 503)
+    if mode not in capability["modes"]:
+        raise AnalysisError("Runtime prompt belum lengkap; pasang transformers dan torchvision dalam environment SAMGEO_PYTHON", 503)
     JOB_ROOT.mkdir(parents=True, exist_ok=True)
     lock = JOB_ROOT / "running.lock"
     if lock.exists() and time.time() - lock.stat().st_mtime > 1800:
@@ -189,7 +197,7 @@ def segment(data: dict, folder: Path) -> dict:
     try:
         command = [_python(), str(Path(__file__).with_name("samgeo_worker.py")), str(input_path), str(output_path),
                    str(JOB_ROOT / "checkpoints"), str(data.get("mode") or "automatic"),
-                   str(data.get("prompt") or ""), str(data.get("confidence_threshold") or 0.5)]
+                   str(data.get("prompt") or ""), str(data.get("confidence_threshold") if data.get("confidence_threshold") is not None else 0.5)]
         completed = subprocess.run(command, capture_output=True, text=True, timeout=900)
     except subprocess.TimeoutExpired as exc:
         raise AnalysisError("SamGeo melewati batas 15 menit. Coba AOI yang lebih kecil.", 504) from exc
@@ -230,16 +238,19 @@ def segment(data: dict, folder: Path) -> dict:
         features.append({"type": "Feature", "geometry": transform_geom(image.crs, "EPSG:4326", geometry),
                          "properties": {"segment_id": int(label), "model": "SAM ViT-B",
                                         "class_label": data.get("class_label") or data.get("prompt"),
-                                        "confidence": float(data.get("confidence_threshold") or 0.5),
+                                        "detection_threshold": float(data.get("confidence_threshold") if data.get("confidence_threshold") is not None else 0.5),
                                         "seeded_by": "MODIS FireMask" if seed_points else "automatic"}})
+    area_ha = sum(abs(Geod(ellps="WGS84").geometry_area_perimeter(shape(feature["geometry"]))[0])/10000 for feature in features)
+    effective_resolution = abs(image.transform.a)*math.cos(math.radians((bounds[1]+bounds[3])/2))
     return {"type": "FeatureCollection", "features": features,
-            "metadata": {"scene": data.get("item_url") or data.get("local_file_path"), "asset": data.get("asset_key"), "width": rgb.shape[2],
+            "metadata": {"scene": data.get("scene_id") or data.get("item_url") or "uploaded-raster", "imagery_id": data.get("imagery_id"), "acquisition_date": data.get("acquisition_date"), "source_resolution_m": data.get("source_resolution_m"), "effective_resolution_m": effective_resolution, "candidate_area_ha": area_ha, "aoi": aoi,
+                         "asset": data.get("asset_key"), "width": rgb.shape[2],
                          "height": rgb.shape[1], "model": "SAM ViT-B",
                          "automatic_object_count": int(automatic_labels.size),
                          "object_count": int(selected_labels.size),
                          "seed_count": len(seed_points),
                          "selection_method": "MODIS-seeded SAM" if seed_points else str(data.get("mode") or "automatic"),
                          "prompt": data.get("prompt") or data.get("class_label"),
-                         "confidence_threshold": float(data.get("confidence_threshold") or 0.5),
+                         "confidence_threshold": float(data.get("confidence_threshold") if data.get("confidence_threshold") is not None else 0.5),
                          "validation_status": "review_required",
                          "semantics": "building_footprint_candidate" if str(data.get("class_label") or data.get("prompt") or "").casefold() == "building" else "candidate_object"}}
