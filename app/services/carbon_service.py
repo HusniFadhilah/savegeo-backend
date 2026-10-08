@@ -60,7 +60,7 @@ _DATASET_HEALTH_CACHE: dict[str, tuple[float, dict]] = {}
 def _chloris_source_note(source: str | None) -> str:
     """Describe the raster actually used without exposing signed or private URLs."""
     notes = {
-        "chloris_reporting_unit": "Sumber: GeoTIFF Chloris dari reporting unit berlisensi.",
+        "chloris_reporting_unit": "Sumber: GeoTIFF Chloris berlisensi; cakupan mengikuti area reporting unit.",
         "direct_env_url": "Sumber: URL GeoTIFF Chloris yang dikonfigurasi di server.",
         "planetary_computer_stac": (
             "Sumber: koleksi Chloris-Biomass di Microsoft Planetary Computer "
@@ -112,6 +112,13 @@ def get_direct_carbon_reference_layer(
         detail = "Dataset " + str(meta.get("name") or dataset_key) + " hanya menyediakan mask extent mangrove, bukan raster AGB atau densitas karbon."
         raise AnalysisError(detail, 422)
     available_years = meta.get("available_years")
+    if dataset_key == "CHLORIS_AGB_STOCK" and dataset_year not in (available_years or []):
+        from app.services.chloris_service import ChlorisUnavailableError, resolve_chloris_download
+
+        try:
+            resolve_chloris_download(year=dataset_year)
+        except ChlorisUnavailableError as exc:
+            raise AnalysisError(str(exc), 422) from exc
     if available_years and dataset_year not in available_years:
         raise AnalysisError(
             f"Tahun {dataset_year} tidak tersedia untuk {dataset_key}. Pilih salah satu: {', '.join(map(str, available_years))}.",
@@ -141,16 +148,28 @@ def get_direct_carbon_reference_layer(
         # SoilGrids is sampled through REST and has no global tile endpoint.
         # Still return a successful metadata-only direct-load response.
         tile_url = None
-    elif ingestion == "chloris_downloads_index" and use_public_chloris_tiles:
-        from app.services.chloris_service import resolve_planetary_computer_tile_url
-
-        source = "planetary_computer_stac"
-        tile_url = resolve_planetary_computer_tile_url(
-            year=source_year,
-            vis_min=vis_min if vis_min is not None else meta.get("vis_min", 0),
-            vis_max=vis_max if vis_max is not None else meta.get("vis_max", 300),
-            carbon_fraction=0.47,
+    elif ingestion == "chloris_downloads_index":
+        from app.services.chloris_service import (
+            ChlorisUnavailableError, resolve_chloris_download, resolve_planetary_computer_tile_url,
         )
+
+        lo = vis_min if vis_min is not None else meta.get("vis_min", 0)
+        hi = vis_max if vis_max is not None else meta.get("vis_max", 300)
+        try:
+            if source_year in meta.get("licensed_available_years", []):
+                download = resolve_chloris_download(year=source_year)
+                source = download.metadata.get("source")
+                tile_url = (
+                    "/api/carbon/chloris/reference-tiles/{z}/{x}/{y}.png"
+                    f"?year={source_year}&min={lo}&max={hi}"
+                )
+            else:
+                source = "planetary_computer_stac"
+                tile_url = resolve_planetary_computer_tile_url(
+                    year=source_year, vis_min=lo, vis_max=hi, carbon_fraction=0.47,
+                )
+        except ChlorisUnavailableError as exc:
+            raise AnalysisError(str(exc), 422) from exc
     elif dataset_key in CARBON_ARCGIS_REGISTRY:
         tile_query = [f"year={source_year}"]
         if vis_min is not None:
@@ -292,6 +311,12 @@ def get_carbon_dataset_list(
             "year": meta.get("year"),
             "year_range": meta.get("year_range"),
             "available_years": meta.get("available_years"),
+            **({
+                "licensed_available_years": meta.get("licensed_available_years", []),
+                "public_available_years": meta.get("public_available_years", []),
+                "licensed_product_year_range": meta.get("licensed_product_year_range"),
+                "configuration_note": meta.get("configuration_note"),
+            } if key == "CHLORIS_AGB_STOCK" else {}),
             "selection_year": meta.get("year") if isinstance(meta.get("year"), int) else (
                 CARBON_DATASET_REGISTRY.get(key)
                 or CARBON_ARCGIS_REGISTRY.get(key)
@@ -523,6 +548,9 @@ def _reference_load_only_response(
         "statistics": None,
         "load_info": {"mode": "load_only", "statistics_available": False},
     }
+    if dataset_info.get("key") == "CHLORIS_AGB_STOCK":
+        ref["source"] = dataset_info.get("source")
+        ref["load_note"] = _chloris_source_note(dataset_info.get("source"))
     return {
         "carbon_estimated": layer,
         "carbon_reference": ref,
@@ -590,8 +618,12 @@ def _analyze_local_reference_only(
         "palette": dataset_info.get("vis_palette", vis_palette),
     }
     label_year = dataset_info.get("year", dataset_year)
+    tile_base = (
+        "/api/carbon/chloris/reference-tiles" if dataset_info["key"] == "CHLORIS_AGB_STOCK"
+        else f"/api/carbon/reference-tiles/{dataset_info['key']}"
+    )
     reference_tile_url = (
-        f"/api/carbon/reference-tiles/{dataset_info['key']}/{{z}}/{{x}}/{{y}}.png"
+        f"{tile_base}/{{z}}/{{x}}/{{y}}.png"
         f"?year={label_year}&min={ref_vis_params['min']}&max={ref_vis_params['max']}"
     )
     if load_only:
@@ -630,6 +662,13 @@ def _analyze_local_reference_only(
     min_carbon = float(np.min(values))
     max_carbon = float(np.max(values))
     original_area, filtering_area, calculation_area = _local_aoi_areas_ha(data, bbox, geometry)
+    if dataset_info["key"] == "CHLORIS_AGB_STOCK":
+        # A licensed reporting unit can cover only part of the requested AOI.
+        # Never extrapolate its biomass density across uncovered/nodata pixels.
+        pixel_area_ha = abs(grid.transform.a * grid.transform.e) / 10_000
+        calculation_area = min(calculation_area, float(values.size) * pixel_area_ha)
+        load_info["valid_pixel_count"] = int(values.size)
+        load_info["covered_area_ha"] = calculation_area
     total_carbon_tons = mean_carbon * calculation_area
     co2_factor = config_service.get_analysis_defaults(db)["carbon_co2_factor"]
     stats_out = {
@@ -982,6 +1021,34 @@ def analyze_carbon(db: Session, data: dict) -> dict:
         )
 
     dataset_info = get_dataset_meta(reference_dataset, dataset_year)
+
+    if reference_only and reference_dataset == "CHLORIS_AGB_STOCK":
+        from app.services.chloris_service import ChlorisUnavailableError, resolve_chloris_download
+
+        if dataset_year not in dataset_info.get("available_years", []):
+            try:
+                resolve_chloris_download(year=dataset_year)
+            except ChlorisUnavailableError as exc:
+                raise AnalysisError(str(exc), 422) from exc
+        if load_only:
+            layer = get_direct_carbon_reference_layer(reference_dataset, dataset_year, vis_min, vis_max)
+            return _reference_load_only_response(
+                dataset_info={**dataset_info, "source": layer.get("source")},
+                dataset_year=dataset_year,
+                reference_tile_url=layer["tile_url"],
+                ref_vis_params=layer["vis_params"],
+                scale=layer["resolution"],
+                description=layer.get("load_note"),
+            )
+        if dataset_year in dataset_info.get("licensed_available_years", []):
+            try:
+                return _analyze_local_reference_only(
+                    data, dataset_info, dataset_info, dataset_year, None, None, None,
+                    "clipped_aoi" if clip_to_aoi else "full_tiles",
+                    vis_min, vis_max, vis_palette, db,
+                )
+            except ChlorisUnavailableError as exc:
+                raise AnalysisError(str(exc), 422) from exc
 
     # SoilGrids is a REST reference and must remain usable when Earth Engine
     # credentials are unavailable. Handle it before constructing any ee.Geometry.

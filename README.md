@@ -157,3 +157,10 @@ retain initialization and lead time.
 
 Archive metadata, tiles and downloads require Disaster Mapping access and a
 published wildfire event. Importing data does not publish a Draft event.
+
+## Chloris annual biomass
+
+Licensed Chloris stock rasters for 2024/2025 are supported through dated COG URLs
+or a reporting unit's downloads index. The year picker reflects actual available
+rasters; the public fallback remains 2003–2019. See [CHLORIS.md](CHLORIS.md) for
+configuration, raster units, authenticated tiles, and availability diagnostics.

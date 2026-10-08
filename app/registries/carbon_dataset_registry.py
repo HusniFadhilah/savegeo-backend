@@ -465,16 +465,18 @@ CARBON_EXTERNAL_REGISTRY: dict[str, dict] = {
         "training_capable": False,
         "description":      (
             "Chloris annual above-ground biomass stock. The backend prefers a "
-            "licensed Chloris reporting-unit GeoTIFF when configured and otherwise "
+            "licensed Chloris reporting-unit GeoTIFF (including 2024/2025 when licensed) "
+            "when configured and otherwise "
             "loads the public Planetary Computer chloris-biomass STAC asset "
             "(2003-2019, ~4.6 km). Open stock values are converted from tonnes per "
             "pixel to Mg C/ha using a 0.47 carbon fraction."
         ),
         "attribution":      "Chloris Geospatial / Microsoft Planetary Computer",
         "limitations":      [
-            "The public Planetary Computer fallback covers 2003-2019 at circa 4.6 km; licensed Chloris reporting units may provide other years/resolutions.",
+            "Chloris 2024/2025 requires licensed annual GeoTIFFs or a reporting unit with raster download rights; only configured/indexed years are selectable.",
+            "The public Planetary Computer fallback covers 2003-2019 at circa 4.6 km. Licensed rasters use CHLORIS_STOCK_RESOLUTION_M (default 30 m).",
             "The public collection is licensed CC BY-NC-SA-4.0 and is for non-commercial/share-alike use; review the license before production use.",
-            "Earth Engine loadGeoTIFF must be able to fetch the signed COG URL; direct URLs must be accessible from Earth Engine.",
+            "Licensed stock GeoTIFFs must be readable by the backend and preferably support HTTP range reads; reporting-unit spatial coverage is limited to its licensed sites.",
             "Uses above-ground biomass stock only; belowground and soil carbon are not included.",
             "Open stock values are per pixel, then normalized to Mg C/ha using pixel area and a 0.47 carbon fraction.",
         ],
@@ -830,6 +832,10 @@ def get_dataset_meta(key: str, dataset_year: int | None = None) -> dict:
     # Check external raster registry
     if key in CARBON_EXTERNAL_REGISTRY:
         meta = dict(CARBON_EXTERNAL_REGISTRY[key])
+        if key == "CHLORIS_AGB_STOCK":
+            from app.services.chloris_service import chloris_dataset_metadata
+
+            meta = chloris_dataset_metadata(meta, dataset_year)
         meta["is_temporal"] = meta.get("time_aware", False)
         meta["requested_year"] = dataset_year
         meta["gee_id"] = None

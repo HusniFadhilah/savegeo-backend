@@ -171,6 +171,7 @@ def load_raster_to_grid(
     band_index: int = 1,
     resampling: str = "bilinear",
     src_nodata: float | None = None,
+    http_options: dict[str, str] | None = None,
 ) -> np.ndarray | None:
     """Read one band of a raster (local path or plain HTTPS/GCS COG URL) and
     reproject/resample it onto `grid` via rasterio WarpedVRT.
@@ -185,7 +186,8 @@ def load_raster_to_grid(
     from rasterio.vrt import WarpedVRT
 
     resampling_enum = getattr(Resampling, resampling)
-    env_opts = GDAL_HTTP_OPTS if str(path_or_url).startswith("http") else {}
+    env_opts = dict(GDAL_HTTP_OPTS) if str(path_or_url).startswith("http") else {}
+    env_opts.update(http_options or {})
     try:
         with rasterio.Env(**env_opts), rasterio.open(path_or_url) as src:
             nodata = src.nodata if src_nodata is None else src_nodata
@@ -202,7 +204,10 @@ def load_raster_to_grid(
                 data = vrt.read(band_index).astype(np.float32)
             return data
     except Exception as exc:  # noqa: BLE001 - raster read can fail many ways; caller treats None as "unavailable"
-        logger.warning(f"load_raster_to_grid: could not read '{path_or_url}': {exc}")
+        if http_options is not None:
+            logger.warning("Configured carbon raster could not be read (%s)", type(exc).__name__)
+        else:
+            logger.warning(f"load_raster_to_grid: could not read '{path_or_url}': {exc}")
         return None
 
 
@@ -329,6 +334,27 @@ def load_carbon_reference_to_grid(
     meta = CARBON_EXTERNAL_REGISTRY.get(dataset_key)
     if meta is None:
         raise ValueError(f"'{dataset_key}' not found in CARBON_EXTERNAL_REGISTRY")
+    if dataset_key == "CHLORIS_AGB_STOCK":
+        from app.services.chloris_service import (
+            ChlorisUnavailableError, chloris_raster_http_options, resolve_chloris_download,
+        )
+
+        download = resolve_chloris_download(year=year)
+        if download.metadata.get("source") == "planetary_computer_stac":
+            raise ChlorisUnavailableError("Raster lokal Chloris memerlukan sumber berlisensi dengan unit t/ha.")
+        mosaic = load_raster_to_grid(
+            download.url, grid, resampling="bilinear",
+            http_options=chloris_raster_http_options(download.url),
+        )
+        if mosaic is None:
+            raise ChlorisUnavailableError("Raster Chloris berlisensi tidak dapat dibaca; periksa URL dan hak akses.")
+        return _apply_transform_array(mosaic, meta.get("transform", "multiply_0.47")), {
+            "dataset_key": dataset_key, "n_tiles_used": 1,
+            "transform": meta.get("transform"), "unit": meta.get("unit"),
+            "target_pool": meta.get("target_pool"),
+            "label_year": download.metadata.get("year"),
+            "source": download.metadata.get("source"),
+        }
     if not meta.get("is_tiled") and not meta.get("global_url_template"):
         raise NotImplementedError(
             f"load_carbon_reference_to_grid only supports tiled/global COG datasets currently; "
@@ -452,7 +478,22 @@ def render_carbon_reference_tile(
 
     if dataset_key not in CARBON_EXTERNAL_REGISTRY or z < 0 or z > 22 or y < 0 or y >= 2 ** z:
         return None
+    chloris_download = None
+    http_options: dict[str, str] = {}
+    source_identity = ""
+    if dataset_key == "CHLORIS_AGB_STOCK":
+        from app.services.chloris_service import (
+            ChlorisUnavailableError, chloris_raster_http_options, resolve_chloris_download,
+        )
+
+        chloris_download = resolve_chloris_download(year=year)
+        if chloris_download.metadata.get("source") == "planetary_computer_stac":
+            raise ChlorisUnavailableError("Gunakan tile Planetary Computer untuk Chloris publik 2003-2019.")
+        http_options = chloris_raster_http_options(chloris_download.url)
+        source_identity = hashlib.sha256(chloris_download.url.encode()).hexdigest()
     cache_key = f"{dataset_key}:{z}:{x % (2 ** z)}:{y}:{year}:{vis_min}:{vis_max}"
+    if source_identity:
+        cache_key += f":{source_identity}"
     with _CARBON_TILE_CACHE_LOCK:
         cached = _read_cached_carbon_tile(cache_key)
     if cached is not None:
@@ -474,7 +515,7 @@ def render_carbon_reference_tile(
     )
     dst_transform = from_bounds(*mercator_bounds, 256, 256)
     canvas = np.full((256, 256), np.nan, dtype=np.float32)
-    urls = _carbon_tile_urls(dataset_key, bbox, year)
+    urls = [chloris_download.url] if chloris_download else _carbon_tile_urls(dataset_key, bbox, year)
     if not urls:
         return None
     from app.core.config import get_settings
@@ -491,7 +532,7 @@ def render_carbon_reference_tile(
     for url in urls:
         _tile_stat("source_reads")
         try:
-            with rasterio.Env(**GDAL_HTTP_OPTS), rasterio.open(url) as src:
+            with rasterio.Env(**{**GDAL_HTTP_OPTS, **http_options}), rasterio.open(url) as src:
                 src_nodata = meta.get("nodata") if meta.get("nodata") is not None else src.nodata
                 with WarpedVRT(
                     src,
@@ -510,6 +551,8 @@ def render_carbon_reference_tile(
                 if np.isfinite(canvas).all():
                     break
         except Exception as exc:  # noqa: BLE001 - missing ocean tiles are expected
+            if chloris_download:
+                raise ValueError("Raster Chloris berlisensi tidak dapat dibaca.") from exc
             logger.debug("carbon tile source unavailable (%s): %s", url, exc)
 
     if not np.isfinite(canvas).any():

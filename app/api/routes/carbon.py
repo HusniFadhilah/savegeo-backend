@@ -92,6 +92,16 @@ def analyze_carbon(request: Request, data: dict = Body(...), db: Session = Depen
     from app.registries.carbon_dataset_registry import CARBON_ARCGIS_REGISTRY
     local_reference = external_meta and external_meta.get("ingestion_method") in {"cog_rasterio", "soilgrids_rest"}
     local_reference = local_reference or reference_dataset in CARBON_ARCGIS_REGISTRY
+    if reference_dataset == "CHLORIS_AGB_STOCK" and direct_reference:
+        from app.registries.carbon_dataset_registry import get_dataset_meta
+
+        requested_year = int(data.get("dataset_year", 2010))
+        chloris_meta = get_dataset_meta(reference_dataset, requested_year)
+        local_reference = (
+            bool(data.get("load_only"))
+            or requested_year in chloris_meta.get("licensed_available_years", [])
+            or requested_year not in chloris_meta.get("available_years", [])
+        )
     requires_ee = not (direct_reference and local_reference)
     if requires_ee and not getattr(request.app.state, "ee_initialized", False):
         raise HTTPException(status_code=503, detail="Google Earth Engine belum diinisialisasi. Cek kredensial di Admin Panel.")
@@ -183,6 +193,32 @@ def carbon_reference_tile(
         # A transparent PNG keeps Leaflet from retrying ocean/missing tiles.
         return Response(content=b"", status_code=204, media_type="image/png", headers={"Cache-Control": "public, max-age=3600"})
     return Response(content=content, media_type="image/png", headers={"Cache-Control": "public, max-age=86400"})
+
+
+@router.get("/carbon/chloris/reference-tiles/{z}/{x}/{y}.png", dependencies=[Depends(get_current_app_viewer)])
+def chloris_reference_tile(
+    z: int,
+    x: int,
+    y: int,
+    year: int = Query(..., ge=2000, le=2100),
+    min: float | None = Query(default=None),
+    max: float | None = Query(default=None),
+):
+    """Render licensed Chloris GeoTIFFs with credentials kept on the backend."""
+    from app.providers.local_raster_provider import render_carbon_reference_tile
+    from app.services.chloris_service import ChlorisUnavailableError
+
+    try:
+        content = render_carbon_reference_tile("CHLORIS_AGB_STOCK", z, x, y, year, min, max)
+    except ChlorisUnavailableError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.warning("Licensed Chloris tile failed (%s)", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Tile Chloris berlisensi belum dapat diakses.") from exc
+    return Response(
+        content=content or b"", status_code=200 if content else 204,
+        media_type="image/png", headers={"Cache-Control": "private, max-age=300"},
+    )
 
 
 @router.get("/carbon/datasets/health")

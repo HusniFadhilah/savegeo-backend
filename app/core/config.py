@@ -122,6 +122,14 @@ class Settings(BaseSettings):
     chloris_id_token: str = ""
     chloris_refresh_token: str = ""
     chloris_data_path: str = ""
+    chloris_stock_url: str = ""
+    chloris_agb_stock_url: str = ""
+    chloris_stock_2024_url: str = ""
+    chloris_stock_2025_url: str = ""
+    chloris_stock_url_template: str = ""
+    chloris_stock_years: str = ""
+    chloris_stock_year: int | None = None
+    chloris_stock_resolution_m: float = 30.0
 
     # --- Region API ---
     region_api_base_url: str = "https://api.sp3stab.id/api/en"
@@ -185,6 +193,11 @@ class Settings(BaseSettings):
     # frontend will request a detailed tile once the user zooms into an AOI.
     carbon_tile_max_source_tiles: int = 32
     carbon_dataset_health_ttl_seconds: int = 900
+
+    @field_validator("chloris_stock_year", mode="before")
+    @classmethod
+    def empty_chloris_stock_year(cls, value: object) -> object:
+        return None if value == "" else value
 
     @field_validator("debug", mode="before")
     @classmethod
