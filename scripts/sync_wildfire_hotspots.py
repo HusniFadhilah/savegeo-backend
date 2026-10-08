@@ -17,6 +17,8 @@ def main() -> None:
     parser.add_argument("--from", dest="start", type=date.fromisoformat, required=True)
     parser.add_argument("--to", dest="end", type=date.fromisoformat, required=True)
     args = parser.parse_args()
+    if args.end < args.start:
+        parser.error("--to must not be earlier than --from")
     with SessionLocal() as db:
         event = db.execute(select(DisasterEvent).where(
             DisasterEvent.slug == args.slug, DisasterEvent.disaster_type == "forest_fire",
@@ -25,6 +27,8 @@ def main() -> None:
         print(f"Syncing {event.slug}: {args.start} to {args.end}", flush=True)
         result = sync_event_hotspots(db, event, args.start, args.end)
         print(json.dumps(result, default=str), flush=True)
+        if result.get("errors"):
+            parser.exit(1, "FIRMS synchronization was incomplete; inspect the reported source errors.\n")
 
 
 if __name__ == "__main__":

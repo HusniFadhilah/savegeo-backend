@@ -1,0 +1,162 @@
+name: Refresh production wildfire satellite data
+
+on:
+  workflow_dispatch:
+    inputs:
+      slug:
+        description: Published wildfire event
+        required: true
+        type: choice
+        options: [sumatra-2026, kalimantan-2026]
+      hotspot_from:
+        description: FIRMS start date (YYYY-MM-DD, maximum 90 days)
+        required: true
+        type: string
+      hotspot_to:
+        description: FIRMS end date (YYYY-MM-DD)
+        required: true
+        type: string
+      cams_from:
+        description: CAMS/GFAS start date (YYYY-MM-DD, maximum 31 days)
+        required: true
+        type: string
+      cams_to:
+        description: CAMS/GFAS end date (YYYY-MM-DD)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# Avoid API container restarts during the data synchronization.
+concurrency:
+  group: savegeo-backend-production
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: production
+    env:
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_SSH_PORT: ${{ secrets.DEPLOY_SSH_PORT }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      BACKEND_REMOTE_DIR: ${{ secrets.BACKEND_REMOTE_DIR }}
+      EVENT_SLUG: ${{ inputs.slug }}
+      HOTSPOT_FROM: ${{ inputs.hotspot_from }}
+      HOTSPOT_TO: ${{ inputs.hotspot_to }}
+      CAMS_FROM: ${{ inputs.cams_from }}
+      CAMS_TO: ${{ inputs.cams_to }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate operation arguments and secrets
+        env:
+          VPN_CONFIG_B64: ${{ secrets.VPN_CONFIG_B64 }}
+          VPN_AUTH_B64: ${{ secrets.VPN_AUTH_B64 }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+        run: |
+          python3 - <<'PY'
+          import os, re
+          from datetime import date, datetime, timezone
+          required = ['DEPLOY_HOST','DEPLOY_SSH_PORT','DEPLOY_USER','BACKEND_REMOTE_DIR',
+                      'VPN_CONFIG_B64','VPN_AUTH_B64','SSH_KNOWN_HOSTS','SSH_PASSWORD']
+          if any(not os.environ.get(key) for key in required):
+              raise SystemExit('Required production operation secret is missing')
+          if os.environ['EVENT_SLUG'] not in {'sumatra-2026','kalimantan-2026'}:
+              raise SystemExit('Unsupported wildfire event')
+          if not re.fullmatch(r'/[A-Za-z0-9_./-]+',os.environ['BACKEND_REMOTE_DIR']):
+              raise SystemExit('Invalid backend directory')
+          if not os.environ['DEPLOY_SSH_PORT'].isdigit() or not 1 <= int(os.environ['DEPLOY_SSH_PORT']) <= 65535:
+              raise SystemExit('Invalid SSH port')
+          today = datetime.now(timezone.utc).date()
+          for prefix, maximum in [('HOTSPOT',90),('CAMS',31)]:
+              values = [os.environ[prefix+'_FROM'],os.environ[prefix+'_TO']]
+              if any(not re.fullmatch(r'\d{4}-\d{2}-\d{2}',value) for value in values):
+                  raise SystemExit('Date must have YYYY-MM-DD format')
+              start,end = map(date.fromisoformat,values)
+              if start > end or end > today or (end-start).days+1 > maximum:
+                  raise SystemExit('Requested dates are invalid or exceed the operation limit')
+          print('Validated wildfire data refresh arguments')
+          PY
+
+      - name: Install VPN and SSH tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openvpn sshpass netcat-openbsd
+
+      - name: Connect production VPN
+        env:
+          VPN_CONFIG_B64: ${{ secrets.VPN_CONFIG_B64 }}
+          VPN_AUTH_B64: ${{ secrets.VPN_AUTH_B64 }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$VPN_CONFIG_B64" | base64 --decode > "$RUNNER_TEMP/wildfire-client.ovpn"
+          printf '%s' "$VPN_AUTH_B64" | base64 --decode > "$RUNNER_TEMP/wildfire-auth.txt"
+          chmod 600 "$RUNNER_TEMP/wildfire-client.ovpn" "$RUNNER_TEMP/wildfire-auth.txt"
+          sudo openvpn --config "$RUNNER_TEMP/wildfire-client.ovpn" \
+            --auth-user-pass "$RUNNER_TEMP/wildfire-auth.txt" \
+            --daemon --writepid "$RUNNER_TEMP/wildfire-vpn.pid" --log "$RUNNER_TEMP/wildfire-vpn.log"
+          for attempt in $(seq 1 30); do
+            nc -z -w 3 "$DEPLOY_HOST" "$DEPLOY_SSH_PORT" && exit 0
+            sleep 3
+          done
+          sudo cat "$RUNNER_TEMP/wildfire-vpn.log"
+          exit 1
+
+      - name: Configure SSH host verification
+        env:
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Synchronize and verify production data
+        env:
+          SSHPASS: ${{ secrets.SSH_PASSWORD }}
+        run: |
+          set -euo pipefail
+          sshpass -e scp -P "$DEPLOY_SSH_PORT" scripts/verify_wildfire_data.py \
+            "$DEPLOY_USER@$DEPLOY_HOST:$BACKEND_REMOTE_DIR/var/verify_wildfire_data_operation.py"
+          cat > "$RUNNER_TEMP/refresh-wildfire.sh" <<'REMOTE_SYNC'
+          set -euo pipefail
+          cd "$1"
+          slug="$2"
+          hotspot_from="$3"
+          hotspot_to="$4"
+          cams_from="$5"
+          cams_to="$6"
+          docker compose -f docker-compose.prod.yml exec -T api \
+            python -m scripts.sync_wildfire_hotspots --slug "$slug" --from "$hotspot_from" --to "$hotspot_to"
+          docker compose -f docker-compose.prod.yml exec -T api \
+            python -m scripts.sync_cams_archive --slug "$slug" --from "$cams_from" --to "$cams_to" --forecast
+          docker compose -f docker-compose.prod.yml exec -T api \
+            python /app/var/verify_wildfire_data_operation.py --slug "$slug" \
+              --from "$hotspot_from" --to "$hotspot_to" --output "/app/var/wildfire-$slug-verification.json"
+          REMOTE_SYNC
+          sshpass -e ssh -p "$DEPLOY_SSH_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
+            "bash -s -- '$BACKEND_REMOTE_DIR' '$EVENT_SLUG' '$HOTSPOT_FROM' '$HOTSPOT_TO' '$CAMS_FROM' '$CAMS_TO'" \
+            < "$RUNNER_TEMP/refresh-wildfire.sh"
+          mkdir -p operation-report
+          sshpass -e scp -P "$DEPLOY_SSH_PORT" \
+            "$DEPLOY_USER@$DEPLOY_HOST:$BACKEND_REMOTE_DIR/var/wildfire-$EVENT_SLUG-verification.json" \
+            operation-report/verification.json
+
+      - name: Upload production data verification
+        uses: actions/upload-artifact@v4
+        with:
+          name: wildfire-production-${{ inputs.slug }}
+          path: operation-report/verification.json
+          if-no-files-found: error
+
+      - name: Disconnect operation VPN
+        if: always()
+        run: |
+          if [ -s "$RUNNER_TEMP/wildfire-vpn.pid" ]; then
+            sudo kill "$(cat "$RUNNER_TEMP/wildfire-vpn.pid")" || true
+          fi
+          rm -f "$RUNNER_TEMP/wildfire-auth.txt" "$RUNNER_TEMP/wildfire-client.ovpn"
