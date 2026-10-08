@@ -8,14 +8,18 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import tempfile
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import BoundedSemaphore
 from urllib.parse import urlparse
 
 import requests
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
-from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -42,7 +46,7 @@ from app.db.models.role import Permission, Role
 from app.db.models.satellite_provider_entry import SatelliteProviderEntry
 from app.db.models.system_config import SystemConfig
 from app.db.models.uploaded_model import UploadedModel
-from app.db.session import get_db
+from app.db.session import SessionLocal, get_db
 from app.registries.satellite_provider_registry import SATELLITE_PROVIDERS
 from app.repositories.satellite_provider_repo import apply_override, get_overrides_by_key
 from app.repositories import imagery_provider_repo
@@ -852,54 +856,86 @@ _OSM_TAGS_MAP = {
     ],
 }
 
-_CARTO_BASE = "https://wri-rw.carto.com/api/v2/sql"
-
-# CARTO table names used by WRI/GFW for Indonesia concessions.
-_GFW_CARTO = {
-    "mining": {
-        "sql": (
-            "SELECT ST_AsGeoJSON(the_geom) AS geojson, gid, name, country, area_km2 "
-            "FROM global_mining_2019_v2 WHERE lower(country) IN ('indonesia', 'idn') LIMIT 500"
-        ),
-        "industry_type": "mining",
-        "name_fields": ["name", "gid"],
-        "company_field": None,
-        "province_field": None,
-    },
-    "palm_oil": {
-        "sql": (
-            "SELECT ST_AsGeoJSON(the_geom) AS geojson, group_name, company_name, "
-            "area_ha, prov_name, kab_name "
-            "FROM idn_oil_palm_concessions LIMIT 500"
-        ),
-        "industry_type": "plantation",
-        "name_fields": ["group_name", "company_name"],
-        "company_field": "company_name",
-        "province_field": "prov_name",
-        "district_field": "kab_name",
-    },
-    "timber": {
-        "sql": (
-            "SELECT ST_AsGeoJSON(the_geom) AS geojson, nama, perusahaan, "
-            "propinsi, kabupaten, luas_ha "
-            "FROM idn_hph_concessions LIMIT 500"
-        ),
-        "industry_type": "forestry",
-        "name_fields": ["nama", "perusahaan"],
-        "company_field": "perusahaan",
-        "province_field": "propinsi",
-        "district_field": "kabupaten",
-    },
-}
+_COMPANY_IMPORT_WORKERS = max(1, int(os.getenv("COMPANY_IMPORT_WORKERS", "1")))
+_company_import_executor = ThreadPoolExecutor(
+    max_workers=_COMPANY_IMPORT_WORKERS,
+    thread_name_prefix="company-import",
+)
+_company_import_slots = BoundedSemaphore(_COMPANY_IMPORT_WORKERS + 1)
 
 
-def _first_val(d: dict, fields: list) -> str:
-    """Return first non-empty string from dict d for a list of field names."""
-    for f in fields:
-        v = d.get(f)
-        if v:
-            return str(v).strip()
-    return ""
+def _company_import_jobs_dir() -> Path:
+    path = Path(get_settings().upload_dir).resolve().parent / "company-import-jobs"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _company_import_job_path(job_id: str) -> Path:
+    try:
+        safe_id = str(uuid.UUID(job_id))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise HTTPException(status_code=400, detail="ID job impor tidak valid") from exc
+    return _company_import_jobs_dir() / f"{safe_id}.json"
+
+
+def _write_company_import_job(job_id: str, changes: dict) -> None:
+    path = _company_import_job_path(job_id)
+    current = {}
+    if path.exists():
+        with path.open("r", encoding="utf-8") as stream:
+            current = json.load(stream)
+    data = {**current, **changes, "updated_at": datetime.now(UTC).isoformat()}
+    descriptor, temporary_path = tempfile.mkstemp(prefix=f"{job_id}.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(data, stream, ensure_ascii=False, separators=(",", ":"))
+        os.replace(temporary_path, path)
+    finally:
+        if os.path.exists(temporary_path):
+            os.unlink(temporary_path)
+
+
+def _read_company_import_job(job_id: str) -> dict:
+    path = _company_import_job_path(job_id)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Job impor tidak ditemukan")
+    with path.open("r", encoding="utf-8") as stream:
+        return json.load(stream)
+
+
+def _queue_company_import(job_type: str, payload: dict, admin_id: int) -> dict:
+    if not _company_import_slots.acquire(blocking=False):
+        raise HTTPException(
+            status_code=429,
+            detail="Impor perusahaan lain sedang diproses. Coba lagi sebentar.",
+            headers={"Retry-After": "30"},
+        )
+
+    job_id = str(uuid.uuid4())
+    try:
+        _write_company_import_job(
+            job_id,
+            {
+                "job_id": job_id,
+                "type": job_type,
+                "status": "queued",
+                "message": "Impor masuk antrean.",
+                "owner": admin_id,
+                "created_at": datetime.now(UTC).isoformat(),
+            },
+        )
+        future = _company_import_executor.submit(_run_company_import, job_id, job_type, payload, admin_id)
+        future.add_done_callback(lambda _future: _company_import_slots.release())
+    except Exception:
+        _company_import_slots.release()
+        raise
+
+    return {
+        "job_id": job_id,
+        "type": job_type,
+        "status": "queued",
+        "status_url": f"/admin/companies/import/jobs/{job_id}",
+    }
 
 
 def _osm_named_boundary_filters(industry_types: list[str]) -> list[str]:
@@ -963,48 +999,6 @@ def _osm_element_to_geojson(element: dict) -> dict | None:
             return {"type": "Polygon", "coordinates": outer_rings}
         return {"type": "MultiPolygon", "coordinates": [[ring] for ring in outer_rings]}
     return None
-
-
-def _import_gfw_rows(db: Session, admin: AdminUser, rows: list, ds: dict, dataset_key: str) -> dict:
-    """Parse GFW CARTO rows (non-GeoJSON fallback format) - each row has a
-    `geojson` string field instead of a real GeoJSON FeatureCollection."""
-    imported, skipped = 0, 0
-    for row in rows:
-        name = _first_val(row, ds["name_fields"])
-        if not name:
-            skipped += 1
-            continue
-        if db.query(CompanyBoundary).filter_by(name=name, source="gfw").first():
-            skipped += 1
-            continue
-        geojson_str = row.get("geojson")
-        if not geojson_str:
-            skipped += 1
-            continue
-        try:
-            geom = json.loads(geojson_str)
-        except Exception:  # noqa: BLE001
-            skipped += 1
-            continue
-        feature_obj = {"type": "Feature", "geometry": geom, "properties": row}
-        company = CompanyBoundary(
-            name=name,
-            company_name=row.get(ds.get("company_field") or "") or None,
-            industry_type=ds["industry_type"],
-            province=row.get(ds.get("province_field") or "") or None,
-            district=row.get(ds.get("district_field") or "") or None,
-            description=f"Diimpor dari GFW/WRI CARTO. Dataset: {dataset_key}",
-            geojson=feature_obj,
-            area_ha=row.get("area_ha") or row.get("luas_ha") or (row.get("area_km2", 0) or 0) * 100 or estimate_area_ha(feature_obj),
-            source="gfw",
-            source_url="https://www.globalforestwatch.org/",
-            is_active=True,
-        )
-        db.add(company)
-        imported += 1
-    db.commit()
-    audit_service.log_audit(db, admin.id, "company.import_gfw", "company_boundary", None, detail={"dataset": dataset_key, "imported": imported, "skipped": skipped})
-    return {"imported": imported, "skipped": skipped}
 
 
 @router.get("/companies")
@@ -1165,50 +1159,52 @@ def admin_company_delete(cid: int, admin: AdminUser = Depends(require_permission
 
 
 def _fetch_osm_overpass(overpass_query: str) -> tuple[dict | None, str]:
-    """Blocking network fetch, run off the event loop via run_in_threadpool -
-    each Overpass mirror gets up to 320s, and `requests` has no async form."""
+    """Fetch OSM data from Overpass mirrors. This runs in an import worker."""
     osm_data = None
     last_error = ""
     for server in _OVERPASS_SERVERS:
         try:
-            resp = requests.post(server, data={"data": overpass_query}, timeout=320)
+            resp = requests.post(
+                server,
+                data={"data": overpass_query},
+                headers={"User-Agent": "SaveGeo company-boundary importer/1.0"},
+                timeout=(15, 105),
+            )
             if resp.status_code == 200:
-                osm_data = resp.json()
+                payload = resp.json()
+                if payload.get("remark") and not payload.get("elements"):
+                    last_error = str(payload["remark"])
+                    continue
+                osm_data = payload
                 break
             last_error = f"HTTP {resp.status_code} dari {server}"
-        except Exception as e:  # noqa: BLE001 - any per-mirror failure just falls through to the next server
+        except (requests.RequestException, ValueError) as e:
             last_error = f"{server}: {e}"
     return osm_data, last_error
 
 
-@router.post("/companies/import/osm")
-async def admin_companies_import_osm(
-    request: Request,
-    admin: AdminUser = Depends(require_permission("company.write")),
-    db: Session = Depends(get_db),
-):
-    """Import company boundaries from OpenStreetMap Overpass API."""
-    data = await request.json()
-    industry_types = data.get("industry_types") or list(INDUSTRY_TYPES)
-
+def _perform_osm_company_import(db: Session, admin: AdminUser, industry_types: list[str], progress) -> dict:
     filters = _osm_named_boundary_filters(industry_types)
     if not filters:
         raise HTTPException(status_code=400, detail="Tidak ada tipe industri yang valid")
 
     overpass_query = (
-        '[out:json][timeout:300][maxsize:536870912];\n'
+        '[out:json][timeout:90][maxsize:536870912];\n'
         'area["ISO3166-1"="ID"][admin_level=2]->.searchArea;\n'
         f"({chr(10).join(filters)});\n"
         "out geom qt;"
     )
 
-    osm_data, last_error = await run_in_threadpool(_fetch_osm_overpass, overpass_query)
+    progress("Mengambil data dari OpenStreetMap/Overpass...")
+    osm_data, last_error = _fetch_osm_overpass(overpass_query)
     if osm_data is None:
-        logger.warning("Overpass import failed")
-        raise HTTPException(status_code=502, detail="Semua server Overpass gagal. Coba lagi nanti.")
+        logger.warning("Overpass company import failed: %s", last_error)
+        raise RuntimeError(f"Semua server Overpass gagal. {last_error[:300]} Coba lagi nanti.")
 
+    elements = osm_data.get("elements", [])
+    progress(f"Menyimpan {len(elements)} objek OSM ke basis data...")
     imported, skipped, errors = 0, 0, []
-    for element in osm_data.get("elements", []):
+    for element in elements:
         tags = element.get("tags", {})
         name = tags.get("name") or tags.get("operator") or tags.get("ref")
         if not name:
@@ -1251,79 +1247,97 @@ async def admin_companies_import_osm(
     return {"imported": imported, "skipped": skipped, "errors": errors[:10]}
 
 
-def _fetch_gfw_carto(ds: dict) -> dict:
-    """Blocking CARTO SQL API fetch, run off the event loop via run_in_threadpool.
-    Returns {"mode": "rows", "rows": [...]} (CARTO's row-based fallback format)
-    or {"mode": "fc", "fc": {...}} (GeoJSON FeatureCollection, the normal path)."""
-    resp = requests.get(_CARTO_BASE, params={"q": ds["sql"], "format": "GeoJSON"}, timeout=60)
-    if resp.status_code in (400, 404):
-        resp2 = requests.get(_CARTO_BASE, params={"q": ds["sql"]}, timeout=60)
-        resp2.raise_for_status()
-        raw = resp2.json()
-        return {"mode": "rows", "rows": raw.get("rows", [])}
-    resp.raise_for_status()
-    return {"mode": "fc", "fc": resp.json()}
+@router.post("/companies/import/osm", status_code=202)
+async def admin_companies_import_osm(
+    request: Request,
+    admin: AdminUser = Depends(require_permission("company.write")),
+):
+    """Queue an OSM import so Overpass latency cannot hold open the gateway request."""
+    try:
+        data = await request.json()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Body JSON tidak valid") from exc
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="Body harus berupa objek JSON")
+    requested_types = data.get("industry_types") or list(INDUSTRY_TYPES)
+    if not isinstance(requested_types, list):
+        raise HTTPException(status_code=400, detail="industry_types harus berupa daftar")
+    industry_types = list(
+        dict.fromkeys(value for value in requested_types if isinstance(value, str) and value in INDUSTRY_TYPES)
+    )
+    if not industry_types:
+        raise HTTPException(status_code=400, detail="Tidak ada tipe industri yang valid")
+    return _queue_company_import("osm", {"industry_types": industry_types}, admin.id)
+
+
+def _run_company_import(job_id: str, job_type: str, payload: dict, admin_id: int) -> None:
+    _write_company_import_job(
+        job_id,
+        {"status": "running", "message": "Impor sedang diproses.", "started_at": datetime.now(UTC).isoformat()},
+    )
+    db = SessionLocal()
+    try:
+        admin = db.get(AdminUser, admin_id)
+        if admin is None:
+            raise RuntimeError("Akun administrator pemilik job tidak ditemukan.")
+
+        def progress(message: str) -> None:
+            _write_company_import_job(job_id, {"status": "running", "message": message})
+
+        if job_type == "osm":
+            result = _perform_osm_company_import(db, admin, payload["industry_types"], progress)
+        else:
+            raise RuntimeError("Jenis impor tidak dikenal.")
+        _write_company_import_job(
+            job_id,
+            {
+                "status": "completed",
+                "message": "Impor selesai.",
+                "result": result,
+                "finished_at": datetime.now(UTC).isoformat(),
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 - status is recorded for the polling client
+        db.rollback()
+        logger.exception("Company boundary %s import job %s failed", job_type, job_id)
+        error = exc.detail if isinstance(exc, HTTPException) else str(exc)
+        _write_company_import_job(
+            job_id,
+            {
+                "status": "failed",
+                "message": "Impor gagal.",
+                "error": str(error or "Kesalahan internal saat mengimpor.")[:600],
+                "finished_at": datetime.now(UTC).isoformat(),
+            },
+        )
+    finally:
+        db.close()
 
 
 @router.post("/companies/import/gfw")
 async def admin_companies_import_gfw(
-    request: Request,
-    admin: AdminUser = Depends(require_permission("company.write")),
-    db: Session = Depends(get_db),
+    _admin: AdminUser = Depends(require_permission("company.write")),
 ):
-    """Import Indonesia concession boundaries from Global Forest Watch via
-    CARTO SQL API. Ported from legacy backend/admin_routes.py::import_from_gfw."""
-    data = await request.json()
-    dataset_key = data.get("dataset", "mining")
-    if dataset_key not in _GFW_CARTO:
-        raise HTTPException(status_code=400, detail=f"Dataset tidak dikenal. Pilih: {list(_GFW_CARTO)}")
-    ds = _GFW_CARTO[dataset_key]
+    """Reject the retired bulk importer with the actual WRI data restriction."""
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            "Impor konsesi Indonesia dari GFW tidak tersedia: WRI membatasi dataset ini "
+            "untuk tampilan saja dan tidak mengizinkan unduhan publik. Unggah GeoJSON "
+            "yang Anda miliki hak aksesnya melalui formulir batas perusahaan."
+        ),
+    )
 
-    try:
-        result = await run_in_threadpool(_fetch_gfw_carto, ds)
-    except HTTPException:
-        raise
-    except Exception as e:  # noqa: BLE001 - surfaced to the client as a 502 either way
-        raise HTTPException(status_code=502, detail="GFW/CARTO API sementara tidak tersedia") from e
 
-    if result["mode"] == "rows":
-        return _import_gfw_rows(db, admin, result["rows"], ds, dataset_key)
-    fc = result["fc"]
-
-    imported, skipped = 0, 0
-    for feat in fc.get("features", []):
-        props = feat.get("properties") or {}
-        name = _first_val(props, ds["name_fields"])
-        if not name:
-            skipped += 1
-            continue
-        if db.query(CompanyBoundary).filter_by(name=name, source="gfw").first():
-            skipped += 1
-            continue
-        geom = feat.get("geometry")
-        if not geom:
-            skipped += 1
-            continue
-        feature_obj = {"type": "Feature", "geometry": geom, "properties": props}
-        company = CompanyBoundary(
-            name=name,
-            company_name=props.get(ds.get("company_field") or "") or None,
-            industry_type=ds["industry_type"],
-            province=props.get(ds.get("province_field") or "") or None,
-            district=props.get(ds.get("district_field") or "") or None,
-            description=f"Diimpor dari GFW/WRI CARTO. Dataset: {dataset_key}",
-            geojson=feature_obj,
-            area_ha=props.get("area_ha") or props.get("luas_ha") or (props.get("area_km2", 0) or 0) * 100 or estimate_area_ha(feature_obj),
-            source="gfw",
-            source_url="https://www.globalforestwatch.org/",
-            is_active=True,
-        )
-        db.add(company)
-        imported += 1
-
-    db.commit()
-    audit_service.log_audit(db, admin.id, "company.import_gfw", "company_boundary", None, detail={"dataset": dataset_key, "imported": imported, "skipped": skipped})
-    return {"imported": imported, "skipped": skipped}
+@router.get("/companies/import/jobs/{job_id}")
+def admin_companies_import_job_status(
+    job_id: str,
+    admin: AdminUser = Depends(require_permission("company.write")),
+):
+    job = _read_company_import_job(job_id)
+    if job.get("owner") != admin.id:
+        raise HTTPException(status_code=404, detail="Job impor tidak ditemukan")
+    return {key: value for key, value in job.items() if key != "owner"}
 
 
 # -- Satellite provider overlay (admin CRUD on top of the static registry) --

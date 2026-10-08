@@ -151,7 +151,7 @@ def compute_index_histogram(index_image, aoi, scale: int, min_val: float, max_va
 
 def _composite_for_period(
     db, aoi, year, start_month, end_month, cloud_threshold, satellite: str = "sentinel2",
-    cloud_mask_technique: str = "scl",
+    cloud_mask_technique: str = "scl", include_quality: bool = True,
 ):
     """Build a cloud-masked median composite for whichever satellite provider
     was requested, then standardize its bands to the canonical Sentinel-2-style
@@ -191,14 +191,15 @@ def _composite_for_period(
     # Data-quality signal: % of AOI actually covered by a cloud-free pixel in
     # this composite (same technique as CarbonInferenceEngine._safe_s2_composite).
     valid_pixel_pct = None
-    try:
-        first_band = composite.bandNames().get(0)
-        coverage = composite.select([first_band]).mask().reduceRegion(
-            reducer=ee.Reducer.mean(), geometry=aoi, scale=100, bestEffort=True, maxPixels=int(1e8), tileScale=4,
-        ).getInfo()
-        valid_pixel_pct = round(float(next(iter(coverage.values())) or 0) * 100, 1) if coverage else None
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"Valid-pixel coverage check failed: {e}")
+    if include_quality:
+        try:
+            first_band = composite.bandNames().get(0)
+            coverage = composite.select([first_band]).mask().reduceRegion(
+                reducer=ee.Reducer.mean(), geometry=aoi, scale=100, bestEffort=True, maxPixels=int(1e8), tileScale=4,
+            ).getInfo()
+            valid_pixel_pct = round(float(next(iter(coverage.values())) or 0) * 100, 1) if coverage else None
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Valid-pixel coverage check failed: {e}")
 
     return composite, collection, start_date, end_date, size, valid_pixel_pct
 
@@ -207,7 +208,7 @@ def _index_stats(index_image, idx, aoi, veg_scale):
     settings = get_settings()
     stats = index_image.reduceRegion(
         reducer=ee.Reducer.minMax().combine(ee.Reducer.mean().combine(ee.Reducer.stdDev(), sharedInputs=True), sharedInputs=True),
-        geometry=aoi, scale=veg_scale, maxPixels=int(settings.max_pixels), bestEffort=True
+        geometry=aoi, scale=veg_scale, maxPixels=int(settings.max_pixels), bestEffort=True, tileScale=4,
     ).getInfo()
     return {
         "min": stats.get(f"{idx}_min"), "mean": stats.get(f"{idx}_mean"),
@@ -356,20 +357,32 @@ def analyze_vegetation(db, data: dict) -> dict:
             skipped_indices.append({"index": idx, "reason": f"Band yang dibutuhkan ({', '.join(required)}) tidak tersedia pada sumber citra ini"})
             continue
 
-        native_scale = float(results["satellite"]["resolution_m"])
-        if satellite == "sentinel2" and any(b in {"B5", "B6", "B7", "B8A", "B11", "B12"} for b in VEGETATION_INDICES[idx]["bands"]):
-            native_scale = 20
-        index_scale = max(veg_scale, native_scale)
-        index_image = calculate_index(median_composite, idx)
-        stats = _index_stats(index_image, idx, aoi, index_scale)
-        vis_params = {"min": VEGETATION_INDICES[idx]["range"][0], "max": VEGETATION_INDICES[idx]["range"][1], "palette": VEGETATION_INDICES[idx]["palette"]}
-        tile = get_tile_url(index_image, vis_params, idx)
+        try:
+            native_scale = float(results["satellite"]["resolution_m"])
+            if satellite == "sentinel2" and any(b in {"B5", "B6", "B7", "B8A", "B11", "B12"} for b in VEGETATION_INDICES[idx]["bands"]):
+                native_scale = 20
+            index_scale = max(veg_scale, native_scale)
+            index_image = calculate_index(median_composite, idx)
+            stats = _index_stats(index_image, idx, aoi, index_scale)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Vegetation index %s statistics failed (%s)", idx, type(exc).__name__)
+            skipped_indices.append({"index": idx, "reason": "Statistik indeks ini gagal dihitung; indeks lain tetap diproses"})
+            continue
 
+        vis_params = {"min": VEGETATION_INDICES[idx]["range"][0], "max": VEGETATION_INDICES[idx]["range"][1], "palette": VEGETATION_INDICES[idx]["palette"]}
+        try:
+            tile = get_tile_url(index_image, vis_params, idx)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Vegetation index %s tile generation failed (%s)", idx, type(exc).__name__)
+            tile = None
         classification = None
         if want_classify:
-            classification = summarize_vegetation_classes(index_image, idx, aoi, index_scale)
-            if classification:
-                classification["tile_url"] = vegetation_classification_tile(index_image, idx, idx)
+            try:
+                classification = summarize_vegetation_classes(index_image, idx, aoi, index_scale)
+                if classification:
+                    classification["tile_url"] = vegetation_classification_tile(index_image, idx, idx)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Vegetation index %s classification failed (%s)", idx, type(exc).__name__)
 
         histogram = None
         if want_histogram:
@@ -467,32 +480,140 @@ def analyze_timeseries(db, data: dict) -> dict:
         raise AnalysisError("aoi is required", 400)
 
     year = int(data.get("year", 2022))
-    index_name = data.get("index", "NDVI")
-    interval = data.get("interval", "monthly")
+    interval = str(data.get("interval", "monthly")).lower()
+    if interval != "monthly":
+        raise AnalysisError("Interval time-series vegetasi harus monthly", 400)
+
+    raw_indices = data.get("indices")
+    if raw_indices is None:
+        raw_indices = [data.get("index", "NDVI")]
+    elif isinstance(raw_indices, str):
+        raw_indices = [value.strip() for value in raw_indices.split(",") if value.strip()]
+    if not isinstance(raw_indices, (list, tuple)):
+        raise AnalysisError("indices harus berupa daftar kode indeks", 400)
+    indices = list(dict.fromkeys(str(value).strip().upper() for value in raw_indices if str(value).strip()))
+    unknown_indices = [value for value in indices if value not in VEGETATION_INDICES]
+    if unknown_indices:
+        raise AnalysisError(f"Indeks vegetasi tidak dikenal: {', '.join(unknown_indices)}", 400)
+
+    raw_bands = data.get("bands", [])
+    if isinstance(raw_bands, str):
+        raw_bands = [value.strip() for value in raw_bands.split(",") if value.strip()]
+    if not isinstance(raw_bands, (list, tuple)):
+        raise AnalysisError("bands harus berupa daftar band spektral", 400)
+    supported_bands = {"B2", "B3", "B4", "B5", "B6", "B7", "B8", "B8A", "B11", "B12"}
+    bands = list(dict.fromkeys(str(value).strip().upper() for value in raw_bands if str(value).strip()))
+    unknown_bands = [value for value in bands if value not in supported_bands]
+    if unknown_bands:
+        raise AnalysisError(f"Band spektral tidak didukung: {', '.join(unknown_bands)}", 400)
+    if not indices and not bands:
+        raise AnalysisError("Pilih sedikitnya satu indeks vegetasi atau band spektral", 400)
+
+    start_month = int(data.get("start_month", data.get("month_from", 1)))
+    end_month = int(data.get("end_month", data.get("month_to", 12)))
+    if not 1 <= start_month <= end_month <= 12:
+        raise AnalysisError("Rentang bulan harus berada di antara 1 dan 12, dengan bulan awal tidak melebihi bulan akhir", 400)
+
     cloud_threshold = int(data.get("cloud_threshold", config_service.get_analysis_defaults(db)["cloud_threshold"]))
     veg_scale = int(data.get("scale", config_service.get_analysis_defaults(db)["veg_scale"]))
     satellite = resolve_satellite(data.get("satellite"))
     cloud_mask_technique = resolve_cloud_mask_technique(data.get("cloud_mask_technique"))
     aoi = create_geometry_from_payload(data["aoi"])
 
-    months = list(range(1, 13)) if interval == "monthly" else []
+    months = list(range(start_month, end_month + 1))
+    metric_names = [*indices, *bands]
+    series = {
+        name: {
+            "kind": "index" if name in indices else "band",
+            "unit": "index" if name in indices else "surface_reflectance",
+            "data": [],
+        }
+        for name in metric_names
+    }
+    period_errors: list[str] = []
+    failed_periods = 0
+    months_with_imagery = 0
+    unavailable_metrics = set(metric_names)
+    satellite_meta = get_satellite_meta(db, satellite)
+    max_pixels = int(config_service.get_analysis_defaults(db)["max_pixels"])
+    required_bands = {
+        band
+        for metric in metric_names
+        for band in (VEGETATION_INDICES[metric]["bands"] if metric in indices else [metric])
+    }
+    analysis_scale = max(veg_scale, int(satellite_meta.get("resolution_m") or veg_scale))
+    if satellite == "sentinel2" and required_bands.intersection({"B5", "B6", "B7", "B8A", "B11", "B12"}):
+        analysis_scale = max(analysis_scale, 20)
 
-    time_series = []
+    # One composite and one combined reduction per month. The old endpoint did
+    # an extra coverage reduction and one blocking getInfo per selected index,
+    # so a year of N indices could trigger 12 * (N + 1) aggregations.
     for month in months:
         label = f"{year}-{month:02d}"
-        composite, _, _, _, _size, _valid_pct = _composite_for_period(db, aoi, year, month, month, cloud_threshold, satellite, cloud_mask_technique)
-        if composite is not None:
-            stats = calculate_index(composite, index_name).reduceRegion(
-                reducer=ee.Reducer.mean(), geometry=aoi, scale=veg_scale,
-                maxPixels=config_service.get_analysis_defaults(db)["max_pixels"], bestEffort=True
-            ).getInfo()
-            time_series.append({"period": label, "value": stats.get(index_name)})
+        try:
+            composite, _, _, _, _size, _valid_pct = _composite_for_period(
+                db, aoi, year, month, month, cloud_threshold, satellite,
+                cloud_mask_technique, include_quality=False,
+            )
+            if composite is None:
+                for metric in metric_names:
+                    series[metric]["data"].append({"period": label, "value": None})
+                continue
+
+            months_with_imagery += 1
+            available_bands = composite.bandNames().getInfo()
+            metric_images = []
+            for index_name in indices:
+                if available_bands_for_index(index_name, available_bands):
+                    metric_images.append(calculate_index(composite, index_name).rename(index_name))
+                    unavailable_metrics.discard(index_name)
+            for band_name in bands:
+                if band_name in available_bands:
+                    metric_images.append(composite.select([band_name]).rename(band_name))
+                    unavailable_metrics.discard(band_name)
+
+            if metric_images:
+                stack = ee.Image.cat(metric_images)
+                stats = stack.reduceRegion(
+                    reducer=ee.Reducer.mean(), geometry=aoi, scale=analysis_scale,
+                    maxPixels=max_pixels, bestEffort=True, tileScale=4,
+                ).getInfo() or {}
+                for metric in metric_names:
+                    value = stats.get(metric)
+                    series[metric]["data"].append({
+                        "period": label,
+                        "value": float(value) if value is not None else None,
+                    })
+            else:
+                for metric in metric_names:
+                    series[metric]["data"].append({"period": label, "value": None})
+        except Exception as exc:  # noqa: BLE001
+            failed_periods += 1
+            period_errors.append(label)
+            logger.warning("Vegetation time-series reduction failed for %s (%s)", label, type(exc).__name__, exc_info=True)
+            for metric in metric_names:
+                series[metric]["data"].append({"period": label, "value": None})
+
+    if failed_periods and failed_periods == len(months):
+        raise AnalysisError("Time-series vegetasi gagal dihitung untuk semua bulan. Coba AOI lebih kecil atau skala analisis yang lebih kasar.", 503)
+
+    if months_with_imagery:
+        for metric in unavailable_metrics:
+            series[metric]["availability"] = "Band yang dibutuhkan tidak tersedia pada sensor atau periode ini"
+
+    primary_index = indices[0] if indices else None
+    legacy_data = series[primary_index]["data"] if primary_index else []
 
     return {
-        "index": index_name, "year": year, "interval": interval, "scale": veg_scale,
-        "satellite": get_satellite_meta(db, satellite),
+        "index": primary_index, "indices": indices, "bands": bands,
+        "year": year, "interval": interval, "start_month": start_month, "end_month": end_month,
+        "periods": [f"{year}-{month:02d}" for month in months],
+        "scale": analysis_scale,
+        "satellite": satellite_meta,
         "cloud_mask_technique": cloud_mask_technique,
-        "data": time_series,
+        "series": series,
+        "data": legacy_data,
+        "period_errors": period_errors,
     }
 
 

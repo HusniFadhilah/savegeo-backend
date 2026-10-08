@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
+from urllib.parse import urlencode
 
 import requests
 
@@ -16,6 +18,8 @@ DEFAULT_PRODUCT = "stock"
 PC_STAC_URL = "https://planetarycomputer.microsoft.com/api/stac/v1"
 PC_CHLORIS_COLLECTION = "chloris-biomass"
 PC_CHLORIS_YEAR_RANGE = (2003, 2019)
+PC_DATA_API_URL = "https://planetarycomputer.microsoft.com/api/data/v1"
+CHLORIS_BIOMASS_TO_CARBON_FRACTION = 0.47
 
 
 @dataclass(frozen=True)
@@ -177,6 +181,80 @@ def _resolve_planetary_computer_download(year: int | None = None) -> ChlorisDown
             "license": "CC-BY-NC-SA-4.0",
         },
     )
+
+
+@lru_cache(maxsize=20)
+def _planetary_computer_chloris_item(year: int) -> tuple[str, float]:
+    """Return the STAC item id and equal-area pixel area (ha) for one year."""
+    requested_year = int(year)
+    if requested_year < PC_CHLORIS_YEAR_RANGE[0] or requested_year > PC_CHLORIS_YEAR_RANGE[1]:
+        raise ValueError(
+            f"Planetary Computer Chloris hanya menyediakan tahun {PC_CHLORIS_YEAR_RANGE[0]}-"
+            f"{PC_CHLORIS_YEAR_RANGE[1]}; tahun yang diminta: {requested_year}."
+        )
+
+    response = requests.post(
+        f"{PC_STAC_URL}/search",
+        json={
+            "collections": [PC_CHLORIS_COLLECTION],
+            "datetime": f"{requested_year}-01-01T00:00:00Z/{requested_year}-12-31T23:59:59Z",
+            "limit": 10,
+        },
+        timeout=(5, 20),
+    )
+    response.raise_for_status()
+    items = response.json().get("features", [])
+    if not items:
+        raise ValueError(f"Tidak ada item STAC Chloris untuk tahun {requested_year}.")
+
+    item = sorted(
+        items,
+        key=lambda candidate: str(candidate.get("properties", {}).get("datetime") or ""),
+        reverse=True,
+    )[0]
+    item_id = item.get("id")
+    properties = item.get("properties") or {}
+    if not item_id or "biomass" not in (item.get("assets") or {}):
+        raise ValueError(f"Item STAC Chloris tahun {requested_year} tidak memiliki asset biomass.")
+
+    transform = properties.get("proj:transform")
+    if isinstance(transform, list) and len(transform) >= 6:
+        pixel_area_m2 = abs(
+            float(transform[0]) * float(transform[4])
+            - float(transform[1]) * float(transform[3])
+        )
+    else:
+        pixel_size = float(properties.get("gsd") or 0)
+        pixel_area_m2 = pixel_size**2
+    if pixel_area_m2 <= 0:
+        raise ValueError(f"Item STAC Chloris '{item_id}' tidak memiliki resolusi raster yang valid.")
+
+    return str(item_id), pixel_area_m2 / 10_000
+
+
+def resolve_planetary_computer_tile_url(
+    year: int,
+    vis_min: float,
+    vis_max: float,
+    carbon_fraction: float = CHLORIS_BIOMASS_TO_CARBON_FRACTION,
+) -> str:
+    """Build a public PC tile URL scaled to the app's Mg C/ha visualization."""
+    if vis_max <= vis_min:
+        raise ValueError("Nilai visualisasi maksimum harus lebih besar dari minimum.")
+    item_id, pixel_area_ha = _planetary_computer_chloris_item(int(year))
+    tonnes_per_pixel_min = vis_min * pixel_area_ha / carbon_fraction
+    tonnes_per_pixel_max = vis_max * pixel_area_ha / carbon_fraction
+    query = urlencode(
+        {
+            "collection": PC_CHLORIS_COLLECTION,
+            "item": item_id,
+            "assets": "biomass",
+            "colormap_name": "chloris-biomass",
+            "rescale": f"{tonnes_per_pixel_min:g},{tonnes_per_pixel_max:g}",
+            "format": "png",
+        }
+    )
+    return f"{PC_DATA_API_URL}/item/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}@1x?{query}"
 
 
 def _get_data_path() -> str:

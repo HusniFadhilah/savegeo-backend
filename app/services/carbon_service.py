@@ -11,6 +11,7 @@ from __future__ import annotations
 import itertools
 import json
 import logging
+import os
 import time
 from datetime import UTC, datetime
 
@@ -62,15 +63,37 @@ def get_direct_carbon_reference_layer(
     vis_min: float | None = None,
     vis_max: float | None = None,
     vis_palette: list[str] | None = None,
+    use_public_chloris_tiles: bool = False,
 ) -> dict:
     """Build a global reference tile layer without AOI statistics/model inference.
 
     AOI remains required for summaries and totals, but a reference raster can
-    be viewed globally using its native COG, ArcGIS, or Earth Engine tiles.
+    be viewed globally using its native COG, ArcGIS, Earth Engine, or public
+    Planetary Computer tiles when Earth Engine is unavailable for Chloris.
     """
     from app.services.arcgis_helpers import _gee_visualize_params
 
     meta = get_dataset_meta(dataset_key, dataset_year)
+    if meta.get("ingestion_method") == "mask_only":
+        replacement_key = meta.get("replacement_key")
+        if replacement_key and replacement_key != dataset_key:
+            replacement_layer = get_direct_carbon_reference_layer(
+                replacement_key,
+                dataset_year,
+                vis_min=vis_min,
+                vis_max=vis_max,
+                vis_palette=vis_palette,
+                use_public_chloris_tiles=use_public_chloris_tiles,
+            )
+            replacement_layer["requested_dataset"] = dataset_key
+            replacement_layer["load_note"] = (
+                str(meta.get("name") or dataset_key)
+                + " hanya menyediakan mask extent mangrove, bukan raster AGB/densitas karbon. "
+                + "Layer diganti otomatis ke " + str(replacement_key) + "."
+            )
+            return replacement_layer
+        detail = "Dataset " + str(meta.get("name") or dataset_key) + " hanya menyediakan mask extent mangrove, bukan raster AGB atau densitas karbon."
+        raise AnalysisError(detail, 422)
     available_years = meta.get("available_years")
     if available_years and dataset_year not in available_years:
         raise AnalysisError(
@@ -87,13 +110,38 @@ def get_direct_carbon_reference_layer(
     ingestion = meta.get("ingestion_method")
     tile_url = None
     if ingestion == "cog_rasterio":
-        tile_url = f"/api/carbon/reference-tiles/{dataset_key}/{{z}}/{{x}}/{{y}}.png?year={source_year}"
+        tile_query = [f"year={source_year}"]
+        if vis_min is not None:
+            tile_query.append(f"min={vis_min}")
+        if vis_max is not None:
+            tile_query.append(f"max={vis_max}")
+        tile_url = (
+            f"/api/carbon/reference-tiles/{dataset_key}/{{z}}/{{x}}/{{y}}.png?"
+            + "&".join(tile_query)
+        )
     elif ingestion == "soilgrids_rest":
         # SoilGrids is sampled through REST and has no global tile endpoint.
         # Still return a successful metadata-only direct-load response.
         tile_url = None
+    elif ingestion == "chloris_downloads_index" and use_public_chloris_tiles:
+        from app.services.chloris_service import resolve_planetary_computer_tile_url
+
+        tile_url = resolve_planetary_computer_tile_url(
+            year=source_year,
+            vis_min=vis_min if vis_min is not None else meta.get("vis_min", 0),
+            vis_max=vis_max if vis_max is not None else meta.get("vis_max", 300),
+            carbon_fraction=0.47,
+        )
     elif dataset_key in CARBON_ARCGIS_REGISTRY:
-        tile_url = f"/api/arcgis/tiles/{dataset_key}/{{z}}/{{y}}/{{x}}?year={source_year}"
+        tile_query = [f"year={source_year}"]
+        if vis_min is not None:
+            tile_query.append(f"min={vis_min}")
+        if vis_max is not None:
+            tile_query.append(f"max={vis_max}")
+        tile_url = (
+            f"/api/arcgis/tiles/{dataset_key}/{{z}}/{{y}}/{{x}}?"
+            + "&".join(tile_query)
+        )
     else:
         if ingestion in {"cloud_geotiff_ee", "chloris_downloads_index"}:
             image = load_external_carbon_reference_ee(dataset_key, source_year, roi=None)
@@ -130,9 +178,14 @@ def get_direct_carbon_reference_layer(
         "direct": True,
         "statistics_available": False,
         "load_note": (
-            "SoilGrids tidak menyediakan tile global; pilih AOI dan jalankan mode "
-            "referensi untuk statistik sampling."
-            if ingestion == "soilgrids_rest" else None
+            "Menggunakan tile publik Planetary Computer (2003–2019, sekitar 4,6 km; "
+            "lisensi CC BY-NC-SA 4.0) karena Earth Engine tidak tersedia."
+            if use_public_chloris_tiles
+            else (
+                "SoilGrids tidak menyediakan tile global; pilih AOI dan jalankan mode "
+                "referensi untuk statistik sampling."
+                if ingestion == "soilgrids_rest" else None
+            )
         ),
     }
 
@@ -145,7 +198,9 @@ def active_carbon_model_compatibility(db: Session) -> dict[str, list[str]]:
         meta = model.metadata_json or {}
         meta = model_compatibility.backfill_legacy_metadata(meta, model.name)
         for dataset_key in model_compatibility.get_compatible_datasets(meta):
-            grouped.setdefault(dataset_key, []).append(model.name)
+            names = grouped.setdefault(dataset_key, [])
+            if model.name not in names:
+                names.append(model.name)
     return grouped
 
 
@@ -181,6 +236,15 @@ def get_carbon_dataset_list(
         meta = dataset_repo.apply_override(meta, overrides.get(key))
         if meta is None:
             continue  # admin deactivated this dataset
+        # Extent masks are useful as spatial filters, but are not carbon-density
+        # references and must not appear in the stock-estimation dataset picker.
+        if meta.get("ingestion_method") == "mask_only":
+            continue
+        if meta.get("deprecated"):
+            continue
+        runtime_status = _dataset_runtime_status(key, meta)
+        if not runtime_status["is_configured"]:
+            continue
 
         provider_type = meta.get("provider_type")
         if not provider_type:
@@ -221,7 +285,7 @@ def get_carbon_dataset_list(
             "compatible_model_count": len(model_names),
             "compatible_models": model_names,
             "training_capable": meta.get("training_capable", key in CARBON_DATASET_REGISTRY),
-            **_dataset_runtime_status(key, meta),
+            **runtime_status,
         })
 
     return result
@@ -229,6 +293,13 @@ def get_carbon_dataset_list(
 
 def _dataset_runtime_status(key: str, meta: dict) -> dict:
     """Return lightweight runtime availability metadata for dataset pickers."""
+    if meta.get("ingestion_method") == "cloud_geotiff_ee":
+        configured = bool(os.getenv(f"{key}_URL") or os.getenv(f"{key.upper()}_URL") or meta.get("raster_url"))
+        return {
+            "is_configured": configured,
+            "requires_configuration": not configured,
+            "availability_error": None if configured else f"Raster {key} belum dikonfigurasi.",
+        }
     if meta.get("ingestion_method") == "mask_only":
         return {
             "is_configured": False,

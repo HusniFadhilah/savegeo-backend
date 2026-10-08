@@ -18,7 +18,7 @@ def _event(**changes):
         "monitoring_from": date(2026, 8, 20),
         "province": ["Kalimantan Barat", "Kalimantan Tengah"],
         "province_codes": ["61", "62"],
-        "boundary_source": "SP3STAB",
+        "boundary_source": "Peta Administratif",
         "methodology": "Deteksi panas satelit untuk pemantauan kebakaran.",
         "last_data_at": datetime(2026, 10, 6, 13, 27, tzinfo=timezone.utc),
         "hotspot_last_synced_at": datetime(2026, 10, 6, 16, 11, tzinfo=timezone.utc),

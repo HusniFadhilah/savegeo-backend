@@ -574,7 +574,7 @@ def get_wildfire_region_statistics(
         "parent_code": parent_code,
         "total_hotspots": len(features),
         "regions": statistics,
-        "attribution": "NASA FIRMS / NASA EOSDIS LANCE; batas administratif SP3STAB",
+        "attribution": "NASA FIRMS / NASA EOSDIS LANCE; batas administratif Indonesia",
     }
 
 

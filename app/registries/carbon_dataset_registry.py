@@ -52,6 +52,8 @@ CARBON_DATASET_REGISTRY: dict[str, dict] = {
         "transform":   "multiply_0.47",
         "description": "ESA CCI AGB map. Band 'agb' is Mg biomass/ha; multiplied by 0.47 to yield Mg C/ha.",
         "notes":       "Available years: 2010, 2017, 2018, 2019, 2020. Nearest year selected if exact not found.",
+        "deprecated": True,
+        "replacement_key": "ESA_CCI_BIOMASS_V7_COG",
     },
     "GEDI": {
         "key":         "GEDI",
@@ -65,9 +67,9 @@ CARBON_DATASET_REGISTRY: dict[str, dict] = {
         "target_pool": "aboveground_biomass_carbon",
         "resolution":  1000,
         "year":        2020,
-        "year_range":  [2019, 2023],
+        "year_range": [2019, 2021],
         "transform":   "multiply_0.47",
-        "description": "NASA GEDI L4B gridded AGBD at 1 km. MU band (mean unmasked biomass) × 0.47.",
+        "description": "NASA GEDI L4B v2 gridded AGBD at 1 km, based on observations from April 2019 to August 2021. MU x 0.47 for carbon.",
         "notes":       "MU is biomass density Mg/ha. Multiply by 0.47 for carbon. Unmasked to 0 for training sampling.",
     },
     "GEDI_L4A_MONTHLY": {
@@ -82,10 +84,10 @@ CARBON_DATASET_REGISTRY: dict[str, dict] = {
         "target_pool": "aboveground_biomass_carbon",
         "resolution":  25,
         "year":        2020,
-        "year_range":  [2019, 2023],
+        "year_range": [2019, 2025],
         "transform":   "multiply_0.47",
-        "description": "GEDI L4A monthly AGBD composite at 25 m. agbd × 0.47 for carbon density.",
-        "notes":       "Filter by year to build annual mosaic via median. Higher resolution than L4B.",
+        "description": "GEDI L4A monthly footprint AGBD at 25 m, not continuous wall-to-wall coverage. Quality-filtered agbd x 0.47 for carbon.",
+        "notes": "Annual median of valid footprints (l4_quality_flag=1, degrade_flag=0); no fallback to a different observation year.",
     },
     "GEDI_L4B_STACK": {
         "key":         "GEDI_L4B_STACK",
@@ -99,10 +101,12 @@ CARBON_DATASET_REGISTRY: dict[str, dict] = {
         "target_pool": "aboveground_biomass_carbon",
         "resolution":  1000,
         "year":        2020,
-        "year_range":  [2019, 2023],
+        "year_range": [2019, 2021],
         "transform":   "multiply_0.47",
         "description": "GEDI L4B with full predictor stack (S2, S1, DEM, Dynamic World). GEE model comparison workflow.",
         "notes":       "Same GEE source as GEDI key. Separate key for workflows that use the full predictor stack.",
+        "deprecated": True,
+        "replacement_key": "GEDI",
     },
     "GEDI_L4D": {
         "key":         "GEDI_L4D",
@@ -116,10 +120,11 @@ CARBON_DATASET_REGISTRY: dict[str, dict] = {
         "target_pool": "aboveground_biomass_carbon",
         "resolution":  30,
         "year":        2023,
-        "year_range":  [2019, 2023],
+        "year_range": [2023, 2023],
         "transform":   "multiply_0.47",
         "description": "GEDI L4D 30 m imputed AGBD from k-NN fusion of GEDI footprint products and Landsat time series. agbd × 0.47 for carbon density.",
         "notes":       "Uses QA == 1 valid pixels where available. Product is centered on target year 2023; date range reflects source GEDI observations in the GEE catalog.",
+        "source_year_range": [2019, 2023],
     },
     "SPAWN": {
         "key":         "SPAWN",
@@ -163,14 +168,34 @@ CARBON_DATASET_REGISTRY: dict[str, dict] = {
         "gee_type":    "Image",
         "band":        "b0",
         "output_band": "agb",
-        "unit":        "g/kg",
+        "unit": "5 g/kg (native encoded values)",
         "target_pool": "soil_organic_carbon",
         "resolution":  250,
         "year":        2019,
         "year_range":  [2019, 2019],
         "transform":   "none",
-        "description": "Soil organic carbon density at 0 cm depth in g/kg. SOC pool — do NOT mix totals with aboveground carbon.",
-        "notes":       "Unit is g/kg (not Mg C/ha). Depth-to-mass conversion required for stock totals. Different pool from aboveground biomass.",
+        "description": "Legacy unscaled OpenLandMap surface SOC target. One encoded value represents 5 g/kg; retained for existing trained model targets.",
+        "notes": "Not Mg C/ha. Use OPENLANDMAP_SOC_G_KG for physical g/kg values. Legacy models require verified target scaling or retraining before migration.",
+        "deprecated": True,
+        "replacement_key": "OPENLANDMAP_SOC_G_KG",
+    },
+    "OPENLANDMAP_SOC_G_KG": {
+        "key":         "OPENLANDMAP_SOC_G_KG",
+        "name":        "OpenLandMap SOC (0 cm, g/kg)",
+        "full_name":   "OpenLandMap v02 Soil Organic Carbon Content at 0 cm - physical g/kg",
+        "gee_id":      "OpenLandMap/SOL/SOL_ORGANIC-CARBON_USDA-6A1C_M/v02",
+        "gee_type":    "Image",
+        "band":        "b0",
+        "output_band": "agb",
+        "unit":        "g/kg",
+        "target_pool": "soil_organic_carbon",
+        "resolution":  250,
+        "year":        2018,
+        "year_range":  [2018, 2018],
+        "transform":   "multiply_5",
+        "native_value_scale": 5,
+        "description": "OpenLandMap v02 surface SOC concentration at 0 cm. Encoded b0 values x 5 give g/kg; 2018 is the release year, not an annual carbon-stock snapshot.",
+        "notes":       "Concentration, not Mg C/ha or a soil stock. Stock totals require depth, bulk density and coarse-fragment information. Legacy unscaled models are not automatically compatible.",
     },
     "ESA_CCI_SATIO_AGB": {
         "key":         "ESA_CCI_SATIO_AGB",
@@ -243,6 +268,8 @@ CARBON_ARCGIS_REGISTRY: dict[str, dict] = {
         "description":      "Global AGB+BGB biomass carbon density, 300m resolution, circa 2010. Source: UN WCMC, hosted on ArcGIS Living Atlas.",
         "attribution":      "UN WCMC / ArcGIS Living Atlas",
         "limitations":      ["Static 2010 snapshot; does not reflect recent forest loss or gain.", "AGB+BGB combined — not directly comparable to AGB-only models."],
+        "deprecated": True,
+        "replacement_key": "WCMC",
     },
     "UNEP_WCMC_Biomass": {
         "key":              "UNEP_WCMC_Biomass",
@@ -266,6 +293,8 @@ CARBON_ARCGIS_REGISTRY: dict[str, dict] = {
         "attribution":      "UNEP-WCMC / ArcGIS Living Atlas",
         "histogram_geom_type": "esriGeometryEnvelope",  # this service requires bbox, not polygon
         "limitations":      ["Static 2010 snapshot.", "Use bbox envelope for statistics (polygon geometry unsupported by this service)."],
+        "deprecated": True,
+        "replacement_key": "WCMC",
     },
     "UNEP_WCMC_Biomass_SOC": {
         "key":              "UNEP_WCMC_Biomass_SOC",
@@ -613,30 +642,12 @@ CARBON_EXTERNAL_REGISTRY: dict[str, dict] = {
 }
 # fmt: on
 
-# Keys exposed for training CLI choices. Deprecated keys remain here so
-# existing model metadata can still be resolved; the UI labels them legacy.
+# Choices for new training. Legacy metadata and loaders remain resolvable.
 TRAINING_DATASET_KEYS: list[str] = [
-    "WCMC",
-    "ESA_CCI",
-    "GEDI",
-    "GEDI_L4A_MONTHLY",
-    "GEDI_L4B_STACK",
-    "GEDI_L4D",
-    "SPAWN",
-    "ORNL_AGB_BGB",
-    "OPENLANDMAP_SOC",
-    "ESA_CCI_SATIO_AGB",
-    # ArcGIS-sourced
-    "WCMC_Carbon_ArcGIS",
-    "UNEP_WCMC_Biomass",
-    "UNEP_WCMC_Biomass_SOC",
-    # External raster / open-data sourced (training_capable: True only)
-    "SOILGRIDS_SOC_30CM",
-    "HANSEN_TREECOVER_AGB_PROXY",
-    "ESA_CCI_BIOMASS_COG",
-    "ESA_CCI_BIOMASS_V7_COG",
-    "CTREES_AGB_100M",
-    "CHLORIS_AGB_STOCK",
+    "WCMC", "GEDI", "GEDI_L4A_MONTHLY", "GEDI_L4D", "SPAWN",
+    "ORNL_AGB_BGB", "OPENLANDMAP_SOC_G_KG", "UNEP_WCMC_Biomass_SOC",
+    "SOILGRIDS_SOC_30CM", "HANSEN_TREECOVER_AGB_PROXY",
+    "ESA_CCI_BIOMASS_V7_COG", "CTREES_AGB_100M",
 ]
 
 # Datasets whose GEE loaders genuinely select an annual image/composite from
@@ -841,11 +852,17 @@ def get_dataset_meta(key: str, dataset_year: int | None = None) -> dict:
 
 
 def list_dataset_keys(include_legacy: bool = False) -> list[str]:
-    """Return all registered dataset keys. Excludes 'Simard' by default."""
+    """Return current GEE references; legacy keys require an explicit request."""
     keys = list(CARBON_DATASET_REGISTRY.keys())
     if not include_legacy:
-        keys = [k for k in keys if k != "Simard"]
+        keys = [k for k in keys if not CARBON_DATASET_REGISTRY[k].get("deprecated")]
     return keys
+
+def canonical_carbon_dataset_key(key: str) -> str:
+    """Resolve exact target aliases only; dataset versions/scales are not aliases."""
+    # Both loaders use the identical GEDI image, MU band and carbon fraction.
+    # Predictor stacks belong to model metadata, not to the reference raster.
+    return "GEDI" if key == "GEDI_L4B_STACK" else key
 
 
 # ─────────────────────────────────────────────
@@ -918,16 +935,14 @@ def _loader_esa_cci(entry, dataset_year, roi, unmask, ee):
     collection = ee.ImageCollection(entry["gee_id"])
     if roi:
         collection = collection.filterBounds(roi)
-    # Try requested year first; fall back to latest available
+    # The end date is exclusive; include the whole requested calendar year.
     year_collection = collection.filterDate(
-        f"{dataset_year}-01-01", f"{dataset_year}-12-31"
+        f"{dataset_year}-01-01", f"{dataset_year + 1}-01-01"
     )
     size = year_collection.size().getInfo()
     if size == 0:
-        logger.warning(f"ESA_CCI: no image for {dataset_year}, using latest")
-        img = collection.sort("system:time_start", False).first()
-    else:
-        img = year_collection.first()
+        raise ValueError(f"ESA_CCI: no image for requested year {dataset_year}")
+    img = year_collection.first()
     return img.select("agb").multiply(0.47).rename("agb")
 
 
@@ -938,18 +953,18 @@ def _loader_gedi(entry, dataset_year, roi, unmask, ee):
 
 def _loader_gedi_l4a_monthly(entry, dataset_year, roi, unmask, ee):
     collection = ee.ImageCollection(entry["gee_id"]).filterDate(
-        f"{dataset_year}-01-01", f"{dataset_year}-12-31"
+        f"{dataset_year}-01-01", f"{dataset_year + 1}-01-01"
     )
     if roi:
         collection = collection.filterBounds(roi)
     size = collection.size().getInfo()
     if size == 0:
-        logger.warning(f"GEDI_L4A_MONTHLY: no images for {dataset_year}")
-        # Fallback: any available
-        collection = ee.ImageCollection(entry["gee_id"])
-        if roi:
-            collection = collection.filterBounds(roi)
-    img = collection.select("agbd").median()
+        raise ValueError(f"GEDI_L4A_MONTHLY: no observations for requested year {dataset_year} and AOI")
+
+    def mask_quality(img):
+        return img.updateMask(img.select("l4_quality_flag").eq(1)).updateMask(img.select("degrade_flag").eq(0))
+
+    img = collection.map(mask_quality).select("agbd").median()
     return img.multiply(0.47).rename("agb")
 
 
@@ -993,9 +1008,10 @@ def _loader_ornl_agb_bgb(entry, dataset_year, roi, unmask, ee):
 
 
 def _loader_openlandmap_soc(entry, dataset_year, roi, unmask, ee):
-    # b0 = surface (0 cm depth), unit is g/kg (not Mg C/ha)
+    # Keep legacy model labels unchanged; the corrected reference applies the
+    # documented scale of 5 for physical g/kg (never Mg C/ha).
     img = ee.Image(entry["gee_id"])
-    return img.select("b0").rename("agb")
+    return img.select("b0").multiply(entry.get("native_value_scale", 1)).rename("agb")
 
 
 def _loader_esa_cci_satio_agb(entry, dataset_year, roi, unmask, ee):
@@ -1003,10 +1019,12 @@ def _loader_esa_cci_satio_agb(entry, dataset_year, roi, unmask, ee):
     if roi:
         collection = collection.filterBounds(roi)
     year_col = collection.filterDate(
-        f"{dataset_year}-01-01", f"{dataset_year}-12-31"
+        f"{dataset_year}-01-01", f"{dataset_year + 1}-01-01"
     )
     size = year_col.size().getInfo()
-    img = year_col.first() if size > 0 else collection.sort("system:time_start", False).first()
+    if size == 0:
+        raise ValueError(f"ESA_CCI_SATIO_AGB: no image for requested year {dataset_year}")
+    img = year_col.first()
     # Verify band name at runtime — community asset band names can vary
     band_names = img.bandNames().getInfo()
     logger.info(f"ESA_CCI_SATIO_AGB available bands: {band_names}")
@@ -1032,6 +1050,7 @@ _LOADERS = {
     "SPAWN":              _loader_spawn,
     "ORNL_AGB_BGB":       _loader_ornl_agb_bgb,
     "OPENLANDMAP_SOC":    _loader_openlandmap_soc,
+    "OPENLANDMAP_SOC_G_KG": _loader_openlandmap_soc,
     "ESA_CCI_SATIO_AGB":  _loader_esa_cci_satio_agb,
     "Simard":             _loader_simard,
 }

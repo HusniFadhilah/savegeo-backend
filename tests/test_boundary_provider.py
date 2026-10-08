@@ -2,7 +2,7 @@ from app.services.boundary_provider import CachedBoundaryProvider, normalize_geo
 
 
 def _fixture():
-    # SP3STAB-like provider order: [latitude, longitude].
+    # Peta Administratif-like provider order: [latitude, longitude].
     return {
         "type": "FeatureCollection",
         "features": [{
@@ -13,7 +13,7 @@ def _fixture():
     }
 
 
-def test_sp3stab_geometry_is_normalized_as_a_whole_geometry():
+def test_peta_administratif_geometry_is_normalized_as_a_whole_geometry():
     result = normalize_geometry(_fixture())
     assert result.validation_status == "valid"
     assert result.transformation == "lat-lng to lng-lat"

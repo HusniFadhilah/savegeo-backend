@@ -114,7 +114,7 @@ def upgrade() -> None:
             source_ids=["nasa-firms", "laporan-kemenhut"],
             hotspot_dataset_ids=["nasa-firms"],
             burned_area_dataset_ids=[],
-            boundary_source="SP3STAB",
+            boundary_source="Peta Administratif",
             methodology=(
                 "Deteksi panas satelit dikurasi sebagai event pemantauan; tidak "
                 "disamakan dengan incident atau area terbakar."

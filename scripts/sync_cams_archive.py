@@ -265,7 +265,7 @@ def ingest_file(
                         "source_valid_at": source_valid.isoformat(),
                         "request": request,
                         "temporal_step": "rolling_24h" if layer_id == "burnt_carbon" else "instant",
-                        "boundary_source": "Global WGS84 raster extent" if is_global else "SP3STAB; union of event provinces; invalid polygons repaired with make_valid",
+                        "boundary_source": "Global WGS84 raster extent" if is_global else "Peta Administratif; union of event provinces; invalid polygons repaired with make_valid",
                         "boundary_sha256": hashlib.sha256(
                             json.dumps(mapping(boundary), sort_keys=True).encode()
                         ).hexdigest(),

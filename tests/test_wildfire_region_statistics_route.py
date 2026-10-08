@@ -47,5 +47,5 @@ def test_region_statistics_returns_a_region_summary_using_documented_filters():
         "parent_code": None,
         "total_hotspots": 1,
         "regions": expected_regions,
-        "attribution": "NASA FIRMS / NASA EOSDIS LANCE; batas administratif SP3STAB",
+        "attribution": "NASA FIRMS / NASA EOSDIS LANCE; batas administratif Indonesia",
     }

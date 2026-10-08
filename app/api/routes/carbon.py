@@ -39,17 +39,42 @@ def direct_carbon_reference_layer(
     from app.registries.carbon_dataset_registry import CARBON_ARCGIS_REGISTRY, get_external_carbon_meta
 
     meta = get_external_carbon_meta(dataset_key)
-    direct_without_ee = meta and meta.get("ingestion_method") in {"cog_rasterio", "soilgrids_rest"}
-    if not direct_without_ee and dataset_key not in CARBON_ARCGIS_REGISTRY and not getattr(request.app.state, "ee_initialized", False):
+    ee_initialized = bool(getattr(request.app.state, "ee_initialized", False))
+    replacement_meta = None
+    if meta and meta.get("ingestion_method") == "mask_only" and meta.get("replacement_key"):
+        replacement_meta = get_external_carbon_meta(meta["replacement_key"])
+    direct_methods = {"cog_rasterio", "soilgrids_rest", "chloris_downloads_index"}
+    direct_without_ee = bool(
+        (meta and meta.get("ingestion_method") in direct_methods)
+        or (replacement_meta and replacement_meta.get("ingestion_method") in direct_methods)
+    )
+    if not direct_without_ee and dataset_key not in CARBON_ARCGIS_REGISTRY and not ee_initialized:
         raise HTTPException(status_code=503, detail="Google Earth Engine belum diinisialisasi untuk dataset ini.")
     try:
-        return carbon_service.get_direct_carbon_reference_layer(dataset_key, year, vis_min=min, vis_max=max)
+        return carbon_service.get_direct_carbon_reference_layer(
+            dataset_key,
+            year,
+            vis_min=min,
+            vis_max=max,
+            use_public_chloris_tiles=dataset_key == "CHLORIS_AGB_STOCK" and not ee_initialized,
+        )
     except AnalysisError as exc:
         raise HTTPException(status_code=exc.status_code, detail=public_analysis_error(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="Invalid reference layer parameters") from exc
     except ee.EEException as exc:
         logger.warning("Earth Engine reference layer failed: %s", type(exc).__name__)
+        if dataset_key == "CHLORIS_AGB_STOCK":
+            try:
+                return carbon_service.get_direct_carbon_reference_layer(
+                    dataset_key,
+                    year,
+                    vis_min=min,
+                    vis_max=max,
+                    use_public_chloris_tiles=True,
+                )
+            except Exception as fallback_exc:  # noqa: BLE001 - retain a stable 503 if both renderers fail
+                logger.warning("Public Chloris tile fallback failed: %s", type(fallback_exc).__name__)
         raise HTTPException(status_code=503, detail="Layer Earth Engine sedang tidak tersedia.") from exc
     except requests.RequestException as exc:
         logger.warning("Reference layer upstream connection failed: %s", type(exc).__name__)

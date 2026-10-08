@@ -154,8 +154,8 @@ def normalize_geometry(payload: dict, *, provider_axis: str = "lat-lng") -> Vali
     )
 
 
-class Sp3StabBoundaryProvider:
-    name = "SP3STAB"
+class RegionBoundaryProvider:
+    name = "Peta Administratif"
 
     def __init__(self, base_url: str | None = None, timeout: int = 15):
         self.base_url = (base_url or get_settings().region_api_base_url).rstrip("/")
@@ -188,7 +188,7 @@ class Sp3StabBoundaryProvider:
 
 
 class CachedBoundaryProvider:
-    def __init__(self, provider: Sp3StabBoundaryProvider, ttl_seconds: int = 86400):
+    def __init__(self, provider: RegionBoundaryProvider, ttl_seconds: int = 86400):
         self.provider = provider
         self.ttl_seconds = ttl_seconds
         self._cache: dict[str, tuple[float, dict]] = {}

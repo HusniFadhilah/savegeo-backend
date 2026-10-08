@@ -12,7 +12,7 @@ import logging
 import math
 
 import requests
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response
 
 from app.providers.arcgis_client import _is_allowed_domain, get_arcgis_client
@@ -31,6 +31,8 @@ def arcgis_tile_proxy(
     y: int,
     x: int,
     year: int | None = None,
+    min_value: float | None = Query(default=None, alias="min"),
+    max_value: float | None = Query(default=None, alias="max"),
     clip_west: float | None = None,
     clip_south: float | None = None,
     clip_east: float | None = None,
@@ -94,8 +96,10 @@ def arcgis_tile_proxy(
     if _is_carbon_tile:
         # Continuous carbon raster: stretch + color ramp
         palette = ds_meta.get("vis_palette", ["f7fcf5", "74c476", "00441b"])
-        c_min = ds_meta.get("vis_min", 0)
-        c_max = ds_meta.get("vis_max", 300)
+        c_min = min_value if min_value is not None else ds_meta.get("vis_min", 0)
+        c_max = max_value if max_value is not None else ds_meta.get("vis_max", 300)
+        if c_max <= c_min:
+            c_max = c_min + 1
         n_colors = len(palette)
         colormap_entries = []
         for i, hex_c in enumerate(palette):

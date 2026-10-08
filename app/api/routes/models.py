@@ -7,7 +7,8 @@ from sqlalchemy.orm import Session
 from app.db.models.uploaded_model import UploadedModel
 from app.core.viewer_features import require_feature
 from app.db.session import get_db
-from app.registries.model_compatibility import get_compatible_datasets
+from app.registries.model_compatibility import backfill_legacy_metadata, get_compatible_datasets
+from app.registries.carbon_dataset_registry import canonical_carbon_dataset_key
 
 router = APIRouter(
     tags=["models"],
@@ -39,8 +40,8 @@ def models_list(
 
     results = []
     for m in models:
-        meta = m.metadata_json or {}
-        if target_dataset and target_dataset not in get_compatible_datasets(meta):
+        meta = backfill_legacy_metadata(m.metadata_json, m.name)
+        if target_dataset and canonical_carbon_dataset_key(target_dataset) not in get_compatible_datasets(meta):
             continue
         if gee_deployable is not None and bool(meta.get("gee_deployable")) != gee_deployable:
             continue

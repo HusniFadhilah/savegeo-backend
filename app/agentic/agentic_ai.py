@@ -7,7 +7,7 @@ produce the same plan schema, then pass through the validator here.
 """
 from __future__ import annotations
 
-from app.agentic.action_catalog import APPLICATION_CONTROL_PROMPT
+from app.agentic.action_catalog import APPLICATION_CONTROL_PROMPT, SHARED_CARBON_PARAMETERS, UI_ACTION_TARGETS
 
 import logging
 import re
@@ -2007,9 +2007,10 @@ The frontend executes only these supported commands:
 - set_map_view / map.main, center: [latitude, longitude], zoom: number.
 - set_analysis_type / carbon.analysisType, value: carbon, landcover, vegetation, combined.
 - set_parameter / carbon.analysisYear, carbon.referenceDataset, carbon.datasetYear,
-  carbon.modelName, carbon.referenceOnly, carbon.directGlobal, carbon.showReference,
+  carbon.modelName, carbon.referenceOnly, carbon.loadOnly, carbon.directGlobal, carbon.showReference,
   carbon.clipMode, carbon.startMonth, carbon.endMonth, carbon.cloudThreshold,
-  carbon.vegetationIndices, carbon.vegetationSensor, carbon.landcoverDatasets,
+  carbon.vegetationIndices, carbon.vegetationSensor, carbon.vegetationStartMonth,
+  carbon.vegetationEndMonth, carbon.vegetationCloudThreshold, carbon.landcoverDatasets,
   or carbon.includeImprobableClasses.
 - set_parameter / lc_change.dataset, lc_change.fromYear, lc_change.toYear,
   lc_change.startMonth, or lc_change.endMonth.
@@ -2103,6 +2104,10 @@ multiple parts - a one-line factual answer doesn't need headers):
 - **Actions**: implied by the `actions`/`cards` you return, no need to restate as text.
 
 ### actions[] - things the map/UI should do (optional, omit if nothing to do)
+For application commands use "action" (not "type"), the exact catalog "target",
+"parameters", "reason", and optional "expected_state". Example:
+{"action":"set_analysis_type","target":"carbon.analysisType","parameters":{"value":"vegetation"}}
+The following "type" objects are only legacy map/result/conversation actions:
 - {"type":"zoom_to_location","lat":..,"lng":..,"zoom":12}
 - {"type":"zoom_to_feature","geometry":<GeoJSON geometry>}
 - {"type":"highlight_polygon","geometry":<GeoJSON geometry>,"label":"..."}
@@ -2359,34 +2364,7 @@ def _call_gemini_tools(api_key: str, model: str, user_input: str,
     return _tool_round_limit_response()
 
 
-_GEOAI_UI_TARGETS = {
-    "select_aoi": {"aoi.active"},
-    "select_field": {"crop.field"},
-    "open_module": {"navigation.module"},
-    "set_map_view": {"map.main"},
-    "set_analysis_type": {"carbon.analysisType"},
-    "set_parameter": {
-        "carbon.analysisYear", "carbon.referenceDataset", "carbon.datasetYear",
-        "carbon.modelName", "carbon.referenceOnly", "carbon.directGlobal", "carbon.showReference", "carbon.clipMode",
-        "carbon.startMonth", "carbon.endMonth", "carbon.cloudThreshold",
-        "carbon.vegetationIndices", "carbon.vegetationSensor", "carbon.landcoverDatasets",
-        "carbon.includeImprobableClasses",
-        "lc_change.dataset", "lc_change.fromYear", "lc_change.toYear",
-        "lc_change.startMonth", "lc_change.endMonth",
-        "scenes.cloudMax", "scenes.search", "scenes.page", "scenes.pageSize",
-        "crop.index", "crop.periodMode",
-    },
-    "run_analysis": {"carbon.analysis", "lc_change.analysis", "crop.analysis", "disaster.dem", "disaster.event"},
-    "toggle_layer": {"results.layer"},
-    "set_provider": {"scenes.provider"},
-    "set_date_range": {"scenes.dateRange", "crop.dateRange"},
-    "search_scenes": {"scenes.searchRequest"},
-    "show_scene": {"scenes.scene"},
-    "clear_scenes": {"scenes.layers"},
-    "accordion": {"scenes.results"},
-    "load_disaster_sources": {"disaster.sources"},
-    "load_disaster_alerts": {"disaster.alerts"},
-}
+_GEOAI_UI_TARGETS = UI_ACTION_TARGETS
 
 
 def validate_geoai_actions(
@@ -2405,6 +2383,11 @@ def validate_geoai_actions(
             warnings.append("Satu action AI bukan objek JSON dan diabaikan.")
             continue
         name, target = action.get("action"), action.get("target")
+        # Some models use the legacy discriminator for an otherwise typed UI
+        # command. Normalize only absent action keys; all targets/permissions
+        # and values still pass the exact same fail-closed validation below.
+        if "action" not in action and isinstance(action.get("type"), str) and action["type"] in _GEOAI_UI_TARGETS:
+            name = action["type"]
         params = action.get("parameters") or {}
         value = params.get("value") if isinstance(params, dict) else None
         if allowed_features is not None:
@@ -2437,6 +2420,10 @@ def validate_geoai_actions(
                 required = {"app.feature.disaster_mapping"}
             elif str(target).startswith("scenes.") or name in {"set_provider", "search_scenes", "show_scene", "clear_scenes"}:
                 required = {"app.feature.satellite_exploration"}
+            elif target in SHARED_CARBON_PARAMETERS:
+                if not SHARED_CARBON_PARAMETERS[target].intersection(allowed_features):
+                    warnings.append("Perintah tidak diizinkan oleh pengaturan fitur Viewer.")
+                    continue
             elif str(target).startswith("carbon.vegetation"):
                 required = {"app.feature.vegetation_indices"}
             elif str(target).startswith("carbon.landcover"):
@@ -2480,7 +2467,10 @@ def validate_geoai_actions(
             elif legacy_type in {"zoom_to_feature", "highlight_polygon"} and isinstance(action.get("geometry"), dict) and isinstance(action["geometry"].get("type"), str) and action["geometry"]["type"] in {"Polygon", "MultiPolygon", "Point", "MultiPoint", "LineString", "MultiLineString"}:
                 valid.append({"type": legacy_type, "geometry": action["geometry"]})
             else:
-                warnings.append(f"Action AI tidak didukung: {name or action.get('type') or 'unknown'}.")
+                if isinstance(name, str) and name in _GEOAI_UI_TARGETS:
+                    warnings.append(f"Target parameter/perintah AI tidak didukung: {str(target)[:120]} (action: {name[:80]}). Gunakan target persis dari katalog aplikasi.")
+                else:
+                    warnings.append(f"Action AI tidak didukung: {str(name or action.get('type') or 'unknown')[:80]}.")
             continue
         if not isinstance(params, dict):
             warnings.append(f"Parameter {name} tidak valid.")
@@ -2570,7 +2560,7 @@ def validate_geoai_actions(
             if target == "scenes.page" and (type(value) is not int or type(scene_state.get("pageCount")) is not int or not 1 <= value <= scene_state["pageCount"]):
                 warnings.append("Halaman scene di luar hasil yang dimuat.")
                 continue
-            if target in {"carbon.referenceOnly", "carbon.directGlobal", "carbon.showReference", "carbon.includeImprobableClasses"} and type(value) is not bool:
+            if target in {"carbon.referenceOnly", "carbon.loadOnly", "carbon.directGlobal", "carbon.showReference", "carbon.includeImprobableClasses"} and type(value) is not bool:
                 warnings.append(f"Nilai {target} harus boolean.")
                 continue
             if target == "carbon.modelName" and value is not None and not isinstance(value, str):
@@ -2580,14 +2570,15 @@ def validate_geoai_actions(
                 warnings.append("Sensor vegetasi tidak valid.")
                 continue
             if target in {"carbon.analysisYear", "carbon.datasetYear", "carbon.startMonth", "carbon.endMonth",
-                          "carbon.cloudThreshold", "lc_change.fromYear", "lc_change.toYear",
+                          "carbon.cloudThreshold", "carbon.vegetationStartMonth", "carbon.vegetationEndMonth",
+                          "carbon.vegetationCloudThreshold", "lc_change.fromYear", "lc_change.toYear",
                           "lc_change.startMonth", "lc_change.endMonth"} and type(value) is not int:
                 warnings.append(f"Nilai {target} harus tahun/bulan/ambang berupa integer.")
                 continue
-            if target in {"carbon.startMonth", "carbon.endMonth", "lc_change.startMonth", "lc_change.endMonth"} and not 1 <= value <= 12:
+            if target in {"carbon.startMonth", "carbon.endMonth", "carbon.vegetationStartMonth", "carbon.vegetationEndMonth", "lc_change.startMonth", "lc_change.endMonth"} and not 1 <= value <= 12:
                 warnings.append(f"Bulan pada {target} di luar rentang 1-12.")
                 continue
-            if target == "carbon.cloudThreshold" and not 0 <= value <= 100:
+            if target in {"carbon.cloudThreshold", "carbon.vegetationCloudThreshold"} and not 0 <= value <= 100:
                 warnings.append("Ambang awan di luar rentang 0-100.")
                 continue
             if target in {"carbon.analysisYear", "carbon.datasetYear", "lc_change.fromYear", "lc_change.toYear"} and not 1900 <= value <= 2100:
@@ -2630,12 +2621,31 @@ def validate_geoai_actions(
             if target not in {"crop.analysis", "disaster.dem", "disaster.event"} and not direct_carbon and not (has_planned_aoi or context.get("aoi") or page_state.get("has_aoi")):
                 warnings.append("AOI belum tersedia; analisis tidak dijalankan.")
                 continue
+        expected = action.get("expected_state") if isinstance(action.get("expected_state"), dict) else {}
+        # The application contract, rather than model-invented state keys,
+        # determines which committed value must be read back after a setter.
+        if name == "set_parameter":
+            expected = {target.split(".")[1]: value}
+        elif name == "set_analysis_type":
+            expected = {"analysisType": value}
+        elif name == "open_module":
+            expected = {"module": value}
+        elif name == "set_provider":
+            expected = {"provider": value}
+        elif name == "set_date_range":
+            expected = {"startDate": params["start"], "endDate": params["end"]}
+        elif name == "accordion":
+            expected = {"resultsOpen": params["open"]}
+        elif name == "select_field":
+            expected = {"fieldId": params["field_id"]}
+        elif name == "run_analysis":
+            expected = {"hasResult": True}
         valid.append({
             "action": name,
             "target": target,
             "parameters": params,
             "reason": str(action.get("reason") or "")[:300],
-            "expected_state": action.get("expected_state") if isinstance(action.get("expected_state"), dict) else {},
+            "expected_state": expected,
         })
     # A rejected parameter must not silently run a workflow with old defaults.
     if warnings and any(a.get("action") in {"run_analysis", "search_scenes", "show_scene"} for a in valid):

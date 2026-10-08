@@ -265,6 +265,8 @@ def get_current_context(tool_ctx: dict) -> dict[str, Any]:
         scene_search = {}
     return {
         "action_catalog": ctx.get("action_catalog", []),
+        "runtime": ctx.get("runtime", {}),
+        "coverage_status": "Not verified by the action/provider catalog; only actual analysis results establish coverage.",
         "jobs": ctx.get("jobs", []),
         "aoi_present": bool(ctx.get("aoi")),
         "aoi_name": ctx.get("aoi_name"),

@@ -108,3 +108,15 @@ def test_direct_reference_result_is_scoped_to_carbon_feature():
         {"allowed_features": {"app.feature.vegetation_indices"}, "context": {"results": {"direct": direct_rows}}},
     )
     assert denied == {"error": "Akses ke data fitur ini tidak diizinkan."}
+
+
+
+def test_current_context_preserves_runtime_failure_despite_provider_catalog():
+    context = get_current_context({
+        "context": {"runtime": {"earth_engine_initialized": False}, "results": {}},
+        "page_state": {"ui": {"scenes": {"providers": [{"key": "sentinel2"}, {"key": "landsat8"}]}}},
+    })
+    assert context["runtime"] == {"earth_engine_initialized": False}
+    assert context["available_results"]["vegetation"] is False
+    assert len(context["scene_search"]["providers"]) == 2
+    assert "Not verified" in context["coverage_status"]

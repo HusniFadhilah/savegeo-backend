@@ -19,7 +19,7 @@ import requests
 from fastapi import APIRouter, HTTPException
 
 from app.core.config import get_settings
-from app.services.boundary_provider import CachedBoundaryProvider, Sp3StabBoundaryProvider
+from app.services.boundary_provider import CachedBoundaryProvider, RegionBoundaryProvider
 
 router = APIRouter(prefix="/regions", tags=["regions"])
 logger = logging.getLogger(__name__)
@@ -34,7 +34,7 @@ ISLAND_LABELS = {
 
 _CHILD_GEOMETRY_CACHE: dict = {}
 _CACHE_TTL_SECONDS = 3600
-_VALIDATED_BOUNDARY_PROVIDER = CachedBoundaryProvider(Sp3StabBoundaryProvider(), ttl_seconds=86400)
+_VALIDATED_BOUNDARY_PROVIDER = CachedBoundaryProvider(RegionBoundaryProvider(), ttl_seconds=86400)
 
 
 def _swap_lat_lng(node):

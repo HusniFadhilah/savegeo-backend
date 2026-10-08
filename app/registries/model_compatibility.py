@@ -4,6 +4,8 @@ model_compatibility.py — Model-dataset compatibility helpers.
 See: backend/docs/model-registry-strategy.md
 """
 
+from app.registries.carbon_dataset_registry import canonical_carbon_dataset_key
+
 # Conservative fallback for legacy models whose name clearly indicates WCMC training.
 WCMC_FALLBACK_METADATA = {
     "target_dataset_key": "WCMC",
@@ -49,7 +51,7 @@ def backfill_legacy_metadata(metadata: dict | None, model_name: str = "") -> dic
 
 def get_compatible_datasets(model_metadata: dict) -> list[str]:
     """
-    Return list of reference dataset keys this model is compatible with.
+    Return canonical reference target keys this model is compatible with.
 
     Explicit compatible_reference_datasets wins.
     Falls back to [target_dataset_key] if not set.
@@ -57,11 +59,11 @@ def get_compatible_datasets(model_metadata: dict) -> list[str]:
     """
     explicit = model_metadata.get("compatible_reference_datasets")
     if explicit:
-        return [d for d in explicit if d and d != "UNKNOWN"]
+        return list(dict.fromkeys(canonical_carbon_dataset_key(d) for d in explicit if d and d != "UNKNOWN"))
 
     target = model_metadata.get("target_dataset_key", "UNKNOWN")
     if target and target != "UNKNOWN":
-        return [target]
+        return [canonical_carbon_dataset_key(target)]
     return []
 
 
@@ -95,7 +97,7 @@ def validate_model_dataset_compatibility(
             "Update model metadata via admin panel (target_dataset_key / compatible_reference_datasets)."
         )
 
-    if reference_dataset not in compatible:
+    if canonical_carbon_dataset_key(reference_dataset) not in compatible:
         target = model_metadata.get("target_dataset_key", "unknown")
         raise ValueError(
             f"Model '{model_name}' was trained with '{target}' and is not compatible "
