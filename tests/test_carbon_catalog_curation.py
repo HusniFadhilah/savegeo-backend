@@ -20,7 +20,7 @@ def catalog(monkeypatch):
 
 def test_catalog_excludes_duplicate_legacy_and_unconfigured_choices(catalog):
     products = {item["key"]: item for item in catalog()}
-    assert len(products) == 13
+    assert len(products) == 24
     assert "GEDI" in products
     assert "GEDI_L4B_STACK" not in products
     assert "WCMC" in products
@@ -32,8 +32,9 @@ def test_catalog_excludes_duplicate_legacy_and_unconfigured_choices(catalog):
     assert "ESA_BIOMASS_2026" not in products
     assert "OPENLANDMAP_SOC" not in products
     # Different carbon components, depth definitions and measurement products stay distinct.
-    assert {"SPAWN", "ORNL_AGB_BGB", "UNEP_WCMC_Biomass_SOC", "SOILGRIDS_SOC_30CM",
+    assert {"SPAWN", "ORNL_AGB_BGB", "UNEP_WCMC_Biomass_SOC", "SOILGRIDS_OCS_0_30CM",
             "OPENLANDMAP_SOC_G_KG", "GEDI_L4A_MONTHLY", "GEDI_L4D"} <= products.keys()
+    assert "SOILGRIDS_SOC_30CM" not in products
 
 
 def test_configured_experimental_raster_can_be_offered(catalog, monkeypatch):
@@ -75,7 +76,7 @@ def test_existing_stack_model_is_listed_under_gedi_without_double_counting():
     model = SimpleNamespace(name="full_stack_model", metadata_json=metadata,
                             to_dict_public=lambda: {"name": "full_stack_model", "metadata_json": metadata})
     db = DB([model])
-    assert carbon_service.active_carbon_model_compatibility(db) == {"GEDI": ["full_stack_model"]}
+    assert carbon_service.active_carbon_model_compatibility(db)["GEDI"] == ["full_stack_model"]
     assert models_list(target_dataset="GEDI", db=db)["count"] == 1
     assert models_list(target_dataset="GEDI_L4B_STACK", db=db)["count"] == 1
     model_compatibility.validate_model_dataset_compatibility(metadata, "GEDI")

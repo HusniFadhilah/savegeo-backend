@@ -246,6 +246,71 @@ CARBON_DATASET_REGISTRY: dict[str, dict] = {
 # tiles via /api/arcgis/tiles/<key>/{z}/{y}/{x}
 # ─────────────────────────────────────────────
 # fmt: off
+SOIL_DEPTH_INTERVALS = [(0, 5), (5, 15), (15, 30), (30, 60), (60, 100), (100, 200)]
+OPENLANDMAP_SOC_PERIODS = {2005: (2000, 2005), 2010: (2005, 2010), 2015: (2010, 2015), 2020: (2015, 2020), 2022: (2020, 2022)}
+
+
+def _soil_reference(key: str, depth: tuple[int, int], *, concentration: bool = False) -> dict:
+    top, bottom = depth
+    direct = depth == (0, 30) and not concentration
+    return {
+        "key": key,
+        "name": f"SoilGrids SOC {'concentration' if concentration else 'stock'} {top}-{bottom} cm",
+        "full_name": f"ISRIC SoilGrids v2 SOC {'concentration' if concentration else 'stock'} {top}-{bottom} cm",
+        "gee_id": "projects/soilgrids-isric/" + ("soc_mean" if concentration else "ocs_mean" if direct else "soc_mean"),
+        "gee_type": "Image", "band": f"soc_{top}-{bottom}cm_mean" if concentration else "ocs_0-30cm_mean" if direct else "derived_stock",
+        "output_band": "agb", "unit": "g/kg" if concentration else "Mg C/ha",
+        "target_pool": "soil_organic_carbon", "quantity": "concentration" if concentration else "stock_density",
+        "depth_cm": [top, bottom], "resolution": 250, "year": 2020, "year_range": [2020, 2020],
+        "source_period": "SoilGrids v2 baseline (not annual observations)", "product_version": "2.0",
+        "pool_analysis": True, "transform": "divide_10" if concentration else "none" if direct else "soil_stock_integration",
+        "vis_min": 0, "vis_max": 100 if concentration else 150 if bottom == 30 else 400,
+        "vis_palette": ["fff7ec", "fdbb84", "e34a33", "7f0000"],
+        "description": (f"SoilGrids v2, {top}-{bottom} cm. " + ("Concentration in g/kg; no carbon total is computed." if concentration else "Official directly modeled 0-30 cm stock in Mg C/ha." if direct else "Derived stock from SOC, bulk density, coarse fragments and layer thickness; distinct from the official OCS map.") + " Static baseline; 2020 identifies product generation, not the observation year of every soil profile."),
+        "attribution": "ISRIC SoilGrids v2, CC BY 4.0",
+        "source_url": "https://docs.isric.org/globaldata/soilgrids/SoilGrids_faqs_01.html",
+        "training_capable": True,
+    }
+
+
+CARBON_DATASET_REGISTRY["ORNL_BGB"] = {
+    "key": "ORNL_BGB", "name": "NASA/ORNL BGB Carbon", "full_name": "NASA/ORNL Belowground Living Biomass Carbon Density",
+    "gee_id": "NASA/ORNL/biomass_carbon_density/v1", "gee_type": "ImageCollection", "band": "bgb", "output_band": "agb",
+    "unit": "Mg C/ha", "target_pool": "belowground_biomass_carbon", "quantity": "stock_density",
+    "resolution": 300, "year": 2010, "year_range": [2010, 2010], "source_period": "2010",
+    "transform": "none", "pool_analysis": True, "uncertainty_band": "bgb_uncertainty", "uncertainty_type": "standard_error",
+    "vis_min": 0, "vis_max": 60, "vis_palette": ["ffffcc", "c2e699", "78c679", "238443", "005a32"],
+    "description": "Living root biomass carbon, already Mg C/ha; no additional carbon fraction. Global 2010 baseline with propagated standard error. Soil organic carbon is a separate pool.",
+    "source_url": "https://developers.google.com/earth-engine/datasets/catalog/NASA_ORNL_biomass_carbon_density_v1",
+    "attribution": "NASA/ORNL, Spawn & Gibbs (2020)", "training_capable": True,
+}
+CARBON_DATASET_REGISTRY["SOILGRIDS_OCS_0_30CM"] = _soil_reference("SOILGRIDS_OCS_0_30CM", (0, 30))
+for _top, _bottom in SOIL_DEPTH_INTERVALS:
+    _key = f"SOILGRIDS_SOC_{_top}_{_bottom}CM_G_KG"
+    CARBON_DATASET_REGISTRY[_key] = _soil_reference(_key, (_top, _bottom), concentration=True)
+for _bottom in (100, 200):
+    _key = f"SOILGRIDS_SOC_STOCK_0_{_bottom}CM"
+    CARBON_DATASET_REGISTRY[_key] = _soil_reference(_key, (0, _bottom))
+for _bottom in (30, 100):
+    _key = f"OPENLANDMAP_SOC_STOCK_0_{_bottom}CM_30M"
+    CARBON_DATASET_REGISTRY[_key] = {
+        "key": _key, "name": f"OpenLandMap-soildb SOC stock 0-{_bottom} cm",
+        "full_name": f"OpenLandMap-soildb v1 modeled SOC stock 0-{_bottom} cm",
+        "gee_id": "projects/global-pasture-watch/assets/gsm-30m/v1/oc_iso_10694_1995_mg_cm3",
+        "gee_type": "ImageCollection", "band": "mg_cm3", "output_band": "agb", "unit": "Mg C/ha",
+        "target_pool": "soil_organic_carbon", "quantity": "stock_density", "depth_cm": [0, _bottom],
+        "resolution": 30, "year": 2022, "year_range": [2000, 2022], "available_years": list(OPENLANDMAP_SOC_PERIODS),
+        "periods": OPENLANDMAP_SOC_PERIODS, "product_version": "v1 (20250204)", "pool_analysis": True,
+        "native_value_scale": 0.1, "transform": "density_depth_integration",
+        "vis_min": 0, "vis_max": 150 if _bottom == 30 else 400, "vis_palette": ["fff7ec", "fdbb84", "e34a33", "7f0000"],
+        "description": f"SOC stock 0-{_bottom} cm in Mg C/ha, integrated from modeled density at 30 m. Select the source period; latest available period: 2020-2022. Local field accuracy requires independent soil measurements.",
+        "notes": "UINT16 density x0.1 gives kg C/m3; depth integration gives Mg C/ha. See author tutorial for encoding.",
+        "provider_type": "gee_community",
+        "source_url": "https://github.com/openlandmap/soildb/blob/main/OpenLandMap_soildb_tutorial.ipynb",
+        "attribution": "OpenGeoHub / OpenLandMap-soildb, CC BY", "training_capable": True,
+    }
+
+
 CARBON_ARCGIS_REGISTRY: dict[str, dict] = {
     "WCMC_Carbon_ArcGIS": {
         "key":              "WCMC_Carbon_ArcGIS",
@@ -357,6 +422,8 @@ CARBON_EXTERNAL_REGISTRY: dict[str, dict] = {
         "ingestion_method": "soilgrids_rest",
         "training_capable": True,
         "depths":           ["0-5cm", "5-15cm", "15-30cm"],
+        "deprecated": True,
+        "replacement_key": "SOILGRIDS_OCS_0_30CM",
     },
     "GLOBAL_MANGROVE_WATCH_AGB": {
         "key":              "GLOBAL_MANGROVE_WATCH_AGB",
@@ -571,6 +638,7 @@ CARBON_EXTERNAL_REGISTRY: dict[str, dict] = {
         "provider_type":    "external_raster",
         "name":             "ESA CCI Biomass v7 (COG)",
         "full_name":        "ESA CCI Aboveground Biomass v7.0 — public COG (CEDA)",
+        "tile_origin":      "northwest",
         "service_url":      None,
         "tile_url_template": "https://dap.ceda.ac.uk/neodc/esacci/biomass/data/agb/maps/v7.0/geotiff/{year}/{tile_id}_ESACCI-BIOMASS-L4-AGB-MERGED-100m-{year}-fv7.0.tif?download=1",
         "is_tiled":         True,
@@ -648,9 +716,10 @@ CARBON_EXTERNAL_REGISTRY: dict[str, dict] = {
 TRAINING_DATASET_KEYS: list[str] = [
     "WCMC", "GEDI", "GEDI_L4A_MONTHLY", "GEDI_L4D", "SPAWN",
     "ORNL_AGB_BGB", "OPENLANDMAP_SOC_G_KG", "UNEP_WCMC_Biomass_SOC",
-    "SOILGRIDS_SOC_30CM", "HANSEN_TREECOVER_AGB_PROXY",
+    "HANSEN_TREECOVER_AGB_PROXY",
     "ESA_CCI_BIOMASS_V7_COG", "CTREES_AGB_100M",
 ]
+TRAINING_DATASET_KEYS += [key for key, meta in CARBON_DATASET_REGISTRY.items() if meta.get("pool_analysis")]
 
 # Datasets whose GEE loaders genuinely select an annual image/composite from
 # the requested dataset_year. Static or multi-year products keep their registry
@@ -869,6 +938,14 @@ def get_dataset_meta(key: str, dataset_year: int | None = None) -> dict:
         }
 
     meta = dict(entry)
+    if meta.get("periods"):
+        selected = dataset_year if dataset_year is not None else entry["year"]
+        if selected not in meta["periods"]:
+            raise ValueError(f"Unavailable source period for {key}: {selected}")
+        start, end = meta["periods"][selected]
+        meta.update(year=f"{start}-{end}", source_period=f"{start}-{end}", selection_year=selected,
+                    is_temporal=True, requested_year=dataset_year)
+        return meta
     meta["is_temporal"] = key in TEMPORAL_DATASET_KEYS
     meta["requested_year"] = dataset_year
 
@@ -939,7 +1016,7 @@ def load_carbon_reference_ee(
     except KeyError:
         raise ValueError(f"No GEE loader implemented for dataset key: '{key}'")
 
-    if unmask_for_training:
+    if unmask_for_training and not entry.get("pool_analysis"):
         img = img.unmask(0)
 
     return img
@@ -1041,6 +1118,50 @@ def _loader_openlandmap_soc(entry, dataset_year, roi, unmask, ee):
     return img.select("b0").multiply(entry.get("native_value_scale", 1)).rename("agb")
 
 
+def soilgrids_stock_image(depth_cm, ee):
+    """Integrate fine-earth SOC stock; keep missing property pixels masked."""
+    soc = ee.Image("projects/soilgrids-isric/soc_mean")
+    bd = ee.Image("projects/soilgrids-isric/bdod_mean")
+    cf = ee.Image("projects/soilgrids-isric/cfvo_mean")
+    layers = []
+    for top, bottom in SOIL_DEPTH_INTERVALS:
+        thickness = min(bottom, depth_cm[1]) - max(top, depth_cm[0])
+        if thickness <= 0:
+            continue
+        suffix = f"_{top}-{bottom}cm_mean"
+        concentration = soc.select("soc" + suffix).divide(10)  # g/kg
+        density = bd.select("bdod" + suffix).divide(100)  # g/cm3
+        fine_earth = cf.select("cfvo" + suffix).divide(1000).clamp(0, 1).multiply(-1).add(1)
+        layers.append(concentration.multiply(density).multiply(thickness / 10).multiply(fine_earth).rename("agb"))
+    result = layers[0]
+    for layer in layers[1:]:
+        result = result.add(layer)
+    return result.rename("agb")
+
+
+def _loader_pool_reference(entry, dataset_year, roi, unmask, ee):
+    if entry["key"] == "ORNL_BGB":
+        return ee.Image(ee.ImageCollection(entry["gee_id"]).first()).select("bgb").rename("agb")
+    if entry.get("periods"):
+        start, end = entry["periods"][dataset_year]
+        total = None
+        for top, bottom in [(0, 30), (30, 60), (60, 100)]:
+            if bottom > entry["depth_cm"][1]:
+                break
+            image = ee.Image(entry["gee_id"] + f"/{start}_{end}_b{top}_{bottom}cm")
+            raw = image.select("mg_cm3")
+            # Author's tutorial: physical density is UINT16 / 10. 65535 is nodata.
+            stock = raw.updateMask(raw.neq(65535)).multiply(entry["native_value_scale"]).multiply((bottom - top) / 100 * 10)
+            total = stock if total is None else total.add(stock)
+        return total.rename("agb")
+    if entry["transform"] == "soil_stock_integration":
+        return soilgrids_stock_image(entry["depth_cm"], ee)
+    image = ee.Image(entry["gee_id"]).select(entry["band"])
+    if entry["transform"] == "divide_10":
+        image = image.divide(10)
+    return image.rename("agb")
+
+
 def _loader_esa_cci_satio_agb(entry, dataset_year, roi, unmask, ee):
     collection = ee.ImageCollection(entry["gee_id"])
     if roi:
@@ -1081,3 +1202,4 @@ _LOADERS = {
     "ESA_CCI_SATIO_AGB":  _loader_esa_cci_satio_agb,
     "Simard":             _loader_simard,
 }
+_LOADERS.update({key: _loader_pool_reference for key, meta in CARBON_DATASET_REGISTRY.items() if meta.get("pool_analysis")})

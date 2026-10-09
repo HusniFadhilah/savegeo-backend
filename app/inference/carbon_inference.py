@@ -877,6 +877,14 @@ class CarbonInferenceEngine:
         predictions = self.model.model.predict(X)
         predictions = np.clip(predictions, 0, None)
 
+        histogram_counts, histogram_edges = np.histogram(predictions, bins=24)
+        histogram = {
+            "bucket_means": ((histogram_edges[:-1] + histogram_edges[1:]) / 2).astype(float).tolist(),
+            "counts": histogram_counts.astype(int).tolist(),
+            "pixel_count": int(len(predictions)),
+            "sampled": True,
+        }
+
         logger.info(
             f"[sampled] {len(predictions)} pixels, mean={predictions.mean():.2f}, "
             f"std={predictions.std():.2f}"
@@ -888,6 +896,12 @@ class CarbonInferenceEngine:
             "min": float(predictions.min()),
             "max": float(predictions.max()),
             "n_pixels": len(predictions),
+            "histogram": histogram,
+            "percentiles": {
+                "p25": float(np.percentile(predictions, 25)),
+                "median": float(np.percentile(predictions, 50)),
+                "p75": float(np.percentile(predictions, 75)),
+            },
         }
 
     def _get_model_coefficients_for_gee(self) -> list:

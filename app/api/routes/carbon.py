@@ -119,7 +119,7 @@ def analyze_carbon(request: Request, data: dict = Body(...), db: Session = Depen
         logger.warning("Carbon upstream connection error: %s", type(e).__name__)
         raise HTTPException(status_code=503, detail=UPSTREAM_CONNECTION_ERROR) from e
     except Exception as e:  # noqa: BLE001
-        logger.error("Carbon analysis failed")
+        logger.exception("Carbon analysis failed")
         raise HTTPException(status_code=500, detail="Analisis karbon gagal. Coba lagi atau hubungi administrator.") from e
 
 

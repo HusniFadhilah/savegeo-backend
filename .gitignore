@@ -22,6 +22,9 @@ var/
 tmp/
 *.docx
 
+# Build metadata is generated locally/inside CI and is environment-specific
+build-metadata.json
+
 # Credential files — must never be committed
 *service-account*.json
 *credentials*.json

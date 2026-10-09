@@ -16,7 +16,7 @@ from app.core.config import get_settings
 from app.core.default_configs import DEFAULT_CONFIGS, is_sensitive_config_key, is_secret_key
 from app.db.models.system_config import SystemConfig
 
-_cache: dict[str, SystemConfig] = {}
+_cache: dict[str, object] = {}
 _cache_ts: float = 0.0
 _CFG_TTL = 30.0
 
@@ -24,7 +24,10 @@ _CFG_TTL = 30.0
 def _refresh(db: Session) -> None:
     global _cache, _cache_ts
     rows = db.query(SystemConfig).all()
-    _cache = {row.key: row for row in rows}
+    # Cache typed values rather than ORM instances: request-scoped sessions
+    # close after each route, so retaining rows here can detach them before a
+    # later request reads a value.
+    _cache = {row.key: row.typed_value() for row in rows}
     _cache_ts = time.time()
 
 
@@ -40,17 +43,15 @@ def _ensure_fresh(db: Session) -> None:
 
 def get_setting(db: Session, key: str, default=None):
     _ensure_fresh(db)
-    row = _cache.get(key)
-    return row.typed_value() if row else default
+    return _cache.get(key, default)
 
 
 def get_all_settings(db: Session, category: str | None = None) -> list[SystemConfig]:
     ensure_default_settings(db)
-    _ensure_fresh(db)
-    rows = list(_cache.values())
+    query = db.query(SystemConfig)
     if category:
-        rows = [r for r in rows if r.category == category]
-    return rows
+        query = query.filter(SystemConfig.category == category)
+    return query.all()
 
 
 def ensure_default_settings(db: Session) -> int:

@@ -254,7 +254,10 @@ def _hansen_tile_url(lat_origin: int, lon_origin: int, template: str, tile_size_
     return template.format(lat_tile=lat_str, lon_tile=lon_str)
 
 
-def _ceda_tile_url(lat_origin: int, lon_origin: int, template: str, year: int) -> str:
+def _ceda_tile_url(lat_origin: int, lon_origin: int, template: str, year: int, northwest: bool = False) -> str:
+    # v7 filenames use the north-west corner; enumeration uses south-west.
+    if northwest:
+        lat_origin += 10
     ns = "N" if lat_origin >= 0 else "S"
     ew = "E" if lon_origin >= 0 else "W"
     tile_id = f"{ns}{abs(lat_origin):02d}{ew}{abs(lon_origin):03d}"
@@ -378,7 +381,7 @@ def load_carbon_reference_to_grid(
         nearest_year = min(available_years, key=lambda y: abs(y - target_year))
         if nearest_year != target_year:
             logger.info(f"{dataset_key}: year {target_year} unavailable, using nearest available {nearest_year}")
-        url_builder = lambda la, lo: _ceda_tile_url(la, lo, meta["tile_url_template"], nearest_year)
+        url_builder = lambda la, lo: _ceda_tile_url(la, lo, meta["tile_url_template"], nearest_year, meta.get("tile_origin") == "northwest")
         mosaic, n_tiles = _mosaic_tiled_cog(url_builder, grid, nodata=meta.get("nodata"), resampling="bilinear")
     elif dataset_key == "CTREES_AGB_100M":
         target_year = year or meta.get("year", 2025)
@@ -441,7 +444,7 @@ def _carbon_tile_urls(dataset_key: str, bbox: BBox, year: int | None) -> list[st
         target = year or meta.get("year", 2020)
         selected = min(available, key=lambda item: abs(item - target))
         for lat_o, lon_o in _enumerate_tile_origins(bbox, int(meta.get("tile_size_deg", 10))):
-            urls.append(_ceda_tile_url(lat_o, lon_o, meta["tile_url_template"], selected))
+            urls.append(_ceda_tile_url(lat_o, lon_o, meta["tile_url_template"], selected, meta.get("tile_origin") == "northwest"))
     elif dataset_key == "CTREES_AGB_100M":
         available = meta.get("available_years") or [meta.get("year", 2025)]
         target = year or meta.get("year", 2025)

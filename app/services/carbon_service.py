@@ -24,6 +24,7 @@ from app.inference.carbon_inference import CarbonInferenceEngine
 from app.inference.carbon_inference_local import LocalCarbonInferenceEngine
 from app.providers.external_carbon_provider import ExternalRasterProvider
 from app.registries import model_compatibility
+from app.registries.carbon_pool_models import builtin_carbon_models, get_builtin_carbon_model
 from app.registries.carbon_dataset_registry import (
     CARBON_ARCGIS_REGISTRY,
     CARBON_DATASET_REGISTRY,
@@ -129,7 +130,7 @@ def get_direct_carbon_reference_layer(
         year_range = meta.get("year_range")
         if year_range and not year_range[0] <= dataset_year <= year_range[1]:
             raise AnalysisError(f"Tahun {dataset_year} di luar cakupan {dataset_key}.", 422)
-    effective_year = dataset_year if available_years or selectable_year else meta.get("year")
+    effective_year = meta.get("source_period") if meta.get("periods") else dataset_year if available_years or selectable_year else meta.get("year")
     source_year = effective_year if isinstance(effective_year, int) else dataset_year
     ingestion = meta.get("ingestion_method")
     tile_url = None
@@ -213,6 +214,10 @@ def get_direct_carbon_reference_layer(
         "resolution": meta.get("resolution"),
         "unit": meta.get("unit"),
         "target_pool": meta.get("target_pool"),
+        "quantity": meta.get("quantity"),
+        "depth_cm": meta.get("depth_cm"),
+        "source_period": meta.get("source_period"),
+        "source_url": meta.get("source_url"),
         "provider_type": meta.get("provider_type"),
         "vis_params": {
             "min": vis_min if vis_min is not None else meta.get("vis_min", 0),
@@ -242,6 +247,11 @@ def active_carbon_model_compatibility(db: Session) -> dict[str, list[str]]:
             names = grouped.setdefault(dataset_key, [])
             if model.name not in names:
                 names.append(model.name)
+    for model in builtin_carbon_models(db=db):
+        for dataset_key in model["metadata_json"]["compatible_reference_datasets"]:
+            names = grouped.setdefault(dataset_key, [])
+            if model["name"] not in names:
+                names.append(model["name"])
     return grouped
 
 
@@ -307,6 +317,12 @@ def get_carbon_dataset_list(
             "reference_only_capable": meta.get("ingestion_method") in {"cog_rasterio", "soilgrids_rest", "cloud_geotiff_ee", "chloris_downloads_index"} or key in CARBON_ARCGIS_REGISTRY or key in CARBON_DATASET_REGISTRY,
             "unit": meta.get("unit"),
             "target_pool": meta.get("target_pool"),
+            "quantity": meta.get("quantity"),
+            "depth_cm": meta.get("depth_cm"),
+            "source_period": meta.get("source_period"),
+            "source_url": meta.get("source_url"),
+            "product_version": meta.get("product_version"),
+            "periods": meta.get("periods"),
             "resolution": meta.get("resolution"),
             "year": meta.get("year"),
             "year_range": meta.get("year_range"),
@@ -970,6 +986,15 @@ def analyze_carbon(db: Session, data: dict) -> dict:
     if "aoi" not in data:
         raise AnalysisError("Missing required field: aoi", 400)
 
+    pool_meta = CARBON_DATASET_REGISTRY.get(data.get("reference_dataset"), {})
+    builtin = get_builtin_carbon_model(data.get("model_name"), db=db)
+    if (builtin and not data.get("reference_only") and not data.get("load_only")) or (pool_meta.get("pool_analysis") and (data.get("reference_only") or data.get("load_only") or not data.get("model_name"))):
+        if not pool_meta.get("pool_analysis") and not (builtin and builtin["metadata_json"].get("method") == "saved_reference_ensemble"):
+            raise AnalysisError("Model BGB/SOC tidak kompatibel dengan dataset yang dipilih.", 422)
+        from app.services.carbon_pool_service import analyze_carbon_pool
+
+        return analyze_carbon_pool(db, data)
+
     year = int(data.get("year", datetime.now(UTC).year))
     start_month = int(data.get("start_month", 1))
     end_month = int(data.get("end_month", 12))
@@ -1240,7 +1265,7 @@ def analyze_carbon(db: Session, data: dict) -> dict:
         std_carbon = float(reference_stats_raw.get("agb_stdDev") or 0)
         min_carbon = float(reference_stats_raw.get("agb_min") or 0)
         max_carbon = float(reference_stats_raw.get("agb_max") or 0)
-        total_carbon_tons = mean_carbon * calculation_area
+        total_carbon_tons = mean_carbon * calculation_area if "g/kg" not in dataset_info.get("unit", "") else None
         co2_factor = config_service.get_analysis_defaults(db)["carbon_co2_factor"]
         stats_out = {
             "mean": round(mean_carbon, 2),
@@ -1279,8 +1304,8 @@ def analyze_carbon(db: Session, data: dict) -> dict:
                 "original_aoi_area_ha": round(original_area, 2),
                 "filtering_area_ha": round(filtering_area, 2),
                 "calculation_area_ha": round(calculation_area, 2),
-                "total_carbon_tons": round(total_carbon_tons, 2),
-                "carbon_dioxide_equivalent_tons": round(total_carbon_tons * co2_factor, 2),
+                "total_carbon_tons": round(total_carbon_tons, 2) if total_carbon_tons is not None else None,
+                "carbon_dioxide_equivalent_tons": round(total_carbon_tons * co2_factor, 2) if total_carbon_tons is not None else None,
                 "description": (
                     f"Mode reference-only: total dihitung langsung dari raster "
                     f"referensi {dataset_info.get('name') or reference_dataset} "
@@ -1501,6 +1526,8 @@ def analyze_carbon(db: Session, data: dict) -> dict:
             .combine(ee.Reducer.stdDev(), "", True)
             .combine(ee.Reducer.min(), "", True)
             .combine(ee.Reducer.max(), "", True)
+            .combine(ee.Reducer.percentile([25, 50, 75]), "", True)
+            .combine(ee.Reducer.histogram(32, None, 10000), "", True)
         )
         if data.get("include_percentiles", False):
             carbon_reducer = carbon_reducer.combine(ee.Reducer.percentile([2, 98]), "", True)
@@ -1559,7 +1586,72 @@ def analyze_carbon(db: Session, data: dict) -> dict:
             "std_dev": _rounded_stat("carbon_estimated_stdDev"),
             "min": _rounded_stat("carbon_estimated_min"),
             "max": _rounded_stat("carbon_estimated_max"),
+            "percentiles": {
+                "p25": _rounded_stat("carbon_estimated_p25"),
+                "median": _rounded_stat("carbon_estimated_p50"),
+                "p75": _rounded_stat("carbon_estimated_p75"),
+            },
         }
+        raw_histogram = carbon_stats.get("carbon_estimated_histogram")
+        if isinstance(raw_histogram, dict):
+            bucket_means = raw_histogram.get("bucketMeans") or raw_histogram.get("bucket_means") or []
+            histogram_counts = raw_histogram.get("histogram") or raw_histogram.get("counts") or []
+        elif isinstance(raw_histogram, list):
+            bucket_means = [item[0] for item in raw_histogram if isinstance(item, (list, tuple)) and len(item) >= 2]
+            histogram_counts = [item[1] for item in raw_histogram if isinstance(item, (list, tuple)) and len(item) >= 2]
+        else:
+            bucket_means, histogram_counts = [], []
+        if len(bucket_means) == len(histogram_counts) and bucket_means:
+            stats_out["histogram"] = {
+                "bucket_means": [float(value) for value in bucket_means],
+                "counts": [float(value) for value in histogram_counts],
+                "pixel_count": round(sum(float(value) for value in histogram_counts)),
+                "sampled": False,
+            }
+        if not stats_out.get("histogram"):
+            # Histogram reducers are not supported by every model/provider
+            # path. Fall back to a small deterministic sample of the actual
+            # predicted raster so the UI never substitutes a made-up curve.
+            try:
+                import numpy as np
+
+                sample_features = carbon_estimated.select(["carbon_estimated"]).sample(
+                    region=roi_for_calculation,
+                    scale=carbon_scale,
+                    numPixels=3000,
+                    seed=42,
+                    geometries=False,
+                    tileScale=8,
+                ).getInfo().get("features", [])
+                sample_values = []
+                for feature in sample_features:
+                    properties = feature.get("properties", {})
+                    value = properties.get("carbon_estimated")
+                    if value is None and properties:
+                        value = next(iter(properties.values()))
+                    try:
+                        number = float(value)
+                    except (TypeError, ValueError):
+                        continue
+                    if np.isfinite(number):
+                        sample_values.append(number)
+                if sample_values:
+                    counts, edges = np.histogram(sample_values, bins=24)
+                    stats_out["histogram"] = {
+                        "bucket_means": ((edges[:-1] + edges[1:]) / 2).astype(float).tolist(),
+                        "counts": counts.astype(int).tolist(),
+                        "pixel_count": len(sample_values),
+                        "sampled": True,
+                    }
+                    sampled_percentiles = np.percentile(sample_values, [25, 50, 75])
+                    percentiles = stats_out.get("percentiles") or {}
+                    percentiles.update({
+                        key: round(float(value), 2) if percentiles.get(key) is None else percentiles[key]
+                        for key, value in zip(("p25", "median", "p75"), sampled_percentiles, strict=True)
+                    })
+                    stats_out["percentiles"] = percentiles
+            except Exception as histogram_err:  # noqa: BLE001
+                logger.warning("Carbon histogram sample fallback failed: %s", type(histogram_err).__name__)
     else:
         # ── Server-side sampled sklearn inference (RF, GB, etc.) ─────────
         sampled_stats = inference_engine.predict_for_region_sampled(
@@ -1583,9 +1675,13 @@ def analyze_carbon(db: Session, data: dict) -> dict:
             "min": round(sampled_stats["min"], 2),
             "max": round(sampled_stats["max"], 2),
             "n_pixels": sampled_stats["n_pixels"],
+            "histogram": sampled_stats.get("histogram"),
+            "percentiles": sampled_stats.get("percentiles"),
         }
 
-    target_unit = _compat_meta.get("target_unit", "Mg/ha")
+    target_unit = _compat_meta.get("target_unit") or dataset_info.get("unit", "Mg/ha")
+    if "g/kg" in target_unit or "g/kg" in dataset_info.get("unit", ""):
+        total_carbon_tons = None
 
     _stat_mean = stats_out.get("mean") or 0
     _stat_std = stats_out.get("std_dev") or 0
@@ -1792,6 +1888,8 @@ def analyze_carbon_local(db: Session, data: dict) -> dict:
 
 
 def analyze_carbon_delta(db: Session, data: dict) -> dict:
+    if get_builtin_carbon_model(data.get("model_name"), db=db):
+        raise AnalysisError("Model BGB/SOC ini menggunakan periode referensi tetap. Pilih periode dataset untuk analisis tunggal; delta tahunan belum didukung.", 422)
     if "aoi" not in data:
         raise AnalysisError("Missing required field: aoi", 400)
 

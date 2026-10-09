@@ -942,12 +942,14 @@ def _queue_company_import(job_type: str, payload: dict, admin_id: int) -> dict:
 
 def _osm_named_boundary_filters(industry_types: list[str]) -> list[str]:
     filters = []
-    name_selectors = ('["name"]', '["operator"]', '["brand"]', '["ref"]')
+    # A key-regex selector matches any useful naming field in one predicate.
+    # The previous four-way expansion multiplied every industry selector and
+    # made nationwide Overpass requests much more expensive.
+    name_selector = '[~"^(name|operator|brand|ref)$"~"."]'
     for itype in industry_types:
         for tag_selector in _OSM_TAGS_MAP.get(itype, []):
             for osm_type in ("way", "relation"):
-                for name_selector in name_selectors:
-                    filters.append(f"{osm_type}{tag_selector}{name_selector}(area.searchArea);")
+                filters.append(f"{osm_type}{tag_selector}{name_selector}(area.searchArea);")
     return sorted(set(filters))
 
 
@@ -1161,9 +1163,8 @@ def admin_company_delete(cid: int, admin: AdminUser = Depends(require_permission
 
 
 def _fetch_osm_overpass(overpass_query: str) -> tuple[dict | None, str]:
-    """Fetch OSM data from Overpass mirrors. This runs in an import worker."""
-    osm_data = None
-    last_error = ""
+    """Try Overpass mirrors in order; queries are split by industry before this call."""
+    failures = []
     for server in _OVERPASS_SERVERS:
         try:
             resp = requests.post(
@@ -1174,41 +1175,67 @@ def _fetch_osm_overpass(overpass_query: str) -> tuple[dict | None, str]:
             )
             if resp.status_code == 200:
                 payload = resp.json()
-                if payload.get("remark") and not payload.get("elements"):
-                    last_error = str(payload["remark"])
+                if not isinstance(payload, dict):
+                    failures.append(f"{server}: respons JSON bukan objek")
                     continue
-                osm_data = payload
-                break
-            last_error = f"HTTP {resp.status_code} dari {server}"
-        except (requests.RequestException, ValueError) as e:
-            last_error = f"{server}: {e}"
-    return osm_data, last_error
+                if payload.get("remark") and not payload.get("elements"):
+                    failures.append(f"{server}: {str(payload['remark'])[:200]}")
+                    continue
+                return payload, ""
+            failures.append(f"HTTP {resp.status_code} dari {server}")
+        except (requests.RequestException, ValueError, TypeError) as exc:
+            failures.append(f"{server}: {str(exc)[:200]}")
+        logger.info("Overpass endpoint %s gagal; mencoba mirror berikutnya", server)
+    return None, " | ".join(failures)
 
 
 def _perform_osm_company_import(db: Session, admin: AdminUser, industry_types: list[str], progress) -> dict:
-    filters = _osm_named_boundary_filters(industry_types)
-    if not filters:
+    selected_types = list(dict.fromkeys(itype for itype in industry_types if itype in _OSM_TAGS_MAP))
+    if not selected_types:
         raise HTTPException(status_code=400, detail="Tidak ada tipe industri yang valid")
 
-    overpass_query = (
-        '[out:json][timeout:90][maxsize:536870912];\n'
-        'area["ISO3166-1"="ID"][admin_level=2]->.searchArea;\n'
-        f"({chr(10).join(filters)});\n"
-        "out geom qt;"
-    )
+    elements_by_id = {}
+    failed_types = []
+    warnings = []
+    for index, industry_type in enumerate(selected_types, start=1):
+        filters = _osm_named_boundary_filters([industry_type])
+        if not filters:
+            continue
+        overpass_query = (
+            '[out:json][timeout:90][maxsize:536870912];\n'
+            'area["ISO3166-1"="ID"][admin_level=2]->.searchArea;\n'
+            f"({chr(10).join(filters)});\n"
+            "out geom qt;"
+        )
+        progress(f"Mengambil data OSM {industry_type} ({index}/{len(selected_types)})...")
+        osm_data, fetch_error = _fetch_osm_overpass(overpass_query)
+        if osm_data is None:
+            failed_types.append(f"{industry_type}: {fetch_error or 'tidak ada respons dari mirror Overpass'}")
+            continue
+        if osm_data.get("remark"):
+            warnings.append(f"{industry_type}: Overpass mengembalikan data parsial ({str(osm_data['remark'])[:180]})")
+        for element in osm_data.get("elements", []):
+            key = (element.get("type"), element.get("id"))
+            if key[0] and key[1] is not None:
+                elements_by_id.setdefault(key, element)
 
-    progress("Mengambil data dari OpenStreetMap/Overpass...")
-    osm_data, last_error = _fetch_osm_overpass(overpass_query)
-    if osm_data is None:
-        logger.warning("Overpass company import failed: %s", last_error)
-        raise RuntimeError(f"Semua server Overpass gagal. {last_error[:300]} Coba lagi nanti.")
+    if failed_types and len(failed_types) == len(selected_types):
+        details = " ; ".join(failed_types)
+        logger.warning("Overpass company import failed for all selected types: %s", details)
+        raise RuntimeError(
+            "Overpass gagal mengambil seluruh tipe OSM yang dipilih meski query sudah dipecah per jenis industri. "
+            f"{details[:900]} Coba ulang beberapa saat lagi atau pilih satu jenis industri."
+        )
 
-    elements = osm_data.get("elements", [])
+    if failed_types:
+        warnings.extend(f"Data {failure}" for failure in failed_types)
+
+    elements = list(elements_by_id.values())
     progress(f"Menyimpan {len(elements)} objek OSM ke basis data...")
     imported, skipped, errors = 0, 0, []
     for element in elements:
         tags = element.get("tags", {})
-        name = tags.get("name") or tags.get("operator") or tags.get("ref")
+        name = tags.get("name") or tags.get("operator") or tags.get("brand") or tags.get("ref")
         if not name:
             skipped += 1
             continue
@@ -1227,7 +1254,7 @@ def _perform_osm_company_import(db: Session, admin: AdminUser, industry_types: l
         try:
             company = CompanyBoundary(
                 name=name,
-                company_name=tags.get("operator") or None,
+                company_name=tags.get("operator") or tags.get("brand") or None,
                 industry_type=itype,
                 sub_type=_osm_sub_type(tags),
                 province=tags.get("is_in:province") or tags.get("addr:province") or None,
@@ -1246,7 +1273,13 @@ def _perform_osm_company_import(db: Session, admin: AdminUser, industry_types: l
 
     db.commit()
     audit_service.log_audit(db, admin.id, "company.import_osm", "company_boundary", None, detail={"imported": imported, "skipped": skipped})
-    return {"imported": imported, "skipped": skipped, "errors": errors[:10]}
+    return {
+        "imported": imported,
+        "skipped": skipped,
+        "errors": errors[:10],
+        "warnings": warnings[:10],
+        "failed_types": [failure.split(":", 1)[0] for failure in failed_types],
+    }
 
 
 @router.post("/companies/import/osm", status_code=202)

@@ -9,6 +9,7 @@ from app.core.viewer_features import require_feature
 from app.db.session import get_db
 from app.registries.model_compatibility import backfill_legacy_metadata, get_compatible_datasets
 from app.registries.carbon_dataset_registry import canonical_carbon_dataset_key
+from app.registries.carbon_pool_models import builtin_carbon_models, get_builtin_carbon_model
 
 router = APIRouter(
     tags=["models"],
@@ -47,6 +48,9 @@ def models_list(
             continue
         results.append(m.to_dict_public())
 
+    if model_type in (None, "carbon") and gee_deployable is not False:
+        existing_names = {m["name"] for m in results}
+        results.extend(m for m in builtin_carbon_models(target_dataset, db=db) if m["name"] not in existing_names)
     return {"models": results, "count": len(results)}
 
 
@@ -60,6 +64,9 @@ def model_detail(model_id: int, db: Session = Depends(get_db)):
 
 @router.get("/models/by-name/{model_name}")
 def model_by_name(model_name: str, db: Session = Depends(get_db)):
+    builtin = get_builtin_carbon_model(model_name, db=db)
+    if builtin:
+        return builtin
     model = db.query(UploadedModel).filter_by(name=model_name, is_active=True).first()
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
