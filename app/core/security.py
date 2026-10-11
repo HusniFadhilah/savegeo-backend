@@ -283,31 +283,39 @@ def get_current_disaster_viewer(
     user tokens valid for admin routes; it is scoped only to disaster viewer
     endpoints that explicitly depend on this function.
     """
-    raw_token = (
-        _credential_or_cookie(request, credentials, USER_SESSION_COOKIE, ADMIN_SESSION_COOKIE) or token
-    )
-    if raw_token is None:
+    if credentials is not None:
+        candidate_tokens = [credentials.credentials]
+    else:
+        # A browser may carry both session cookies (for example after switching
+        # between an admin and a viewer account). An expired user cookie must
+        # not mask a still-valid admin session, so validate each cookie before
+        # falling back to the tile query token.
+        candidate_tokens = [
+            request.cookies.get(USER_SESSION_COOKIE),
+            request.cookies.get(ADMIN_SESSION_COOKIE),
+            token,
+        ]
+    candidate_tokens = [value for value in candidate_tokens if value]
+    if not candidate_tokens:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
-    payload = decode_access_token(raw_token)
-    token_type = payload.get("typ")
+    for raw_token in candidate_tokens:
+        try:
+            payload = decode_access_token(raw_token)
+            subject_id = int(payload["sub"])
+        except (HTTPException, KeyError, TypeError, ValueError):
+            continue
 
-    if token_type == "user":
-        user = db.get(User, int(payload["sub"]))
-        if user is None or not user.is_active:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED, detail="User account not found or inactive"
-            )
-        return user
+        token_type = payload.get("typ")
+        if token_type == "user":
+            user = db.get(User, subject_id)
+            if user is not None and user.is_active:
+                return user
+        elif token_type in (None, "admin"):
+            admin = db.get(AdminUser, subject_id)
+            if admin is not None and admin.is_active:
+                return admin
 
-    if token_type in (None, "admin"):
-        admin = db.get(AdminUser, int(payload["sub"]))
-        if admin is None or not admin.is_active:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin account not found or inactive"
-            )
-        return admin
-
-    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token type")
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired session")
 
 
 def get_current_app_viewer(

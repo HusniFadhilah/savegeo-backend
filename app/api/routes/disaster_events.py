@@ -30,7 +30,7 @@ from app.db.session import get_db
 from app.registries import disaster_model_registry
 from app.repositories import disaster_repo
 from app.services.disaster_cross_layer_service import get_available_cross_layer_stats
-from app.services import disaster_capability_service, firms_service, wildfire_hotspot_service
+from app.services import disaster_capability_service
 from app.services import samgeo_service
 from app.services.gee_common import AnalysisError, public_analysis_error
 
@@ -245,15 +245,9 @@ def list_disasters(
     )
     result = []
     for event in events:
-        if event.disaster_type == "forest_fire":
-            # Populate the cache only once. Subsequent overview/detail reads
-            # are served from the database until an explicit admin sync.
-            try:
-                wildfire_hotspot_service.ensure_initial_sync(db, event)
-            except firms_service.FirmsRequestError:
-                # A source outage must not hide the published event. Existing
-                # database rows, if any, remain usable below.
-                pass
+        # Listing published events must stay a database-only read. FIRMS sync
+        # can require several upstream requests and is performed explicitly by
+        # the admin sync workflow, never while a user opens this page.
         data = event.to_dict()
         allowed = _compatible_model_ids(event)
         data["available_analysis_count"] = len({
