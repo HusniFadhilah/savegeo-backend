@@ -283,19 +283,21 @@ def get_current_disaster_viewer(
     user tokens valid for admin routes; it is scoped only to disaster viewer
     endpoints that explicitly depend on this function.
     """
+    candidate_tokens: list[str] = []
     if credentials is not None:
-        candidate_tokens = [credentials.credentials]
+        candidate_tokens.append(credentials.credentials)
     else:
         # A browser may carry both session cookies (for example after switching
         # between an admin and a viewer account). An expired user cookie must
         # not mask a still-valid admin session, so validate each cookie before
         # falling back to the tile query token.
-        candidate_tokens = [
+        for value in (
             request.cookies.get(USER_SESSION_COOKIE),
             request.cookies.get(ADMIN_SESSION_COOKIE),
             token,
-        ]
-    candidate_tokens = [value for value in candidate_tokens if value]
+        ):
+            if value:
+                candidate_tokens.append(value)
     if not candidate_tokens:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
     for raw_token in candidate_tokens:
