@@ -54,6 +54,13 @@ then deploys:
 - frontend workflow builds with `VITE_API_BASE_URL=/api`, syncs only `dist/`,
   and performs an HTTP smoke test.
 
+Backend provenance JSON is always preserved in GitHub job summaries. Artifact
+uploads are an additional copy with seven-day retention. If GitHub artifact
+storage is unavailable, the deployment job recreates metadata from the exact
+validated checkout and GitHub run context; the SHA/environment/workflow checks
+remain mandatory. A final deployment-record upload failure is reported as a
+warning after the container, Ollama, health, and revision checks have passed.
+
 ## Operations
 
 ```bash
