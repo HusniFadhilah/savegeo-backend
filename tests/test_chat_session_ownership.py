@@ -285,6 +285,17 @@ def test_agent_refuses_foreign_session_before_calling_model(db_session: Session,
     assert body == {"error": "Chat session not found"}
 
 
+@pytest.mark.parametrize("session_id, expected_status", [(9999, 404), (True, 400), (-1, 400), ("1", 400), ({"id": 1}, 400)])
+def test_agent_refuses_unknown_or_malformed_session_before_model(db_session, monkeypatch, session_id, expected_status):
+    monkeypatch.setattr(agent_service.rate_limiter, "check", lambda _ip: (True, "", 0))
+    monkeypatch.setattr(agent_service.rate_limiter, "get_limits", lambda: {"max_chars": 4000, "max_file_mb": 5})
+    monkeypatch.setattr(agent_service, "geoai_with_ai", lambda *_args, **_kwargs: pytest.fail("model must not run"))
+    _body, status, _headers = agent_service.run_agent_control(
+        db_session, _request(), {"message": "test", "mode": "geoai", "session_id": session_id}, owner_key="user:1"
+    )
+    assert status == expected_status
+
+
 def test_agent_keeps_direct_reference_context_for_carbon_viewer(db_session: Session, monkeypatch):
     direct_rows = [
         {

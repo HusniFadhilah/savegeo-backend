@@ -219,6 +219,13 @@ class Settings(BaseSettings):
             self.jwt_secret_key = secrets.token_urlsafe(48)
         if self.auth_cookie_samesite.lower() not in {"lax", "strict", "none"}:
             raise ValueError("AUTH_COOKIE_SAMESITE must be lax, strict, or none")
+        if self.app_env.lower() in {"prod", "production", "staging"}:
+            if self.auth_cookie_secure is False or not self.csrf_protection_enabled:
+                raise ValueError("Production requires Secure session cookies and CSRF protection")
+            if "*" in self.allowed_origins_list:
+                raise ValueError("Production CORS origins must be explicit")
+        if self.auth_cookie_samesite.lower() == "none" and not self.session_cookie_secure:
+            raise ValueError("SameSite=None requires Secure session cookies")
         return self
 
     @property

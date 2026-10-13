@@ -23,6 +23,8 @@ from app.core.security import (
     hash_password,
     set_session_cookie,
     verify_password,
+    ensure_current_session,
+    revoke_account_sessions,
 )
 from app.db.models.user import User
 from app.db.session import get_db
@@ -69,7 +71,8 @@ def login(payload: UserLoginRequest, response: Response, db: Session = Depends(g
 
 
 @router.post("/logout")
-def logout(response: Response):
+def logout(response: Response, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    revoke_account_sessions(db, user)
     clear_session_cookie(response, USER_SESSION_COOKIE)
     return {"message": "Logout berhasil"}
 
@@ -113,6 +116,12 @@ def reset_password(payload: PasswordResetRequest, db: Session = Depends(get_db))
     if not user or not user.is_active:
         raise HTTPException(status_code=401, detail="Token reset password tidak valid")
 
-    user.password_hash = hash_password(payload.password)
+    ensure_current_session(reset_payload, user)
+    changed = db.query(User).filter(User.id == user.id, User.password_hash == user.password_hash).update(
+        {User.password_hash: hash_password(payload.password)}, synchronize_session=False
+    )
+    if changed != 1:
+        db.rollback()
+        raise HTTPException(status_code=401, detail="Token reset password tidak valid")
     db.commit()
     return {"message": "Password berhasil diperbarui. Silakan login dengan password baru."}

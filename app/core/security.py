@@ -1,10 +1,7 @@
 """JWT auth + password hashing for the admin panel.
 
-Ports `admin_routes.py`'s `require_admin` decorator / `_generate_token` helper
-(legacy backend) into FastAPI dependency form. Token shape is kept identical
-(claims: sub, username, exp, iat) so any client already holding a legacy token
-format understanding is unaffected — only the signing secret changes source
-(env var instead of Flask app.config, same semantics).
+Authenticates browser cookies and API tokens against durable account session
+versions and current password fingerprints. Legacy tokens require a new login.
 """
 
 from __future__ import annotations
@@ -14,6 +11,7 @@ import base64
 import hashlib
 import hmac
 import os
+import uuid
 from typing import Literal, cast
 
 import bcrypt
@@ -90,6 +88,7 @@ def create_access_token(admin: AdminUser) -> str:
         "sub": str(admin.id),
         "username": admin.username,
         "typ": "admin",
+        **_session_claims(admin),
         "iat": now,
         "exp": now + dt.timedelta(minutes=settings.access_token_expire_minutes),
     }
@@ -106,6 +105,7 @@ def create_user_access_token(user: User) -> str:
         "sub": str(user.id),
         "username": user.username,
         "typ": "user",
+        **_session_claims(user),
         "iat": now,
         "exp": now + dt.timedelta(minutes=settings.access_token_expire_minutes),
     }
@@ -120,6 +120,7 @@ def create_password_reset_token(user: User) -> str:
         "username": user.username,
         "typ": "user_password_reset",
         "purpose": "password_reset",
+        **_session_claims(user),
         "iat": now,
         "exp": now + dt.timedelta(minutes=settings.password_reset_token_expire_minutes),
     }
@@ -134,6 +135,7 @@ def create_admin_password_reset_token(admin: AdminUser) -> str:
         "username": admin.username,
         "typ": "admin_password_reset",
         "purpose": "password_reset",
+        **_session_claims(admin),
         "iat": now,
         "exp": now + dt.timedelta(minutes=settings.password_reset_token_expire_minutes),
     }
@@ -157,11 +159,54 @@ def decode_admin_password_reset_token(token: str) -> dict:
 def decode_access_token(token: str) -> dict:
     settings = get_settings()
     try:
-        return jwt.decode(token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
-    except jwt.PyJWTError as exc:
+        payload = jwt.decode(
+            token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm],
+            options={"require": ["sub", "typ", "iat", "exp", "sv", "pwh", "jti"]},
+        )
+        if not isinstance(payload["sub"], str) or not payload["sub"].isdigit():
+            raise ValueError("Invalid subject")
+        if int(payload["sub"]) <= 0 or type(payload["sv"]) is not int or payload["sv"] < 0:
+            raise ValueError("Invalid session claims")
+        if not isinstance(payload["pwh"], str) or not isinstance(payload["jti"], str):
+            raise ValueError("Invalid session claims")
+        return payload
+    except (jwt.PyJWTError, ValueError, TypeError) as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token"
         ) from exc
+
+
+def _password_fingerprint(account: User | AdminUser) -> str:
+    # A keyed digest binds tokens to the current password without exposing its hash.
+    return hmac.new(
+        get_settings().jwt_secret_key.encode(), account.password_hash.encode(), hashlib.sha256
+    ).hexdigest()
+
+
+def _session_claims(account: User | AdminUser) -> dict:
+    return {
+        "sv": account.session_version or 0,
+        "pwh": _password_fingerprint(account),
+        "jti": uuid.uuid4().hex,
+    }
+
+
+def ensure_current_session(payload: dict, account: User | AdminUser) -> None:
+    if (
+        payload.get("sv") != (account.session_version or 0)
+        or not hmac.compare_digest(payload.get("pwh", ""), _password_fingerprint(account))
+    ):
+        raise HTTPException(status_code=401, detail="Invalid or revoked session")
+
+
+def revoke_account_sessions(db: Session, account: User | AdminUser) -> None:
+    # Atomic database increment: durable across workers/restarts and concurrent logouts.
+    model = type(account)
+    db.query(model).filter(model.id == account.id).update(
+        {model.session_version: model.session_version + 1}, synchronize_session=False
+    )
+    db.commit()
+    db.refresh(account)
 
 
 def set_session_cookie(response: Response, name: str, token: str) -> None:
@@ -220,16 +265,15 @@ def get_current_admin(
     if raw_token is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
     payload = decode_access_token(raw_token)
-    # Tokens minted before the "typ" claim existed have no "typ" key - treated
-    # as admin (legacy). A token explicitly minted as "user" is rejected here
-    # so a User account can never reach an admin route with its own token.
-    if payload.get("typ") not in (None, "admin"):
+    # Public account tokens can never authenticate as an admin.
+    if payload.get("typ") != "admin":
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token type")
     admin = db.get(AdminUser, int(payload["sub"]))
     if admin is None or not admin.is_active:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin account not found or inactive"
         )
+    ensure_current_session(payload, admin)
     return admin
 
 
@@ -266,6 +310,7 @@ def get_current_user(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="User account not found or inactive"
         )
+    ensure_current_session(payload, user)
     return user
 
 
@@ -311,11 +356,19 @@ def get_current_disaster_viewer(
         if token_type == "user":
             user = db.get(User, subject_id)
             if user is not None and user.is_active:
-                return user
-        elif token_type in (None, "admin"):
+                try:
+                    ensure_current_session(payload, user)
+                    return user
+                except HTTPException:
+                    continue
+        elif token_type == "admin":
             admin = db.get(AdminUser, subject_id)
             if admin is not None and admin.is_active:
-                return admin
+                try:
+                    ensure_current_session(payload, admin)
+                    return admin
+                except HTTPException:
+                    continue
 
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired session")
 

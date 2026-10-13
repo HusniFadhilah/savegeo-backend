@@ -12,6 +12,7 @@ import re
 import time
 from collections import defaultdict, deque
 import uuid
+from urllib.parse import urlsplit
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -86,10 +87,24 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     def _csrf_rejected(self, request: Request) -> bool:
         if not self.settings.csrf_protection_enabled or request.method in {"GET", "HEAD", "OPTIONS"}:
             return False
-        if not any(request.cookies.get(name) for name in ("savegeo_admin_session", "savegeo_user_session")):
-            return False
+        has_cookie = any(request.cookies.get(name) for name in ("savegeo_admin_session", "savegeo_user_session"))
         origin = request.headers.get("origin")
-        return bool(origin and origin not in self.settings.allowed_origins_list)
+        is_auth = request.url.path.startswith(("/api/auth/", "/api/admin/auth/"))
+        if not has_cookie and not is_auth:
+            return False
+        if origin:
+            return origin not in self.settings.allowed_origins_list
+        if not has_cookie:
+            return False  # Non-browser login clients do not use ambient credentials.
+        referer = request.headers.get("referer")
+        if referer:
+            try:
+                parsed = urlsplit(referer)
+            except ValueError:
+                return True
+            return f"{parsed.scheme}://{parsed.netloc}" not in self.settings.allowed_origins_list
+        # Cookie mutations must carry evidence of a trusted browser origin.
+        return True
 
     async def dispatch(self, request: Request, call_next) -> Response:
         supplied = request.headers.get("X-Request-ID", "")
@@ -97,11 +112,13 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         request.state.request_id = request_id
 
         if self._rate_limited(request):
-            return self._problem(request, 429, "Rate limit exceeded", {"Retry-After": "60"})
-        if self._csrf_rejected(request):
-            return self._problem(request, 403, "Origin is not allowed for cookie-authenticated requests")
-
-        response = await call_next(request)
+            response = self._problem(request, 429, "Rate limit exceeded", {"Retry-After": "60"})
+        elif self._csrf_rejected(request):
+            response = self._problem(request, 403, "Origin is not allowed for cookie-authenticated requests")
+        else:
+            response = await call_next(request)
+        if request.url.path.startswith(self.settings.api_prefix + "/"):
+            response.headers["Cache-Control"] = "no-store"
         response.headers["X-Request-ID"] = request_id
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"

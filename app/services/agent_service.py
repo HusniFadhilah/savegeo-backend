@@ -203,7 +203,9 @@ def run_agent_control(
     geoai_context = payload.get("context") or {}
     image_b64 = payload.get("image") or None
     attachment = payload.get("attachment") or None
-    session_id = payload.get("session_id") or None
+    session_id = payload.get("session_id")
+    if session_id is not None and (type(session_id) is not int or not 0 < session_id <= 2**63 - 1):
+        return {"error": "Invalid chat session ID"}, 400, {}
 
     limits = rate_limiter.get_limits()
     max_chars = limits["max_chars"]
@@ -233,7 +235,7 @@ def run_agent_control(
     session: ChatSession | None = None
     if session_id:
         session = db.get(ChatSession, session_id)
-        if session is not None and session.owner_key != owner_key:
+        if session is None or session.owner_key != owner_key:
             # Hide whether a foreign session ID exists.
             return {"error": "Chat session not found"}, 404, {}
 

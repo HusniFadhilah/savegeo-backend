@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
@@ -19,6 +19,16 @@ from app.services import agent_service
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 logger = logging.getLogger(__name__)
+
+
+async def _json_object(request: Request) -> dict:
+    try:
+        payload = await request.json()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="JSON body must be an object")
+    return payload
 
 
 @router.get("/capabilities")
@@ -50,7 +60,7 @@ async def agent_analyze(
     By default the agent returns a validated plan. Set execute=true to run the
     whitelisted GeoMoka analysis endpoint selected by the planner.
     """
-    payload = await request.json()
+    payload = await _json_object(request)
     return agent_service.run_agent_analyze(db, request, payload, viewer_feature_codes(db, viewer))
 
 
@@ -65,7 +75,7 @@ async def agent_control(
     Body: { message, page_state, image?, attachment?, session_id? }
     Returns: { intent, confidence, needs_confirmation, message, warnings, actions, session_id }
     """
-    payload = await request.json()
+    payload = await _json_object(request)
     result, status_code, headers = agent_service.run_agent_control(
         db,
         request,

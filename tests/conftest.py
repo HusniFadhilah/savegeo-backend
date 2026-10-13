@@ -25,5 +25,5 @@ def db_available() -> bool:
 def client():
     from app.main import app
 
-    with TestClient(app) as c:
+    with TestClient(app, headers={"Origin": "http://localhost:5501"}) as c:
         yield c

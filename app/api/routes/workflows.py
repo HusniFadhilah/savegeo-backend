@@ -10,7 +10,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from app.core.security import USER_SESSION_COOKIE, _credential_or_cookie, decode_access_token, get_current_user
+from app.core.security import USER_SESSION_COOKIE, _credential_or_cookie, get_current_user
 from app.core.viewer_features import (
     ensure_workflow_feature_access,
     viewer_feature_codes,
@@ -35,11 +35,7 @@ def optional_user(
     if not raw_token:
         return None
     try:
-        payload = decode_access_token(raw_token)
-        if payload.get("typ") != "user":
-            return None
-        user = db.get(User, int(payload["sub"]))
-        return user if user and user.is_active else None
+        return get_current_user(request=request, credentials=credentials, db=db)
     except (HTTPException, ValueError, TypeError):
         return None
 

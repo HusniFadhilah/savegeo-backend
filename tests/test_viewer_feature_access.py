@@ -231,7 +231,7 @@ def test_viewer_api_gates_alternate_user_auth_and_analysis_payload(monkeypatch):
 
     previous = app.dependency_overrides.get(get_db)
     app.dependency_overrides[get_db] = override_get_db
-    client = TestClient(app)
+    client = TestClient(app, headers={"Origin": "http://localhost:5501"})
     try:
         for cookie_name, token in ((ADMIN_SESSION_COOKIE, admin_token), (USER_SESSION_COOKIE, user_token)):
             response = client.get("/api/app/features", cookies={cookie_name: token})
@@ -473,7 +473,7 @@ def test_narrow_viewer_manager_and_full_access_can_update_without_sensitive_acce
 
     previous = app.dependency_overrides.get(get_db)
     app.dependency_overrides[get_db] = override_get_db
-    client = TestClient(app)
+    client = TestClient(app, headers={"Origin": "http://localhost:5501"})
     try:
         legacy_permission_denied = client.put(
             "/api/admin/roles/viewer-features",

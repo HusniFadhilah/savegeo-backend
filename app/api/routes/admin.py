@@ -38,6 +38,8 @@ from app.core.security import (
     hash_password,
     set_session_cookie,
     verify_password,
+    ensure_current_session,
+    revoke_account_sessions,
 )
 from app.db.models.admin_user import AdminUser
 from app.db.models.company_boundary import CompanyBoundary
@@ -116,6 +118,13 @@ def _safe_model_stem(value: str) -> str:
     return _MODEL_NAME_RE.sub("_", value).strip("._-") or "model"
 
 
+def _ensure_model_execution_permission(admin: AdminUser) -> None:
+    # Serialized ML artifacts can execute code when deserialized. Upload/import
+    # is a server-code trust decision, beyond ordinary model catalog editing.
+    if not admin_has_permission(admin, "secret.write"):
+        raise HTTPException(status_code=403, detail="Model upload/import requires trusted server execution access")
+
+
 # -- Auth --
 @router.post("/auth/login")
 def login(payload: LoginRequest, response: Response, db: Session = Depends(get_db)):
@@ -129,7 +138,8 @@ def login(payload: LoginRequest, response: Response, db: Session = Depends(get_d
 
 
 @router.post("/auth/logout")
-def logout(response: Response):
+def logout(response: Response, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+    revoke_account_sessions(db, admin)
     clear_session_cookie(response, ADMIN_SESSION_COOKIE)
     return {"message": "Logout berhasil"}
 
@@ -219,7 +229,13 @@ def reset_password(payload: PasswordResetRequest, db: Session = Depends(get_db))
     if not admin or not admin.is_active:
         raise HTTPException(status_code=401, detail="Token reset password tidak valid")
 
-    admin.password_hash = hash_password(payload.password)
+    ensure_current_session(reset_payload, admin)
+    changed = db.query(AdminUser).filter(
+        AdminUser.id == admin.id, AdminUser.password_hash == admin.password_hash
+    ).update({AdminUser.password_hash: hash_password(payload.password)}, synchronize_session=False)
+    if changed != 1:
+        db.rollback()
+        raise HTTPException(status_code=401, detail="Token reset password tidak valid")
     db.commit()
     return {"message": "Password berhasil diperbarui. Silakan login dengan password baru."}
 
@@ -524,6 +540,7 @@ async def upload_model(
     admin: AdminUser = Depends(require_permission("model.write")),
     db: Session = Depends(get_db),
 ):
+    _ensure_model_execution_permission(admin)
     if model_type not in ("carbon", "vegetation", "landcover"):
         raise HTTPException(status_code=400, detail="model_type must be carbon, vegetation, or landcover")
 
@@ -634,6 +651,7 @@ def admin_model_set_default(model_id: int, admin: AdminUser = Depends(require_pe
 
 @router.post("/models/import-legacy")
 def admin_import_legacy_models(admin: AdminUser = Depends(require_permission("model.write")), db: Session = Depends(get_db)):
+    _ensure_model_execution_permission(admin)
     settings = get_settings()
     result = import_legacy_models(db, str(settings.model_path))
     return {"message": "Legacy import complete", **result}

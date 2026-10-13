@@ -41,6 +41,14 @@ def get_active_model_path(db: Session, model_type: str, model_name: str | None =
     for models that predate the DB registry.
     """
     settings = get_settings()
+    root = settings.model_path.resolve()
+
+    def safe_model_file(path: Path) -> str | None:
+        resolved = path.resolve()
+        if resolved.is_relative_to(root) and resolved.is_file() and resolved.suffix.lower() in ALLOWED_MODEL_EXTS:
+            return str(resolved)
+        return None
+
     if model_name:
         m = db.query(UploadedModel).filter_by(name=model_name, is_active=True).first()
     else:
@@ -48,22 +56,27 @@ def get_active_model_path(db: Session, model_type: str, model_name: str | None =
 
     if m:
         registered_path = Path(m.filepath)
-        if registered_path.exists():
-            return str(registered_path.resolve())
+        safe_path = safe_model_file(registered_path)
+        if safe_path:
+            return safe_path
 
         # Database rows created on Windows or by the legacy app can contain
         # an absolute path that does not exist inside the Linux production
         # container. The filename is the portable identity of the artifact;
         # resolve it from the mounted production model directory as a fallback.
         portable_path = settings.model_path / m.filename
-        if portable_path.exists():
-            return str(portable_path.resolve())
+        safe_path = safe_model_file(portable_path)
+        if safe_path:
+            return safe_path
 
     if model_name:
+        if any(character in model_name for character in ("/", "\\", ":")) or model_name in {".", ".."}:
+            return None
         for ext in ALLOWED_MODEL_EXTS:
             candidate = settings.model_path / f"{model_name}{ext}"
-            if candidate.exists():
-                return str(candidate.resolve())
+            safe_path = safe_model_file(candidate)
+            if safe_path:
+                return safe_path
 
     return None
 
