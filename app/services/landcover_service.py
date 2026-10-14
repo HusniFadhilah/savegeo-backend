@@ -679,7 +679,11 @@ def summarize_landcover_image(dataset: str, image, aoi, lc_scale: int, metadata:
     classes, total_area_ha, lc_scale = summary
 
     visual_image, visual_params = landcover_visual_image(dataset, image)
-    tile = get_tile_url(visual_image, visual_params, metadata["dataset_name"])
+    # Keep the rendered tile clipped to the requested AOI after remapping the
+    # categorical class values. This makes the display mask explicit instead
+    # of relying on an upstream image operation to carry its geometry mask
+    # through Earth Engine's visualization pipeline.
+    tile = get_tile_url(visual_image.clip(aoi), visual_params, metadata["dataset_name"])
     return {
         "classes": classes,
         "tile_url": tile["tile_url"] if tile else None,
@@ -764,7 +768,8 @@ def analyze_landcover(data: dict) -> dict:
                     else:
                         visual, params = landcover_visual_image(dataset, image)
                         shade = ee.Terrain.hillshade(confidence.multiply(100)).divide(255)
-                        tile = get_tile_url(visual.visualize(**params).divide(255).multiply(shade), {"min": 0, "max": 0.6}, "Dynamic World hillshade")
+                        shaded = visual.visualize(**params).divide(255).multiply(shade).clip(aoi)
+                        tile = get_tile_url(shaded, {"min": 0, "max": 0.6}, "Dynamic World hillshade")
                     if tile:
                         summary["tile_url"] = tile["tile_url"]
             results[dataset] = summary
