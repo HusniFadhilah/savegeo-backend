@@ -36,7 +36,7 @@ if ! grep -Eq '^POSTGRES_PASSWORD=.+$' "$BACKEND_DIR/.env"; then
   fi
 fi
 
-if grep -q '^JWT_SECRET_KEY=change_' "$BACKEND_DIR/.env"; then
+if ! grep -Eq '^JWT_SECRET_KEY=.+$' "$BACKEND_DIR/.env" || grep -q '^JWT_SECRET_KEY=change_' "$BACKEND_DIR/.env"; then
   jwt_secret="$(openssl rand -hex 48)"
   sed -i "s/^JWT_SECRET_KEY=.*/JWT_SECRET_KEY=$jwt_secret/" "$BACKEND_DIR/.env"
 fi

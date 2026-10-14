@@ -49,6 +49,11 @@ then deploys:
 
 - backend workflow syncs source while preserving server `.env` and `var/`,
   creates a pre-deploy DB dump, rebuilds containers, and checks `/api/health`;
+- before starting the API, deployment mounts the public frontend assets read-only
+  and rejects a JWT signing key that occurs in any HTML, JavaScript, JSON or source
+  map. Production also rejects short, repeated, provider-token and reused keys.
+  Generate the server-only key with `python -c "import secrets; print(secrets.token_urlsafe(64))"`.
+  Rotating it invalidates existing sessions and reset links; account data remains intact.
 - when `AI_PROVIDER=ollama`, the backend deployment probes Ollama from inside
   the running API runtime and verifies that `AI_MODEL` is installed;
 - frontend workflow builds with `VITE_API_BASE_URL=/api`, syncs only `dist/`,

@@ -16,7 +16,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore", hide_input_in_errors=True)
 
     # --- App ---
     app_env: str = "development"
@@ -213,8 +213,14 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def require_production_secrets(self) -> Settings:
-        if self.app_env.lower() in {"prod", "production"} and len(self.jwt_secret_key) < 32:
-            raise ValueError("JWT_SECRET_KEY must be at least 32 characters in production")
+        if self.app_env.lower() in {"prod", "production"}:
+            key = self.jwt_secret_key
+            repeated = any(key == (key[:n] * (len(key) // n + 1))[:len(key)] for n in range(1, 17)) if key else True
+            if len(key) < 64 or len(set(key)) < 12 or repeated or key.startswith(("eyJ", "pk.", "sk.")):
+                raise ValueError("JWT_SECRET_KEY must be an independent random secret of at least 64 characters in production")
+            for name, value in self.model_dump().items():
+                if name != "jwt_secret_key" and isinstance(value, str) and value == key:
+                    raise ValueError("JWT_SECRET_KEY must not reuse another configuration credential")
         if not self.jwt_secret_key:
             self.jwt_secret_key = secrets.token_urlsafe(48)
         if self.auth_cookie_samesite.lower() not in {"lax", "strict", "none"}:

@@ -39,7 +39,7 @@ def auth_app():
         db.add_all([
             User(id=1, username="alice", email="alice@example.test", password_hash=hash_password("password-123")),
             User(id=2, username="bob", email="bob@example.test", password_hash=hash_password("password-123")),
-            AdminUser(id=1, username="admin", password_hash=hash_password("password-123")),
+            AdminUser(id=1, username="admin", email="admin@example.test", password_hash=hash_password("password-123")),
         ])
         db.commit()
 
@@ -127,6 +127,31 @@ def test_user_token_cannot_authenticate_as_admin_with_same_numeric_id(auth_app):
     with factory() as db:
         token = create_user_access_token(db.get(User, 1))
     assert client.get("/api/admin/auth/me", headers={"Authorization": f"Bearer {token}"}).status_code == 401
+
+
+@pytest.mark.parametrize("kind", ["user", "admin"])
+def test_valid_session_tokens_are_not_accepted_in_urls(auth_app, kind):
+    client, factory = auth_app
+    with factory() as db:
+        token = create_user_access_token(db.get(User, 1)) if kind == "user" else create_access_token(db.get(AdminUser, 1))
+    assert client.get("/api/qa/tile", params={"token": token}).status_code == 401
+    assert client.get("/api/qa/tile", headers={"Authorization": f"Bearer {token}"}).status_code == 200
+
+
+@pytest.mark.parametrize("kind", ["user", "admin"])
+def test_reset_email_uses_fragment_not_server_query(auth_app, kind, monkeypatch):
+    from urllib.parse import urlsplit, parse_qs
+
+    client, _ = auth_app
+    sent = []
+    module = user_auth if kind == "user" else admin
+    monkeypatch.setattr(module, "send_password_reset_email", lambda _email, _name, link: sent.append(link))
+    prefix = "/api/auth" if kind == "user" else "/api/admin/auth"
+    response = client.post(prefix + "/forgot-password", json={"identifier": "alice" if kind == "user" else "admin"})
+    assert response.status_code == 200
+    link = urlsplit(sent[0])
+    assert "token" not in parse_qs(link.query)
+    assert parse_qs(link.fragment)["token"]
 
 
 def test_http_chat_history_and_mutations_reject_other_users_and_admins(auth_app):

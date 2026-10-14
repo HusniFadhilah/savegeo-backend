@@ -211,7 +211,7 @@ def forgot_password(payload: PasswordForgotRequest, db: Session = Depends(get_db
 
     settings = get_settings()
     token = create_admin_password_reset_token(admin)
-    reset_url = f"{settings.frontend_base_url.rstrip('/')}/reset-password?token={token}"
+    reset_url = f"{settings.frontend_base_url.rstrip('/')}/reset-password#token={token}"
     try:
         send_password_reset_email(admin.email, admin.username, reset_url)
     except EmailDeliveryError as exc:

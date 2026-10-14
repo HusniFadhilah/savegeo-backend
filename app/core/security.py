@@ -16,7 +16,7 @@ from typing import Literal, cast
 
 import bcrypt
 import jwt
-from fastapi import Depends, HTTPException, Query, Request, Response, status
+from fastapi import Depends, HTTPException, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
@@ -317,7 +317,6 @@ def get_current_user(
 def get_current_disaster_viewer(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
-    token: str | None = Query(default=None, description="JWT untuk permintaan tile Leaflet"),
     db: Session = Depends(get_db),
 ) -> User | AdminUser:
     """Auth gate for read-only Disaster Mapping views.
@@ -334,12 +333,11 @@ def get_current_disaster_viewer(
     else:
         # A browser may carry both session cookies (for example after switching
         # between an admin and a viewer account). An expired user cookie must
-        # not mask a still-valid admin session, so validate each cookie before
-        # falling back to the tile query token.
+        # not mask a still-valid admin session. URL query tokens are deliberately
+        # unsupported: URLs can escape through access logs and browser history.
         for value in (
             request.cookies.get(USER_SESSION_COOKIE),
             request.cookies.get(ADMIN_SESSION_COOKIE),
-            token,
         ):
             if value:
                 candidate_tokens.append(value)
@@ -376,7 +374,6 @@ def get_current_disaster_viewer(
 def get_current_app_viewer(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
-    token: str | None = Query(default=None, description="JWT untuk permintaan tile atau client geospasial"),
     db: Session = Depends(get_db),
 ) -> User | AdminUser:
     """Authentication dependency for the protected SaveGeo application.
@@ -386,7 +383,7 @@ def get_current_app_viewer(
     this as a named dependency makes the access policy explicit instead of
     relying only on the SPA route guard.
     """
-    return get_current_disaster_viewer(request=request, credentials=credentials, token=token, db=db)
+    return get_current_disaster_viewer(request=request, credentials=credentials, db=db)
 
 
 def require_permission(code: str):

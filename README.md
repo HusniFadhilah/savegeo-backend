@@ -32,7 +32,7 @@ Isi `.env` sesuai database dan layanan yang digunakan. File `.env` tidak boleh d
 | `APP_ENV` | `development` atau `production` |
 | `DEBUG` | Gunakan `false` pada production |
 | `DATABASE_URL` | PostgreSQL URI dengan driver `postgresql+psycopg://` |
-| `JWT_SECRET_KEY` | Secret acak untuk token autentikasi |
+| `JWT_SECRET_KEY` | Secret acak independen minimal 64 karakter di produksi; buat dengan `secrets.token_urlsafe(64)`, jangan gunakan token provider/browser |
 | `API_PREFIX` | Default `/api` |
 | `PORT` | Default `8086` |
 | `ALLOWED_ORIGINS` | Origin frontend dipisahkan koma |
