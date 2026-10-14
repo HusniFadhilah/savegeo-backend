@@ -9,6 +9,45 @@ from app.services.gee_common import AnalysisError, get_tile_url
 PROBABILITY_BANDS = ["water", "trees", "grass", "flooded_vegetation", "crops", "shrub_and_scrub", "built", "bare", "snow_and_ice"]
 
 
+def refresh_segmentation_tiles(aoi, pre_date, post_date, *, pre_scene_id=None, post_scene_id=None):
+    """Create fresh display URLs for a stored comparison without recomputing statistics."""
+    model = get_model("dynamic_world_v1")
+    pre, pre_meta = _prediction(aoi, pre_date, pre_scene_id)
+    post, post_meta = _prediction(aoi, post_date, post_scene_id)
+    for key in ("algorithm_versions", "qa_versions"):
+        if len(pre_meta[key]) != 1 or set(pre_meta[key]) != set(post_meta[key]):
+            raise AnalysisError(f"Versi model/preprocessing pre/post tidak konsisten ({key})", 422)
+
+    scene_ids = pre_meta["scene_ids"]
+    if not scene_ids:
+        raise AnalysisError("Scene Dynamic World pre tidak tersedia untuk memperbarui tile", 404)
+    projection = ee.Image(f"GOOGLE/DYNAMICWORLD/V1/{scene_ids[0]}").select("label").projection()
+    pre = pre.reproject(projection).clip(aoi)
+    post = post.reproject(projection).clip(aoi)
+    valid = pre.select("label").mask().And(post.select("label").mask())
+    pre_label = pre.select("label").toInt().updateMask(valid)
+    post_label = post.select("label").toInt().updateMask(valid)
+    change = post_label.updateMask(pre_label.neq(post_label))
+    palette = [item["color"] for item in model["classes"]]
+
+    tile_specs = {
+        "pre_tile_url": (pre_label, {"min": 0, "max": 8, "palette": palette}),
+        "post_tile_url": (post_label, {"min": 0, "max": 8, "palette": palette}),
+        "change_tile_url": (change, {"min": 0, "max": 8, "palette": palette}),
+        "confidence_tile_url": (
+            post.select(PROBABILITY_BANDS).reduce(ee.Reducer.max()).reproject(projection).clip(aoi),
+            {"min": 0, "max": 1, "palette": ["#fff7bc", "#006837"]},
+        ),
+    }
+    tiles = {}
+    for key, (image, vis_params) in tile_specs.items():
+        tile = get_tile_url(image.clip(aoi), vis_params, f"Dynamic World {key}")
+        if not tile or not tile.get("tile_url"):
+            raise AnalysisError(f"Tile segmentasi {key} gagal diperbarui", 502)
+        tiles[key] = tile["tile_url"]
+    return tiles
+
+
 def _prediction(aoi, date, scene_id=None):
     # Exactly the configured acquisition date, not a silent +/- date fallback.
     day = ee.Date(date.isoformat())

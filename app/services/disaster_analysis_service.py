@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import threading
 
 import ee
 from sqlalchemy.orm import Session
@@ -34,6 +35,89 @@ from app.services.disaster_exposure_service import (
 logger = logging.getLogger(__name__)
 
 _IMAGERY_WINDOW_DAYS = 5  # +/- window around an admin-picked acquisition_date to build a cloud-safe composite
+
+# Earth Engine map URLs expire. Keep refreshed display URLs in process memory
+# for a few hours so opening the same published review does not repeatedly
+# request new map IDs. This cache never changes a stored analysis or its
+# publication state.
+_DISPLAY_TILE_CACHE_TTL = 4 * 60 * 60
+_DISPLAY_TILE_FAILURE_TTL = 60
+_DISPLAY_TILE_CACHE: dict[tuple, tuple[float, dict | None]] = {}
+_DISPLAY_TILE_LOCKS: dict[tuple, threading.Lock] = {}
+_DISPLAY_TILE_CACHE_LOCK = threading.Lock()
+
+
+def serialize_result_for_view(db: Session, run, result, *, include_features: bool = True) -> dict:
+    """Serialize a result with fresh Dynamic World display URLs when needed.
+
+    Persisted statistics and publication metadata remain untouched. Only the
+    ephemeral map tile URLs in this response are replaced.
+    """
+    payload = result.to_dict(include_features=include_features)
+    if run.model_id != "dynamic_world_v1" or not result.is_published:
+        return payload
+
+    stored_comparison = payload.get("comparison")
+    if not isinstance(stored_comparison, dict):
+        return payload
+    comparison = dict(stored_comparison)
+    payload["comparison"] = comparison
+
+    completed_at = run.completed_at
+    if completed_at:
+        if completed_at.tzinfo is None:
+            completed_at = completed_at.replace(tzinfo=dt.UTC)
+        if (dt.datetime.now(dt.UTC) - completed_at).total_seconds() <= 6 * 60 * 60:
+            return payload
+
+    cache_timestamp = completed_at or getattr(result, "created_at", None)
+    cache_key = (result.id, cache_timestamp.isoformat() if cache_timestamp else "unknown")
+    now = dt.datetime.now(dt.UTC).timestamp()
+    with _DISPLAY_TILE_CACHE_LOCK:
+        cached = _DISPLAY_TILE_CACHE.get(cache_key)
+        refresh_lock = _DISPLAY_TILE_LOCKS.setdefault(cache_key, threading.Lock())
+    if cached and cached[0] > now:
+        tiles = cached[1]
+    else:
+        with refresh_lock:
+            now = dt.datetime.now(dt.UTC).timestamp()
+            with _DISPLAY_TILE_CACHE_LOCK:
+                cached = _DISPLAY_TILE_CACHE.get(cache_key)
+            if cached and cached[0] > now:
+                tiles = cached[1]
+            else:
+                tiles = None
+                try:
+                    from app.services.disaster_segmentation_service import refresh_segmentation_tiles
+
+                    aoi_row = disaster_repo.get_aoi(db, run.aoi_id)
+                    pre_img = disaster_repo.get_imagery(db, run.pre_imagery_id) if run.pre_imagery_id else None
+                    post_img = disaster_repo.get_imagery(db, run.post_imagery_id) if run.post_imagery_id else None
+                    pre_date = (comparison.get("pre") or {}).get("date") or getattr(pre_img, "acquisition_date", None)
+                    post_date = (comparison.get("post") or {}).get("date") or getattr(post_img, "acquisition_date", None)
+                    if not aoi_row or not pre_date or not post_date:
+                        raise AnalysisError("Metadata AOI/tanggal segmentasi tidak lengkap", 422)
+                    if isinstance(pre_date, str):
+                        pre_date = dt.date.fromisoformat(pre_date)
+                    if isinstance(post_date, str):
+                        post_date = dt.date.fromisoformat(post_date)
+                    aoi = create_geometry_from_payload({"geojson": aoi_row.geojson})
+                    tiles = refresh_segmentation_tiles(
+                        aoi, pre_date, post_date,
+                        pre_scene_id=getattr(pre_img, "scene_id", None),
+                        post_scene_id=getattr(post_img, "scene_id", None),
+                    )
+                    ttl = _DISPLAY_TILE_CACHE_TTL
+                except Exception:
+                    logger.warning("Could not refresh expired Dynamic World display tiles for run %s", run.id, exc_info=True)
+                    ttl = _DISPLAY_TILE_FAILURE_TTL
+                with _DISPLAY_TILE_CACHE_LOCK:
+                    _DISPLAY_TILE_CACHE[cache_key] = (dt.datetime.now(dt.UTC).timestamp() + ttl, tiles)
+
+    if tiles:
+        comparison.update(tiles)
+        payload["tile_url"] = tiles.get("post_tile_url") or payload.get("tile_url")
+    return payload
 
 
 def _window(center: dt.date, days: int = _IMAGERY_WINDOW_DAYS) -> tuple[str, str]:

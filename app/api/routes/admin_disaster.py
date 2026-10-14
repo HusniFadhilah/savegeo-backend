@@ -346,7 +346,7 @@ def admin_get_event(id: int, admin: AdminUser = Depends(require_permission("disa
     run_entries = []
     for run in runs:
         result = disaster_repo.get_result_for_run(db, run.id)
-        run_entries.append({"run": run.to_dict(), "result": result.to_dict(include_features=True) if result else None})
+        run_entries.append({"run": run.to_dict(), "result": disaster_analysis_service.serialize_result_for_view(db, run, result) if result else None})
 
     return {
         "event": event.to_dict(),
@@ -677,7 +677,7 @@ def admin_list_analyses(id: int, admin: AdminUser = Depends(require_permission("
     entries = []
     for run in runs:
         result = disaster_repo.get_result_for_run(db, run.id)
-        entries.append({"run": run.to_dict(), "result": result.to_dict(include_features=True) if result else None})
+        entries.append({"run": run.to_dict(), "result": disaster_analysis_service.serialize_result_for_view(db, run, result) if result else None})
     return {"runs": entries}
 
 

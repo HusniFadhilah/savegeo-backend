@@ -33,6 +33,7 @@ from app.services.disaster_cross_layer_service import get_available_cross_layer_
 from app.services import disaster_capability_service
 from app.services import samgeo_service
 from app.services.gee_common import AnalysisError, public_analysis_error
+from app.services.disaster_analysis_service import serialize_result_for_view
 
 router = APIRouter(
     prefix="/disasters",
@@ -155,7 +156,7 @@ def _build_analyses(db: Session, event_id: int) -> list[dict]:
                 "capability_status": capability.status,
                 "available": True,
                 "run": run.to_dict(),
-                "result": result.to_dict(include_features=(
+                "result": serialize_result_for_view(db, run, result, include_features=(
                     model.get("output_type") in {"feature_collection", "polygon"}
                     or str(model.get("output_type", "")).startswith("polygon")
                 )),
