@@ -380,7 +380,7 @@ jobs:
           severity: HIGH,CRITICAL
           exit-code: "1"
           ignore-unfixed: true
-          trivyignores: .trivyignore
+          trivyignores: .trivyignore.yaml
 
       - name: Report Trivy findings
         if: failure()
