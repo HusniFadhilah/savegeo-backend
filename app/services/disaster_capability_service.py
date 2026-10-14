@@ -237,7 +237,14 @@ def build_provenance(
 
 
 def validate_persisted_result(
-    db, event: object, run: object, result: object, *, require_published: bool = True
+    db,
+    event: object,
+    run: object,
+    result: object,
+    *,
+    require_published: bool = True,
+    current_inputs: tuple[object | None, object | None, object | None] | None = None,
+    has_features_override: bool | None = None,
 ) -> CapabilityCheck:
     """Re-check a result at read/publish time; registry changes invalidate old output."""
     model = get_model(getattr(run, "model_id", ""))
@@ -250,7 +257,12 @@ def validate_persisted_result(
     has_statistics = bool(getattr(result, "statistics", None))
     has_output = bool(getattr(result, "tile_url", None))
     if model.get("output_type") == "feature_collection" or str(model.get("output_type", "")).startswith("polygon"):
-        has_output = has_output or bool(getattr(result, "features", None))
+        has_features = (
+            has_features_override
+            if has_features_override is not None
+            else bool(getattr(result, "features", None))
+        )
+        has_output = has_output or has_features
     if not has_statistics or not has_output:
         return CapabilityCheck(False, "not_available", ("Output atau statistik hasil belum lengkap",))
     if getattr(run, "status", None) not in {"completed", "review_required", "published"}:
@@ -271,9 +283,12 @@ def validate_persisted_result(
 
     from app.repositories import disaster_repo
 
-    aoi = disaster_repo.get_aoi(db, run.aoi_id)
-    pre = disaster_repo.get_imagery(db, run.pre_imagery_id) if run.pre_imagery_id else None
-    post = disaster_repo.get_imagery(db, run.post_imagery_id) if run.post_imagery_id else None
+    if current_inputs is None:
+        aoi = disaster_repo.get_aoi(db, run.aoi_id)
+        pre = disaster_repo.get_imagery(db, run.pre_imagery_id) if run.pre_imagery_id else None
+        post = disaster_repo.get_imagery(db, run.post_imagery_id) if run.post_imagery_id else None
+    else:
+        aoi, pre, post = current_inputs
     inputs = check_inputs(model["model_id"], event, aoi, pre, post)
     if not inputs.allowed:
         return inputs

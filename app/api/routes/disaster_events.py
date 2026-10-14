@@ -12,19 +12,24 @@ every route uses to enforce this.
 from __future__ import annotations
 
 import math
+from types import SimpleNamespace
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from shapely.geometry import box, mapping, shape
-from sqlalchemy import select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from app.core.security import get_current_disaster_viewer
 from app.core.viewer_features import require_feature
 from app.db.models.disaster_event import DisasterEvent
+from app.db.models.disaster_aoi import DisasterAOI
+from app.db.models.analysis_result import AnalysisResult
+from app.db.models.analysis_run import AnalysisRun
 from app.services.disaster_completeness_service import build_completeness
 from app.db.models.hotspot import Hotspot
+from app.db.models.satellite_imagery import SatelliteImagery
 from app.db.models.wildfire_hotspot import WildfireHotspot
 from app.db.session import get_db
 from app.registries import disaster_model_registry
@@ -191,38 +196,139 @@ def _compatible_model_ids(event: DisasterEvent) -> set[str]:
     )}
 
 
-def _wildfire_metrics(db: Session, event: DisasterEvent) -> tuple[int, int]:
-    """Return persisted hotspot totals for a forest-fire event.
+def _wildfire_metrics_by_event(db: Session, events: list[DisasterEvent]) -> dict[int, tuple[int, int]]:
+    """Aggregate FIRMS card metrics in SQL without loading every hotspot JSON row."""
+    event_ids = [event.id for event in events if event.disaster_type == "forest_fire"]
+    if not event_ids:
+        return {}
 
-    The generic disaster list is also used by the Karhutla overview card. Keep
-    that card backed by the same persisted NASA FIRMS table as the standalone
-    wildfire API instead of letting the frontend interpret missing fields as 0.
-    """
-    rows = list(
-        db.execute(
-            select(WildfireHotspot.stats).where(
-                WildfireHotspot.event_id == event.id,
-                WildfireHotspot.is_published.is_(True),
-            )
-        ).scalars()
-    )
-    if rows:
-        high_confidence = sum(
-            str((stats or {}).get("confidence_category", (stats or {}).get("confidence_label", ""))).casefold()
-            == "high"
-            for stats in rows
+    confidence = func.lower(func.coalesce(
+        WildfireHotspot.stats["confidence_category"].as_string(),
+        WildfireHotspot.stats["confidence_label"].as_string(),
+        "",
+    ))
+    wildfire_rows = db.execute(
+        select(
+            WildfireHotspot.event_id,
+            func.count(WildfireHotspot.id),
+            func.coalesce(func.sum(case((confidence == "high", 1), else_=0)), 0),
         )
-        return len(rows), high_confidence
+        .where(
+            WildfireHotspot.event_id.in_(event_ids),
+            WildfireHotspot.is_published.is_(True),
+        )
+        .group_by(WildfireHotspot.event_id)
+    ).all()
+    metrics = {event_id: (int(total), int(high or 0)) for event_id, total, high in wildfire_rows}
 
-    # Preserve compatibility with older admin-curated hotspot rows when the
-    # persisted NASA table is still empty.
-    curated_count = db.execute(
-        select(Hotspot.id).where(
-            Hotspot.event_id == event.id,
-            Hotspot.is_published.is_(True),
+    # Preserve compatibility with older admin-curated hotspot rows when FIRMS
+    # has not yet stored any published observations for an event.
+    missing_ids = [event_id for event_id in event_ids if event_id not in metrics]
+    if missing_ids:
+        curated_rows = db.execute(
+            select(Hotspot.event_id, func.count(Hotspot.id))
+            .where(Hotspot.event_id.in_(missing_ids), Hotspot.is_published.is_(True))
+            .group_by(Hotspot.event_id)
+        ).all()
+        metrics.update({event_id: (int(total), 0) for event_id, total in curated_rows})
+
+    return {event_id: metrics.get(event_id, (0, 0)) for event_id in event_ids}
+
+
+def _available_analysis_counts(db: Session, events: list[DisasterEvent]) -> dict[int, int]:
+    """Validate published analyses with a few batched reads instead of N+1 queries."""
+    if not events:
+        return {}
+
+    events_by_id = {event.id: event for event in events}
+    allowed_by_event = {event.id: _compatible_model_ids(event) for event in events}
+    model_ids = set().union(*allowed_by_event.values())
+    if not model_ids:
+        return {event.id: 0 for event in events}
+
+    rows = db.execute(
+        select(
+            AnalysisRun.id,
+            AnalysisRun.event_id,
+            AnalysisRun.model_id,
+            AnalysisRun.status,
+            AnalysisRun.aoi_id,
+            AnalysisRun.pre_imagery_id,
+            AnalysisRun.post_imagery_id,
+            AnalysisRun.parameters,
+            AnalysisResult.is_published,
+            AnalysisResult.tile_url,
+            AnalysisResult.statistics,
+            AnalysisResult.provenance,
+            AnalysisResult.coverage,
+            AnalysisResult.features.is_not(None).label("has_features"),
         )
-    ).scalars().all()
-    return len(curated_count), 0
+        .join(AnalysisResult, AnalysisResult.run_id == AnalysisRun.id)
+        .where(
+            AnalysisRun.event_id.in_(events_by_id),
+            AnalysisRun.model_id.in_(model_ids),
+            AnalysisRun.status.in_(["completed", "review_required", "published"]),
+            AnalysisResult.is_published.is_(True),
+        )
+    ).all()
+    candidates = [
+        row for row in rows
+        if row.model_id in allowed_by_event.get(row.event_id, set())
+    ]
+    if not candidates:
+        return {event.id: 0 for event in events}
+
+    aoi_ids = {row.aoi_id for row in candidates}
+    imagery_ids = {
+        imagery_id
+        for row in candidates
+        for imagery_id in (row.pre_imagery_id, row.post_imagery_id)
+        if imagery_id is not None
+    }
+    aois = {
+        aoi.id: aoi
+        for aoi in db.execute(select(DisasterAOI).where(DisasterAOI.id.in_(aoi_ids))).scalars()
+    }
+    imagery = {
+        image.id: image
+        for image in db.execute(select(SatelliteImagery).where(SatelliteImagery.id.in_(imagery_ids))).scalars()
+    } if imagery_ids else {}
+
+    available_by_event: dict[int, set[str]] = {event.id: set() for event in events}
+    for row in candidates:
+        run = SimpleNamespace(
+            id=row.id,
+            event_id=row.event_id,
+            model_id=row.model_id,
+            status=row.status,
+            aoi_id=row.aoi_id,
+            pre_imagery_id=row.pre_imagery_id,
+            post_imagery_id=row.post_imagery_id,
+            parameters=row.parameters,
+        )
+        result = SimpleNamespace(
+            is_published=row.is_published,
+            tile_url=row.tile_url,
+            statistics=row.statistics,
+            provenance=row.provenance,
+            coverage=row.coverage,
+        )
+        capability = disaster_capability_service.validate_persisted_result(
+            db,
+            events_by_id[row.event_id],
+            run,
+            result,
+            current_inputs=(
+                aois.get(row.aoi_id),
+                imagery.get(row.pre_imagery_id),
+                imagery.get(row.post_imagery_id),
+            ),
+            has_features_override=bool(row.has_features),
+        )
+        if capability.allowed:
+            available_by_event[row.event_id].add(row.model_id)
+
+    return {event_id: len(model_ids) for event_id, model_ids in available_by_event.items()}
 
 
 @router.get("")
@@ -244,19 +350,17 @@ def list_disasters(
         year=year,
         search=search,
     )
+    analysis_counts = _available_analysis_counts(db, events)
+    wildfire_metrics = _wildfire_metrics_by_event(db, events)
     result = []
     for event in events:
         # Listing published events must stay a database-only read. FIRMS sync
         # can require several upstream requests and is performed explicitly by
         # the admin sync workflow, never while a user opens this page.
         data = event.to_dict()
-        allowed = _compatible_model_ids(event)
-        data["available_analysis_count"] = len({
-            run.model_id for run, result in disaster_repo.list_published_analyses(db, event.id)
-            if run.model_id in allowed and disaster_capability_service.validate_persisted_result(db, event, run, result).allowed
-        })
+        data["available_analysis_count"] = analysis_counts.get(event.id, 0)
         if event.disaster_type == "forest_fire":
-            hotspot_count, high_confidence_count = _wildfire_metrics(db, event)
+            hotspot_count, high_confidence_count = wildfire_metrics.get(event.id, (0, 0))
             data.update(
                 {
                     "hotspot_count": hotspot_count,
