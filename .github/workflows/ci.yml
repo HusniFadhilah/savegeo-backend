@@ -140,4 +140,4 @@ jobs:
         if: failure()
         run: |
           test -s trivy-results.json || { echo "::error::Trivy failed before producing a vulnerability report"; exit 1; }
-          jq '[.Results[]? | {Target, Vulnerabilities: [.Vulnerabilities[]? | {VulnerabilityID, PkgName, PkgPath, InstalledVersion, FixedVersion, Severity}] } | select(.Vulnerabilities | length > 0)]' trivy-results.json
+          jq '[.Results[]? as $result | (($result.Vulnerabilities // [])[]? | {type: "vulnerability", target: $result.Target, id: .VulnerabilityID, package: .PkgName, severity: .Severity, fixed_version: .FixedVersion}), (($result.Secrets // [])[]? | {type: "secret", target: $result.Target, rule_id: .RuleID, category: .Category, severity: .Severity, title: .Title, start_line: .StartLine})] | {count: length, findings: .}' trivy-results.json
