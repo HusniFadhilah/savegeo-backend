@@ -33,6 +33,7 @@ from app.registries.landcover_dataset_registry import (
     supported_glc_fcs30d_year,
 )
 from app.services.arcgis_helpers import compute_arcgis_landcover_summary
+from app.services.dynamic_world_rules import indonesia_snow_ice_note, mask_indonesia_snow_ice
 from app.services.gee_common import (
     AnalysisError,
     build_date_range,
@@ -186,7 +187,7 @@ def _dw_confidence_stats(dw_collection, aoi, scale: int, threshold: float | None
     settings = get_settings()
     effective_threshold = threshold if (threshold is not None and 0 < threshold < 1) else _DW_DIAGNOSTIC_CONFIDENCE_THRESHOLD
     try:
-        labels = dw_collection.select("label").mode()
+        labels = mask_indonesia_snow_ice(dw_collection.select("label").mode())
         max_prob = _dw_class_confidence(dw_collection, labels).clip(aoi)
         stats = max_prob.reduceRegion(
             reducer=ee.Reducer.mean().combine(ee.Reducer.minMax(), sharedInputs=True),
@@ -321,6 +322,7 @@ def _load_landcover_image(
         if _dw_size == 0:
             raise ValueError(f"No Sentinel-2 land-cover data found for {effective_year} ({dw_start_date}-{dw_end_date})")
         label_mode = dw.select("label").reduce(ee.Reducer.mode()).rename("landcover")
+        label_mode = mask_indonesia_snow_ice(label_mode)
         if dw_probability_threshold is not None and 0 <= dw_probability_threshold <= 1:
             max_prob = _dw_class_confidence(dw, label_mode)
             confidence_mask = max_prob.gte(dw_probability_threshold)
@@ -345,6 +347,7 @@ def _load_landcover_image(
             "provider_type": provider_type,
             "source_kind": "geosave_cdse_stac" if dataset in _GEOSAVE_DYNAMIC_WORLD_DATASETS else "gee",
             "classification_backend": "Dynamic_World",
+            "regional_class_rule": indonesia_snow_ice_note(),
             "dw_probability_threshold": dw_probability_threshold,
             "confidence": _dw_confidence_stats(dw, aoi, LAND_COVER_NATIVE_SCALE.get(dataset, 30), dw_probability_threshold) if include_diagnostics else None,
             "coverage_note": _dw_coverage_note(dw_start_date, display_end_date or dw_end_date, _dw_size),
@@ -762,7 +765,7 @@ def analyze_landcover(data: dict) -> dict:
                 if mode in {"probability", "hillshade"}:
                     period = metadata["date_range"]
                     dw = ee.ImageCollection("GOOGLE/DYNAMICWORLD/V1").filterBounds(aoi).filterDate(period["start"], _exclusive_end_date(period["end"]))
-                    confidence = _dw_class_confidence(dw, image).clip(aoi)
+                    confidence = _dw_class_confidence(dw, image).updateMask(image.mask()).clip(aoi)
                     if mode == "probability":
                         tile = get_tile_url(confidence, {"min": 0, "max": 1, "palette": ["ffffff", "228b22"]}, "Dynamic World confidence")
                     else:

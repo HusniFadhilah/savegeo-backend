@@ -138,7 +138,7 @@ def _get_published_event(db: Session, event_id: int) -> DisasterEvent:
     return event
 
 
-def _build_analyses(db: Session, event_id: int) -> list[dict]:
+def _build_analyses(db: Session, event_id: int, *, force_refresh_tiles: bool = False) -> list[dict]:
     """One entry per enabled registry model - `available=True` only if a
     published result exists for that model on this event. Disabled models are
     omitted entirely (hidden); enabled-but-not-yet-run models are listed with
@@ -175,7 +175,7 @@ def _build_analyses(db: Session, event_id: int) -> list[dict]:
                 "result": serialize_result_for_view(db, run, result, include_features=(
                     model.get("output_type") in {"feature_collection", "polygon"}
                     or str(model.get("output_type", "")).startswith("polygon")
-                )),
+                ), force_refresh_tiles=force_refresh_tiles),
             })
         else:
             entries.append({
@@ -413,7 +413,7 @@ def get_disaster_analyses(event_id: int, viewer=Depends(get_current_disaster_vie
 
 
 @router.get("/{event_id}/layers")
-def get_disaster_layers(event_id: int, viewer=Depends(get_current_disaster_viewer), db: Session = Depends(get_db)):
+def get_disaster_layers(event_id: int, refresh_tiles: bool = False, viewer=Depends(get_current_disaster_viewer), db: Session = Depends(get_db)):
     _get_published_event(db, event_id)
     primary_pre = disaster_repo.get_primary_imagery(db, event_id, "pre")
     primary_post = disaster_repo.get_primary_imagery(db, event_id, "post")
@@ -422,7 +422,7 @@ def get_disaster_layers(event_id: int, viewer=Depends(get_current_disaster_viewe
             "pre_tile_url": _viewer_imagery_dict(primary_pre).get("preview_tile_url") if primary_pre else None,
             "post_tile_url": _viewer_imagery_dict(primary_post).get("preview_tile_url") if primary_post else None,
         },
-        "analyses": _build_analyses(db, event_id),
+        "analyses": _build_analyses(db, event_id, force_refresh_tiles=refresh_tiles),
     }
 
 

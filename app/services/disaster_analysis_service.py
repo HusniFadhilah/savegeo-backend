@@ -47,7 +47,7 @@ _DISPLAY_TILE_LOCKS: dict[tuple, threading.Lock] = {}
 _DISPLAY_TILE_CACHE_LOCK = threading.Lock()
 
 
-def serialize_result_for_view(db: Session, run, result, *, include_features: bool = True) -> dict:
+def serialize_result_for_view(db: Session, run, result, *, include_features: bool = True, force_refresh_tiles: bool = False) -> dict:
     """Serialize a result with fresh Dynamic World display URLs when needed.
 
     Persisted statistics and publication metadata remain untouched. Only the
@@ -64,7 +64,7 @@ def serialize_result_for_view(db: Session, run, result, *, include_features: boo
     payload["comparison"] = comparison
 
     completed_at = run.completed_at
-    if completed_at:
+    if completed_at and not force_refresh_tiles:
         if completed_at.tzinfo is None:
             completed_at = completed_at.replace(tzinfo=dt.UTC)
         if (dt.datetime.now(dt.UTC) - completed_at).total_seconds() <= 6 * 60 * 60:
@@ -74,16 +74,16 @@ def serialize_result_for_view(db: Session, run, result, *, include_features: boo
     cache_key = (result.id, cache_timestamp.isoformat() if cache_timestamp else "unknown")
     now = dt.datetime.now(dt.UTC).timestamp()
     with _DISPLAY_TILE_CACHE_LOCK:
-        cached = _DISPLAY_TILE_CACHE.get(cache_key)
+        cached = None if force_refresh_tiles else _DISPLAY_TILE_CACHE.get(cache_key)
         refresh_lock = _DISPLAY_TILE_LOCKS.setdefault(cache_key, threading.Lock())
-    if cached and cached[0] > now:
+    if not force_refresh_tiles and cached and cached[0] > now:
         tiles = cached[1]
     else:
         with refresh_lock:
             now = dt.datetime.now(dt.UTC).timestamp()
             with _DISPLAY_TILE_CACHE_LOCK:
-                cached = _DISPLAY_TILE_CACHE.get(cache_key)
-            if cached and cached[0] > now:
+                cached = None if force_refresh_tiles else _DISPLAY_TILE_CACHE.get(cache_key)
+            if not force_refresh_tiles and cached and cached[0] > now:
                 tiles = cached[1]
             else:
                 tiles = None

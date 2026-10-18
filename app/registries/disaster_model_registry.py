@@ -134,12 +134,13 @@ DISASTER_MODEL_REGISTRY: dict[str, dict] = {
     ),
     "dynamic_world_v1": _method(
         "dynamic_world_v1", disaster_types=_ALL_TYPES, category="land_cover", result_semantics="land_cover",
-        description="Klasifikasi tutupan lahan Dynamic World; bukan diagnosis kerusakan bencana.", enabled=True,
+        description="Klasifikasi tutupan lahan Dynamic World; bukan diagnosis kerusakan bencana.", enabled=True, version="1.1",
         accepted_sensors=["sentinel2", "sentinel-2"], required_bands=["label", "probability"], resolution_m=10,
         satellite="Sentinel-2 / GOOGLE/DYNAMICWORLD/V1", output_type="raster+statistics+confidence",
         validation_status="land_cover_only", limitations=[
             "Kelas tutupan lahan tidak merepresentasikan kerusakan bencana.",
             "Perubahan kelas tidak boleh ditafsirkan sebagai area terbakar, longsor, tsunami, atau kerusakan bangunan tanpa validasi.",
+            "Di Indonesia, kelas Snow & Ice disaring di luar radius 20 km Puncak Jaya.",
         ], user_label="Land Cover (Dynamic World)", data_dependencies=["GOOGLE/DYNAMICWORLD/V1"],
         multiclass=True, temporal_mode="independent_published_inference",
         classes=[{"class_id": int(k), **v} for k, v in LAND_COVER_LEGENDS["Dynamic_World"].items()],

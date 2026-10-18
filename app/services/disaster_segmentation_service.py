@@ -4,6 +4,7 @@ import math
 import ee
 
 from app.registries.disaster_model_registry import get_model
+from app.services.dynamic_world_rules import indonesia_snow_ice_note, mask_indonesia_snow_ice
 from app.services.gee_common import AnalysisError, get_tile_url
 
 PROBABILITY_BANDS = ["water", "trees", "grass", "flooded_vegetation", "crops", "shrub_and_scrub", "built", "bare", "snow_and_ice"]
@@ -35,7 +36,7 @@ def refresh_segmentation_tiles(aoi, pre_date, post_date, *, pre_scene_id=None, p
         "post_tile_url": (post_label, {"min": 0, "max": 8, "palette": palette}),
         "change_tile_url": (change, {"min": 0, "max": 8, "palette": palette}),
         "confidence_tile_url": (
-            post.select(PROBABILITY_BANDS).reduce(ee.Reducer.max()).reproject(projection).clip(aoi),
+            post.select(PROBABILITY_BANDS).reduce(ee.Reducer.max()).updateMask(post.select("label").mask()).reproject(projection).clip(aoi),
             {"min": 0, "max": 1, "palette": ["#fff7bc", "#006837"]},
         ),
     }
@@ -61,6 +62,8 @@ def _prediction(aoi, date, scene_id=None):
     if not ids:
         raise AnalysisError(f"Prediksi Dynamic World tidak tersedia pada tanggal {date}; pilih imagery Sentinel-2 lain secara eksplisit", 404)
     image = col.sort("system:index").mosaic().clip(aoi)
+    filtered_label = mask_indonesia_snow_ice(image.select("label"))
+    image = image.addBands(filtered_label.rename("label"), overwrite=True)
     return image, {"date": date.isoformat(), **provenance, "scene_count": len(ids)}
 
 
@@ -86,6 +89,8 @@ def class_statistics(schema, pre_groups, post_groups, aoi_area):
     rows = []
     for c in schema:
         pre, post = [s.get(c["class_id"], [0, 0, 0]) for s in sides]
+        if pre[0] <= 0 and post[0] <= 0:
+            continue
         rows.append({**c, "pre_area_ha": pre[0], "post_area_ha": post[0], "change_area_ha": post[0]-pre[0],
             "pre_pixel_count": round(pre[1]), "post_pixel_count": round(post[1]),
             "pre_percentage": pre[0]/aoi_area*100, "post_percentage": post[0]/aoi_area*100,
@@ -109,7 +114,10 @@ def compute_segmentation(aoi, pre_date, post_date, *, pre_scene_id=None, post_sc
     valid = pre.select("label").mask().And(post.select("label").mask())
     pre, post = pre.updateMask(valid), post.updateMask(valid)
     labels = [im.select("label").toInt() for im in (pre, post)]
-    confidence = [im.select(PROBABILITY_BANDS).reduce(ee.Reducer.max()) for im in (pre, post)]
+    confidence = [
+        im.select(PROBABILITY_BANDS).reduce(ee.Reducer.max()).updateMask(label.mask())
+        for im, label in zip((pre, post), (pre.select("label"), post.select("label")))
+    ]
     aoi_area = aoi.area(1).divide(10000).getInfo()
     rows = class_statistics(
         model["classes"],
@@ -155,11 +163,14 @@ def compute_segmentation(aoi, pre_date, post_date, *, pre_scene_id=None, post_sc
         "method": model["description"], "model_id": model["model_id"], "model_version": model["version"],
         "result_semantics": model.get("result_semantics"), "damage_model": bool(model.get("damage_model", False)),
         "validation_status": model.get("validation_status"), "limitations": list(model.get("limitations", [])),
+        "regional_class_rule": indonesia_snow_ice_note(),
         "aoi_area_ha": aoi_area, "valid_area_ha": covered, "no_data_area_ha": max(0, aoi_area-covered),
         "changed_area_ha": sum(t["area_ha"] for t in transitions if t["pre_class_id"] != t["post_class_id"]),
         "unchanged_area_ha": sum(t["area_ha"] for t in transitions if t["pre_class_id"] == t["post_class_id"]),
         "coverage_note": "Statistik memakai irisan piksel valid pre/post; awan dan no-data dikeluarkan pada kedua sisi. Perubahan warna menunjukkan kelas tujuan, bukan penyebab kerusakan."}
-    return {"tile_url": tiles["post_tile_url"], "legend": model["classes"],
+    active_class_ids = {row["class_id"] for row in rows}
+    active_legend = [item for item in model["classes"] if item["class_id"] in active_class_ids]
+    return {"tile_url": tiles["post_tile_url"], "legend": active_legend,
         "coverage": {"valid_area_ha": covered, "no_data_area_ha": max(0, aoi_area-covered), "coverage_pct": covered/aoi_area*100},
         "quality_flags": {"common_grid": True, "common_valid_mask": True, "same_algorithm": True, "aoi_clipped": True, "damage_not_inferred": True},
         "provenance_details": {"pre": pre_meta, "post": post_meta, "crs": comparison["crs"], "resolution_m": 10},

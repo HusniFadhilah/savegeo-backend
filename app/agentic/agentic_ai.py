@@ -2703,6 +2703,12 @@ def validate_geoai_actions(
         # determines which committed value must be read back after a setter.
         if name == "set_parameter":
             expected = {target.split(".")[1]: value}
+        elif name == "select_aoi":
+            # The selected boundary's canonical display name can include a
+            # longer administrative path than the query the model planned.
+            # Verify the real AOI commit instead of comparing model-invented
+            # fields such as `aoi_name` against that display string.
+            expected = {"aoiExists": True}
         elif name == "set_analysis_type":
             expected = {"analysisType": value}
         elif name == "open_module":
