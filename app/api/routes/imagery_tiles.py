@@ -46,6 +46,7 @@ def imagery_tile(
     z: int,
     x: int,
     y: int,
+    sharpen: bool = False,
     viewer=Depends(get_current_disaster_viewer),
     db: Session = Depends(get_db),
 ):
@@ -57,9 +58,11 @@ def imagery_tile(
         raise HTTPException(status_code=404, detail=f"No local raster registered for imagery {imagery_id}")
 
     try:
-        png_bytes = local_imagery_tile_service.render_tile(img.local_file_path, z, x, y)
+        png_bytes = local_imagery_tile_service.render_tile(
+            img.local_file_path, z, x, y, sharpen=sharpen
+        )
     except Exception as e:  # noqa: BLE001
-        logger.error("imagery_tile error (imagery_id=%s %s/%s/%s)", imagery_id, z, x, y)
+        logger.exception("imagery_tile error (imagery_id=%s %s/%s/%s)", imagery_id, z, x, y)
         raise HTTPException(status_code=500, detail="Unable to render imagery tile") from e
 
     # A valid raster often covers only a small part of the map. XYZ clients

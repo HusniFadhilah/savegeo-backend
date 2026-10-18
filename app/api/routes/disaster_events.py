@@ -37,6 +37,7 @@ from app.repositories import disaster_repo
 from app.services.disaster_cross_layer_service import get_available_cross_layer_stats
 from app.services import disaster_capability_service
 from app.services import samgeo_service
+from app.services import local_imagery_tile_service
 from app.services.gee_common import AnalysisError, public_analysis_error
 from app.services.disaster_analysis_service import serialize_result_for_view
 
@@ -111,6 +112,16 @@ def get_event_segmentation(event_id: int, job_id: str, viewer=Depends(get_curren
 
 def _viewer_imagery_dict(img) -> dict:
     data = img.to_dict()
+    if data.get("source_kind") == "local_upload" and data.get("local_file_path"):
+        # GeoTIFF pixel spacing is more reliable than manually entered upload
+        # metadata. This also corrects existing imagery rows without a DB
+        # migration; the result is cached per raster path by the tile service.
+        raster_resolution_m = local_imagery_tile_service.local_raster_resolution_m(
+            data["local_file_path"]
+        )
+        if raster_resolution_m is not None:
+            data["resolution_m"] = raster_resolution_m
+
     # Rows created before the public local-raster route existed still contain
     # the admin-only preview URL. Normalize them at the published boundary so
     # existing BlackSky/GeoTIFF events start working without a data migration.

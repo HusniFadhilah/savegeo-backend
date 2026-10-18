@@ -92,6 +92,10 @@ def ingest_one(db, zip_name: str, label: str, slug: str, created_by: int | None)
     west, south, east, north = bbox_of(coords)
     acquired = dt.date.fromisoformat(meta["acquisitionDate"][:10])
     cloud_pct = float(meta.get("cloudCoverPercent") or 0.0)
+    sensor_name = meta.get("sensorName") or "BlackSky"
+    source_resolution_m = float(
+        meta.get("gsdGroundPlane") or meta.get("gsd") or 1.0
+    )
 
     # --- 1. COG conversion (idempotent - skips if already done) ---
     from app.core.config import get_settings
@@ -121,7 +125,7 @@ def ingest_one(db, zip_name: str, label: str, slug: str, created_by: int | None)
                 "tertinggi 1.605m di Pota, Manggarai Timur. 53 tewas, 137 luka-luka "
                 "(per 18 Agustus 2026); 5.089 gempa susulan tercatat per 22 Agustus "
                 "2026 (terbesar M6.2). Citra pasca-gempa: BlackSky (komersial, "
-                f"akuisisi {acquired.isoformat()}, resolusi ~1.2m)."
+                f"akuisisi {acquired.isoformat()}, resolusi ~{source_resolution_m:.2f}m)."
             ),
             "source": "BMKG (https://www.bmkg.go.id/gempabumi/berpotensi-tsunami/20260815050954)",
         },
@@ -150,8 +154,8 @@ def ingest_one(db, zip_name: str, label: str, slug: str, created_by: int | None)
             "phase": "post",
             "satellite": "BlackSky",
             "acquisition_date": acquired,
-            "sensor": "Global-2",
-            "resolution_m": 1.2,
+            "sensor": sensor_name,
+            "resolution_m": source_resolution_m,
             "cloud_coverage_pct": cloud_pct,
             "data_source": "BlackSky (komersial - lisensi dimiliki pengguna platform)",
             "is_primary": True,

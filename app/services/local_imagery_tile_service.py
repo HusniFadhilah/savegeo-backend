@@ -33,6 +33,7 @@ import os
 from functools import lru_cache
 from pathlib import Path
 
+import numpy as np
 import rasterio
 import rasterio.shutil
 from app.core.config import get_settings
@@ -72,6 +73,35 @@ def resolve_local_raster_path(stored_path: str) -> str:
     raise FileNotFoundError(f"Local raster tidak ditemukan: {stored_path}")
 
 
+@lru_cache(maxsize=128)
+def local_raster_resolution_m(stored_path: str) -> float | None:
+    """Return the raster's native pixel spacing in metres when measurable.
+
+    Local imagery metadata can be entered manually and may not match the
+    GeoTIFF grid. Prefer the actual projected raster spacing for map zoom
+    limits, while leaving non-projected/unknown rasters to their saved value.
+    """
+    try:
+        resolved_path = resolve_local_raster_path(stored_path)
+        with rasterio.open(resolved_path) as src:
+            if src.crs is None or not src.crs.is_projected:
+                return None
+
+            # Include rotation/skew and convert projected CRS units (e.g. feet)
+            # to metres. Use the larger pixel dimension as a conservative GSD.
+            transform = src.transform
+            pixel_width = (transform.a**2 + transform.d**2) ** 0.5
+            pixel_height = (transform.b**2 + transform.e**2) ** 0.5
+            unit_factor = src.crs.linear_units_factor[1]
+            resolution_m = max(pixel_width, pixel_height) * unit_factor
+            if not (resolution_m > 0 and resolution_m < float("inf")):
+                return None
+            return round(resolution_m, 3)
+    except Exception:
+        logger.debug("Could not derive native resolution for %s", stored_path, exc_info=True)
+        return None
+
+
 def ensure_cog(src_path: str, dst_path: str, overview_resampling: str = "average") -> None:
     """Rewrite `src_path` as a Cloud-Optimized GeoTIFF at `dst_path` (tiled,
     DEFLATE-compressed, with overview pyramids) if `dst_path` doesn't already
@@ -107,7 +137,39 @@ def _stretch_bounds(path: str) -> tuple[tuple[float, float], ...]:
     return tuple((s.percentile_2, s.percentile_98) for s in stats.values())
 
 
-def render_tile(local_file_path: str, z: int, x: int, y: int) -> bytes | None:
+def _apply_visual_sharpening(img, amount: float = 0.55) -> None:
+    """Apply a mild unsharp mask to RGB tile data for display only."""
+    if img.data.ndim != 3 or img.data.shape[0] < 3:
+        return
+
+    data = np.array(img.data, copy=True)
+    rgb = data[:3].astype(np.float32)
+    padded = np.pad(rgb, ((0, 0), (1, 1), (1, 1)), mode="edge")
+    blurred = (
+        padded[:, :-2, :-2]
+        + 2 * padded[:, :-2, 1:-1]
+        + padded[:, :-2, 2:]
+        + 2 * padded[:, 1:-1, :-2]
+        + 4 * padded[:, 1:-1, 1:-1]
+        + 2 * padded[:, 1:-1, 2:]
+        + padded[:, 2:, :-2]
+        + 2 * padded[:, 2:, 1:-1]
+        + padded[:, 2:, 2:]
+    ) / 16.0
+
+    # Leave the outer pixel untouched so adjacent XYZ tiles do not develop
+    # visible seams from using different edge padding.
+    sharpened = rgb.copy()
+    sharpened[:, 1:-1, 1:-1] = rgb[:, 1:-1, 1:-1] + amount * (
+        rgb[:, 1:-1, 1:-1] - blurred[:, 1:-1, 1:-1]
+    )
+    # ``ImageData.data`` is a read-only property in rio-tiler. Update the
+    # writable buffer underneath its masked array so the mask and metadata
+    # remain intact.
+    img.array.data[:3] = np.clip(sharpened, 0, 255).astype(data.dtype)
+
+
+def render_tile(local_file_path: str, z: int, x: int, y: int, *, sharpen: bool = False) -> bytes | None:
     """Return PNG bytes for an XYZ tile, or None when it is outside coverage.
 
     Unexpected raster/decoding errors propagate so callers can return a 5xx
@@ -125,4 +187,6 @@ def render_tile(local_file_path: str, z: int, x: int, y: int) -> bytes | None:
 
     in_range = _stretch_bounds(resolved_path)[: img.data.shape[0]]
     img.rescale(in_range=in_range)
+    if sharpen:
+        _apply_visual_sharpening(img)
     return img.render(img_format="PNG")

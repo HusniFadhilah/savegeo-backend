@@ -21,6 +21,7 @@ this file.
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import re
 import uuid
 import zipfile
@@ -54,6 +55,7 @@ from app.services.gee_common import AnalysisError, public_analysis_error
 from app.services.geo_utils import bbox_and_centroid, estimate_area_ha
 
 router = APIRouter(prefix="/admin", tags=["admin-disaster"])
+logger = logging.getLogger(__name__)
 
 
 # -- Request schemas (local to this router - mirrors app/schemas/admin.py's
@@ -612,6 +614,7 @@ def admin_local_imagery_tile(
     z: int,
     x: int,
     y: int,
+    sharpen: bool = False,
     admin: AdminUser = Depends(require_permission("disaster.read")),
     db: Session = Depends(get_db),
 ):
@@ -625,7 +628,13 @@ def admin_local_imagery_tile(
     # local_file_path is stored as an absolute path under settings.disaster_raster_path
     # (see local_imagery_tile_service / scripts/ingest_ntt_earthquake.py) - not joined
     # with upload_dir, that's a separate unrelated storage location.
-    png = local_imagery_tile_service.render_tile(img.local_file_path, z, x, y)
+    try:
+        png = local_imagery_tile_service.render_tile(
+            img.local_file_path, z, x, y, sharpen=sharpen
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("admin_local_imagery_tile error (imagery_id=%s %s/%s/%s)", imagery_id, z, x, y)
+        raise HTTPException(status_code=500, detail="Unable to render imagery tile") from exc
     if png is None:
         raise HTTPException(status_code=404, detail="Tile out of coverage")
     return Response(content=png, media_type="image/png")
