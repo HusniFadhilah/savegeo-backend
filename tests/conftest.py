@@ -16,6 +16,16 @@ def _db_reachable() -> bool:
         return False
 
 
+@pytest.fixture(autouse=True)
+def _reset_auth_throttle():
+    """Login/reset throttles are process-global; keep tests independent."""
+    from app.core import auth_throttle
+
+    auth_throttle.reset_all()
+    yield
+    auth_throttle.reset_all()
+
+
 @pytest.fixture(scope="session")
 def db_available() -> bool:
     return _db_reachable()

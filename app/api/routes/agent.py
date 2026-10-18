@@ -8,14 +8,17 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
+from app.agentic import agentic_ai
 from app.core.chat_ownership import chat_session_owner_key
 from app.core.security import get_current_app_viewer
 from app.core.viewer_features import viewer_feature_codes
 from app.db.session import get_db
 from app.services import agent_service
+from app.services import ai_provider_service
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 logger = logging.getLogger(__name__)
@@ -61,7 +64,9 @@ async def agent_analyze(
     whitelisted GeoMoka analysis endpoint selected by the planner.
     """
     payload = await _json_object(request)
-    return agent_service.run_agent_analyze(db, request, payload, viewer_feature_codes(db, viewer))
+    return await run_in_threadpool(
+        agent_service.run_agent_analyze, db, request, payload, viewer_feature_codes(db, viewer)
+    )
 
 
 @router.post("/control")
@@ -76,7 +81,9 @@ async def agent_control(
     Returns: { intent, confidence, needs_confirmation, message, warnings, actions, session_id }
     """
     payload = await _json_object(request)
-    result, status_code, headers = agent_service.run_agent_control(
+    # The model call blocks for seconds; keep it off the event loop.
+    result, status_code, headers = await run_in_threadpool(
+        agent_service.run_agent_control,
         db,
         request,
         payload,
@@ -84,3 +91,13 @@ async def agent_control(
         allowed_features=viewer_feature_codes(db, viewer),
     )
     return JSONResponse(content=result, status_code=status_code, headers=headers)
+
+
+@router.get("/providers")
+async def agent_providers(viewer: object = Depends(get_current_app_viewer)):
+    """Provider/model choices the signed-in user may select, with live status.
+
+    No base URLs, keys or raw errors are returned.
+    """
+    cfg = await run_in_threadpool(agentic_ai.load_ai_config)
+    return await run_in_threadpool(ai_provider_service.public_catalog, cfg)

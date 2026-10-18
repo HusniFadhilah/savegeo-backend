@@ -154,6 +154,16 @@ DEFAULT_CONFIGS: list[tuple[str, str, str, str, str, str, bool]] = [
     ("ai.ollama_base_url", os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434/v1"), "string", "ai",
      "Ollama Base URL", "URL OpenAI-compatible Ollama lokal; gunakan /v1 pada akhir URL", False),
 
+    ("ai.fallback_provider", os.getenv("AI_FALLBACK_PROVIDER", ""), "string", "ai",
+     "Provider Cadangan", "Dipakai otomatis bila provider utama tidak tersedia (harus ada di Model Diizinkan). Kosong = nonaktif", False),
+
+    ("ai.fallback_model", os.getenv("AI_FALLBACK_MODEL", ""), "string", "ai",
+     "Model Cadangan", "Model untuk provider cadangan", False),
+
+    ("ai.allowed_models", os.getenv("AI_ALLOWED_MODELS", ""), "string", "ai",
+     "Model Diizinkan (JSON)",
+     'Daftar pilihan untuk pengguna chatbot, mis. [{"provider":"ollama","model":"qwen3:8b"}]. Kosong = hanya model default admin', False),
+
     ("ai.opencode_base_url", os.getenv("OPENCODE_BASE_URL", "http://localhost:4096/v1"), "string", "ai",
      "OpenCode Base URL", "URL OpenAI-compatible OpenCode lokal", False),
 

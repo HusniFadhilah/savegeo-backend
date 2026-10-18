@@ -20,9 +20,11 @@ from urllib.parse import urlparse
 
 import requests
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.core import auth_throttle
 from app.core.config import get_settings
 from app.core.default_configs import is_sensitive_config_key
 from app.core.security import (
@@ -37,6 +39,7 @@ from app.core.security import (
     clear_session_cookie,
     hash_password,
     set_session_cookie,
+    verify_login_password,
     verify_password,
     ensure_current_session,
     revoke_account_sessions,
@@ -103,13 +106,17 @@ def _visible_config_rows(rows: list[SystemConfig], admin: AdminUser) -> list[Sys
     return [row for row in rows if not _requires_full_access_config(row.key)]
 
 
+def _role_is_sensitive(role: Role) -> bool:
+    return any(permission.code in _SENSITIVE_ROLE_PERMISSIONS for permission in role.permissions)
+
+
 def _ensure_user_role_scope(admin: AdminUser, role: Role | None) -> None:
     """Prevent explicit admins from delegating or inheriting sensitive access."""
     if admin.role_id is None:
         return
     if role is None:
         raise HTTPException(status_code=403, detail="Explicit Admin tidak dapat memberikan atau mengubah akun Full Access")
-    if any(permission.code in _SENSITIVE_ROLE_PERMISSIONS for permission in role.permissions):
+    if _role_is_sensitive(role):
         raise HTTPException(status_code=403, detail="Explicit Admin tidak dapat memberikan role yang mengakses credential atau secret")
 
 
@@ -127,10 +134,13 @@ def _ensure_model_execution_permission(admin: AdminUser) -> None:
 
 # -- Auth --
 @router.post("/auth/login")
-def login(payload: LoginRequest, response: Response, db: Session = Depends(get_db)):
+def login(payload: LoginRequest, request: Request, response: Response, db: Session = Depends(get_db)):
+    auth_throttle.ensure_login_allowed(request, "admin", payload.username)
     admin = db.query(AdminUser).filter_by(username=payload.username).first()
-    if not admin or not admin.is_active or not verify_password(payload.password, admin.password_hash):
+    if not verify_login_password(payload.password, admin):
+        auth_throttle.record_login_failure(request, "admin", payload.username)
         raise HTTPException(status_code=401, detail="Invalid username or password")
+    auth_throttle.record_login_success(request, "admin", payload.username)
     admin.last_login = datetime.now(UTC)
     db.commit()
     set_session_cookie(response, ADMIN_SESSION_COOKIE, create_access_token(admin))
@@ -196,10 +206,11 @@ def change_password(
 
 
 @router.post("/auth/forgot-password")
-def forgot_password(payload: PasswordForgotRequest, db: Session = Depends(get_db)):
+def forgot_password(payload: PasswordForgotRequest, request: Request, db: Session = Depends(get_db)):
     identifier = payload.identifier.strip()
     if not identifier:
         raise HTTPException(status_code=400, detail="Email atau username wajib diisi")
+    auth_throttle.ensure_password_reset_request_allowed(request, "admin", identifier)
 
     admin = (
         db.query(AdminUser)
@@ -467,7 +478,21 @@ async def config_update(request: Request, admin: AdminUser = Depends(require_per
 
     updated = []
     errors = []
+    warnings: list[str] = []
+    rejected: dict[str, str] = {}
+    ai_updates = {k: v for k, v in items if isinstance(k, str) and k.startswith("ai.")}
+    if ai_updates:
+        from app.services import ai_provider_service
+
+        rejected, warnings = await run_in_threadpool(
+            ai_provider_service.validate_ai_config_update,
+            ai_updates,
+            lambda k: config_service.get_setting(db, k, "") or "",
+        )
     for key, value in items:
+        if key in rejected:
+            errors.append({"key": key, "error": rejected[key]})
+            continue
         if _requires_full_access_config(key) and not admin_has_permission(admin, "secret.write"):
             errors.append({"key": key, "error": "Secret configuration is restricted to full-access administrators"})
             continue
@@ -481,7 +506,7 @@ async def config_update(request: Request, admin: AdminUser = Depends(require_per
         audit_service.log_audit(db, admin.id, "config.update", "system_config", detail={"updated_keys": updated})
         if any(key.startswith("arcgis.") for key in updated):
             configure_arcgis_from_db(db)
-    return {"message": "Config updated", "updated": updated, "errors": errors}
+    return {"message": "Config updated", "updated": updated, "errors": errors, "warnings": warnings}
 
 
 @router.post("/config/reset")
@@ -782,6 +807,8 @@ def admin_user_update(
         raise HTTPException(status_code=404, detail="User not found")
     if admin.role_id is not None and target.role_id is None:
         raise HTTPException(status_code=403, detail="Explicit Admin tidak dapat mengubah akun Full Access")
+    if admin.role_id is not None and target.role is not None and _role_is_sensitive(target.role):
+        raise HTTPException(status_code=403, detail="Explicit Admin tidak dapat mengubah akun dengan akses credential atau secret")
     assigned_role = db.get(Role, payload.role_id) if payload.role_id is not None else None
     if payload.role_id is not None and assigned_role is None:
         raise HTTPException(status_code=400, detail="role_id does not exist")
@@ -821,6 +848,8 @@ def admin_user_delete(user_id: int, admin: AdminUser = Depends(require_permissio
         raise HTTPException(status_code=400, detail="Cannot delete your own account")
     if admin.role_id is not None and target.role_id is None:
         raise HTTPException(status_code=403, detail="Explicit Admin tidak dapat menghapus akun Full Access")
+    if admin.role_id is not None and target.role is not None and _role_is_sensitive(target.role):
+        raise HTTPException(status_code=403, detail="Explicit Admin tidak dapat menghapus akun dengan akses credential atau secret")
     if db.query(AdminUser).filter_by(is_active=True).count() <= 1:
         raise HTTPException(status_code=400, detail="Cannot delete the last active admin account")
 
@@ -1189,7 +1218,7 @@ def _fetch_osm_overpass(overpass_query: str) -> tuple[dict | None, str]:
                 server,
                 data={"data": overpass_query},
                 headers={"User-Agent": "SaveGeo company-boundary importer/1.0"},
-                timeout=(15, 105),
+                timeout=(15, _OVERPASS_QUERY_TIMEOUT_S + 30),
             )
             if resp.status_code == 200:
                 payload = resp.json()
@@ -1207,48 +1236,120 @@ def _fetch_osm_overpass(overpass_query: str) -> tuple[dict | None, str]:
     return None, " | ".join(failures)
 
 
+# A single nationwide Overpass query per industry exceeds the public servers'
+# runtime budget (HTTP 504 / "Query timed out"), so imports are split into
+# island-group boxes (south, west, north, east). Boxes overlap slightly and
+# results are de-duplicated by OSM id; the Indonesia area filter is still
+# applied, so neighbouring countries inside a box are excluded.
+_OSM_INDONESIA_REGIONS: list[tuple[str, tuple[float, float, float, float]]] = [
+    ("Sumatera & Kepulauan Riau/Babel", (-6.2, 94.9, 6.2, 109.0)),
+    ("Jawa & Bali", (-9.0, 105.0, -5.0, 115.8)),
+    ("Kalimantan", (-4.3, 108.5, 7.2, 119.3)),
+    ("Sulawesi", (-6.0, 118.7, 4.0, 125.5)),
+    ("Nusa Tenggara", (-11.1, 115.8, -7.9, 125.3)),
+    ("Maluku", (-8.4, 124.5, 3.0, 135.0)),
+    ("Papua", (-9.2, 130.8, 1.1, 141.1)),
+]
+_OVERPASS_QUERY_TIMEOUT_S = 120
+# A box that still times out is split into quadrants up to this depth
+# (depth 2 = at most 16 sub-boxes per region).
+_OSM_MAX_SPLIT_DEPTH = 2
+
+
+def _osm_bbox_query(filters: list[str], bbox: tuple[float, float, float, float]) -> str:
+    south, west, north, east = bbox
+    return (
+        f"[out:json][timeout:{_OVERPASS_QUERY_TIMEOUT_S}][maxsize:536870912]"
+        f"[bbox:{south:.4f},{west:.4f},{north:.4f},{east:.4f}];\n"
+        'area["ISO3166-1"="ID"][admin_level=2]->.searchArea;\n'
+        f"({chr(10).join(filters)});\n"
+        "out geom qt;"
+    )
+
+
+def _split_bbox(bbox: tuple[float, float, float, float]) -> list[tuple[float, float, float, float]]:
+    south, west, north, east = bbox
+    mid_lat, mid_lon = (south + north) / 2, (west + east) / 2
+    return [
+        (south, west, mid_lat, mid_lon),
+        (south, mid_lon, mid_lat, east),
+        (mid_lat, west, north, mid_lon),
+        (mid_lat, mid_lon, north, east),
+    ]
+
+
+def _collect_osm_elements(industry_types: list[str], progress) -> tuple[list[dict], list[str], list[str]]:
+    """Fetch named OSM area objects for each industry, region by region.
+
+    Returns ``(elements, failed_types, warnings)``. An industry is reported in
+    ``failed_types`` only when every region failed; partially failed regions
+    become warnings so the rest of the data is still imported.
+    """
+    elements_by_id: dict[tuple, dict] = {}
+    failed_types: list[str] = []
+    warnings: list[str] = []
+    for index, industry_type in enumerate(industry_types, start=1):
+        filters = _osm_named_boundary_filters([industry_type])
+        if not filters:
+            continue
+        succeeded = 0
+        failed_regions: list[str] = []
+        last_error = ""
+        for region_name, region_bbox in _OSM_INDONESIA_REGIONS:
+            pending = [(region_bbox, 0)]
+            region_failed = False
+            while pending:
+                bbox, depth = pending.pop(0)
+                progress(
+                    f"Mengambil data OSM {industry_type} ({index}/{len(industry_types)}) - {region_name}"
+                    + (f" bagian {depth}" if depth else "")
+                    + "..."
+                )
+                osm_data, fetch_error = _fetch_osm_overpass(_osm_bbox_query(filters, bbox))
+                if osm_data is None:
+                    if depth < _OSM_MAX_SPLIT_DEPTH:
+                        pending.extend((part, depth + 1) for part in _split_bbox(bbox))
+                    else:
+                        region_failed = True
+                        last_error = fetch_error or "tidak ada respons dari mirror Overpass"
+                    continue
+                succeeded += 1
+                if osm_data.get("remark"):
+                    warnings.append(
+                        f"{industry_type}/{region_name}: Overpass mengembalikan data parsial "
+                        f"({str(osm_data['remark'])[:180]})"
+                    )
+                for element in osm_data.get("elements", []):
+                    key = (element.get("type"), element.get("id"))
+                    if key[0] and key[1] is not None:
+                        elements_by_id.setdefault(key, element)
+            if region_failed:
+                failed_regions.append(region_name)
+        if not succeeded:
+            failed_types.append(f"{industry_type}: {last_error}")
+        elif failed_regions:
+            warnings.append(f"{industry_type}: sebagian wilayah gagal diambil ({', '.join(failed_regions)})")
+    return list(elements_by_id.values()), failed_types, warnings
+
+
 def _perform_osm_company_import(db: Session, admin: AdminUser, industry_types: list[str], progress) -> dict:
     selected_types = list(dict.fromkeys(itype for itype in industry_types if itype in _OSM_TAGS_MAP))
     if not selected_types:
         raise HTTPException(status_code=400, detail="Tidak ada tipe industri yang valid")
 
-    elements_by_id = {}
-    failed_types = []
-    warnings = []
-    for index, industry_type in enumerate(selected_types, start=1):
-        filters = _osm_named_boundary_filters([industry_type])
-        if not filters:
-            continue
-        overpass_query = (
-            '[out:json][timeout:90][maxsize:536870912];\n'
-            'area["ISO3166-1"="ID"][admin_level=2]->.searchArea;\n'
-            f"({chr(10).join(filters)});\n"
-            "out geom qt;"
-        )
-        progress(f"Mengambil data OSM {industry_type} ({index}/{len(selected_types)})...")
-        osm_data, fetch_error = _fetch_osm_overpass(overpass_query)
-        if osm_data is None:
-            failed_types.append(f"{industry_type}: {fetch_error or 'tidak ada respons dari mirror Overpass'}")
-            continue
-        if osm_data.get("remark"):
-            warnings.append(f"{industry_type}: Overpass mengembalikan data parsial ({str(osm_data['remark'])[:180]})")
-        for element in osm_data.get("elements", []):
-            key = (element.get("type"), element.get("id"))
-            if key[0] and key[1] is not None:
-                elements_by_id.setdefault(key, element)
+    elements, failed_types, warnings = _collect_osm_elements(selected_types, progress)
 
     if failed_types and len(failed_types) == len(selected_types):
         details = " ; ".join(failed_types)
         logger.warning("Overpass company import failed for all selected types: %s", details)
         raise RuntimeError(
-            "Overpass gagal mengambil seluruh tipe OSM yang dipilih meski query sudah dipecah per jenis industri. "
-            f"{details[:900]} Coba ulang beberapa saat lagi atau pilih satu jenis industri."
+            "Overpass gagal mengambil data OSM untuk semua jenis industri yang dipilih, "
+            f"bahkan setelah query dipecah per wilayah. {details[:900]} Coba ulang beberapa saat lagi."
         )
 
     if failed_types:
         warnings.extend(f"Data {failure}" for failure in failed_types)
 
-    elements = list(elements_by_id.values())
     progress(f"Menyimpan {len(elements)} objek OSM ke basis data...")
     imported, skipped, errors = 0, 0, []
     for element in elements:
@@ -1577,7 +1678,11 @@ _OR_CACHE_TTL = 300.0
 
 
 @router.get("/openrouter/models")
-def openrouter_models(free: str | None = None, q: str | None = None):
+def openrouter_models(
+    free: str | None = None,
+    q: str | None = None,
+    _admin: AdminUser = Depends(get_current_admin_panel),
+):
     import time as _time
 
     now = _time.time()
@@ -1620,3 +1725,36 @@ def openrouter_models(free: str | None = None, q: str | None = None):
         models = [m for m in models if needle in m["id"].lower() or needle in m["name"].lower()]
 
     return {"models": models, "total": len(models)}
+
+
+# -- AI provider health & Ollama model discovery --
+@router.get("/ollama/models")
+async def ollama_models(admin: AdminUser = Depends(require_permission("config.read")), db: Session = Depends(get_db)):
+    """Models actually installed on the configured Ollama server (``/api/tags``)."""
+    from app.services import ai_provider_service
+
+    base_url = str(config_service.get_setting(db, "ai.ollama_base_url", "") or "")
+    catalog = await run_in_threadpool(ai_provider_service.list_ollama_models, base_url)
+    return {
+        **catalog,
+        "message": None if not catalog["error"] else ai_provider_service._MESSAGES.get(catalog["error"]),
+    }
+
+
+@router.get("/ai/health")
+async def ai_provider_health(
+    provider: str | None = None,
+    model: str | None = None,
+    force: bool = False,
+    admin: AdminUser = Depends(require_permission("config.read")),
+):
+    """Active probe of the configured (or named) provider. Failures are cached ~30 s."""
+    from app.agentic import agentic_ai
+    from app.services import ai_provider_service
+
+    cfg = await run_in_threadpool(agentic_ai.load_ai_config)
+    chosen = (provider or cfg["provider"] or "").lower()
+    chosen_model = model if model is not None else (cfg["model"] if chosen == cfg["provider"] else "")
+    return await run_in_threadpool(
+        lambda: ai_provider_service.check_provider_health(chosen, cfg, chosen_model or "", force=force)
+    )

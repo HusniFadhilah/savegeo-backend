@@ -29,7 +29,12 @@ jobs:
           fi
 
       - name: Review Pull Request with Alibaba OpenCodeReview
-        if: steps.config.outputs.enabled == 'true' && github.event_name == 'pull_request_target'
+        # pull_request_target runs with repository secrets and a write token.
+        # Never hand them to pull requests opened from forks.
+        if: >-
+          steps.config.outputs.enabled == 'true' &&
+          github.event_name == 'pull_request_target' &&
+          github.event.pull_request.head.repo.full_name == github.repository
         uses: alibaba/open-code-review@04284b5dc19e0f52528ca466a767e4a2c100e5f5 # main
         with:
           llm_url: ${{ secrets.OCR_LLM_URL }}

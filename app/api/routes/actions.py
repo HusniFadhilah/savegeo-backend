@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.api.routes.analysis_jobs import viewer_owns_job
 from app.core.security import get_current_app_viewer
 from app.core.viewer_features import ensure_job_feature_access
 from app.db.models.analysis_output import AnalysisOutput
@@ -19,7 +20,9 @@ router = APIRouter(tags=["actions"])
 
 def _ensure_action_feature_access(db: Session, action_id: str, viewer: object) -> None:
     provenance = db.get(AnalysisProvenance, action_id)
-    if provenance is None:
+    # Actions are private to the account that submitted the analysis job;
+    # answer 404 for foreign IDs so their existence is not revealed.
+    if provenance is None or not viewer_owns_job(action_id, viewer, provenance.created_by_user_id):
         raise HTTPException(status_code=404, detail="Action not found")
     ensure_job_feature_access(viewer, provenance.analysis_type, db, provenance.parameters)
 

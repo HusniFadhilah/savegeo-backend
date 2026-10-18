@@ -81,6 +81,21 @@ def verify_password(plain: str, hashed: str) -> bool:
         return False
 
 
+_DUMMY_PASSWORD_HASH = hash_password(uuid.uuid4().hex)
+
+
+def verify_login_password(plain: str, account: User | AdminUser | None) -> bool:
+    """Verify a login password with similar cost whether or not the account exists.
+
+    Skipping the KDF for unknown usernames would let response timing reveal
+    which usernames are registered.
+    """
+    if account is None or not account.is_active:
+        verify_password(plain, _DUMMY_PASSWORD_HASH)
+        return False
+    return verify_password(plain, account.password_hash)
+
+
 def create_access_token(admin: AdminUser) -> str:
     settings = get_settings()
     now = dt.datetime.now(dt.UTC)

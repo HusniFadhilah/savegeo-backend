@@ -6,6 +6,7 @@ from typing import Any
 
 _ACTIONS = [
     ("aoi", "select_aoi", "aoi.active", None, {"query": {"type": "string", "minLength": 3, "maxLength": 200}}, ["query"], ["valid polygon", "map"]),
+    ("aoi_active", "use_active_aoi", "aoi.active", None, {}, [], ["an AOI is already selected"]),
     ("scenes", "search_scenes", "scenes.searchRequest", "app.feature.satellite_exploration", {}, [], ["aoi", "configured provider", "date range"]),
     ("scene", "show_scene", "scenes.scene", "app.feature.satellite_exploration", {"scene_id": {"type": "string"}, "visible": {"type": "boolean"}}, ["scene_id", "visible"], ["real scene search results"]),
     ("carbon", "run_analysis", "carbon.analysis", "app.feature.carbon_stock", {}, [], ["aoi", "dataset", "year", "compatible model or reference mode"]),
@@ -164,7 +165,13 @@ Application actions extend the existing UI command whitelist:
 - select_aoi / aoi.active, parameters {"query":"Kota Semarang"}. Use this FIRST when a place is named.
   It resolves actual polygons via the existing geocode search, asks the user to choose ambiguous candidates,
   writes the shared AOI store, highlights the boundary and fits the active map. Never invent coordinates.
+  Keep the administrative level word the user typed ("Kota Semarang", "Kabupaten Semarang",
+  "Kecamatan Tembalang") in the query: "Kota X" and "Kabupaten X" are different areas, and a bare
+  name that matches several areas makes the app ask the user to choose. Never drop or swap the word.
   A select_aoi followed by search/analysis in the same queue is supported; failure stops the queue.
+- use_active_aoi / aoi.active (no parameters): "gunakan AOI yang sedang aktif". Re-centres the map on the
+  AOI already in context (context.aoi_name) without searching. If context.aoi is empty it fails; then
+  ask the user which area to use instead of guessing.
 - select_field / crop.field, parameters {"field_id":17}. Only use IDs in ui.crop.availableFieldIds;
   field selection also selects its AOI. Ask the user to choose a saved field/commodity if ambiguous.
 - show_scene / scenes.scene may use {"scene_id":"latest","visible":true} AFTER search_scenes.

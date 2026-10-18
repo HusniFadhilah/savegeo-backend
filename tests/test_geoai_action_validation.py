@@ -103,3 +103,33 @@ def test_hotspot_actions_require_server_attributed_permitted_feature():
     )
     assert accepted == [{"type": "highlight_hotspot", "hotspot_id": "h1"}]
     assert len(warnings) == 2
+
+
+def test_aoi_commands_are_allowlisted_and_unknown_aoi_actions_rejected():
+    accepted, warnings = validate_geoai_actions(
+        [
+            {"action": "select_aoi", "target": "aoi.active", "parameters": {"query": "Kota Semarang"}},
+            {"action": "use_active_aoi", "target": "aoi.active", "parameters": {}},
+            {"action": "delete_aoi", "target": "aoi.active", "parameters": {}},
+            {"action": "select_aoi", "target": "aoi.other", "parameters": {"query": "Kota Semarang"}},
+            {"action": "select_aoi", "target": "aoi.active", "parameters": {"query": "ab"}},
+        ],
+        {},
+        {},
+    )
+    assert [a["action"] for a in accepted] == ["select_aoi", "use_active_aoi"]
+    assert len(warnings) == 3
+
+
+def test_ai_supplied_geometry_must_be_finite_in_range_and_bounded():
+    square = {"type": "Polygon", "coordinates": [[[110, -7], [111, -7], [111, -6], [110, -6], [110, -7]]]}
+    nan_geom = {"type": "Polygon", "coordinates": [[[float("nan"), -7], [111, -7], [111, -6], [110, -7]]]}
+    far = {"type": "Point", "coordinates": [500, 0]}
+    huge = {"type": "LineString", "coordinates": [[110 + i * 1e-6, -7] for i in range(30_001)]}
+    empty = {"type": "Polygon", "coordinates": []}
+    actions = [
+        {"type": "highlight_polygon", "geometry": g, "label": "x"} for g in (square, nan_geom, far, huge, empty)
+    ]
+    accepted, warnings = validate_geoai_actions(actions, {}, {})
+    assert [a["geometry"] for a in accepted] == [square]
+    assert len(warnings) == 4

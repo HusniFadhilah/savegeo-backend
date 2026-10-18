@@ -80,6 +80,27 @@ def _job_path(job_id: str) -> Path:
     return _jobs_dir() / f"{job_id}.json"
 
 
+def job_owner_key(viewer: object) -> str:
+    return f"user:{viewer.id}" if isinstance(viewer, User) else f"admin:{viewer.id}"  # type: ignore[attr-defined]
+
+
+def viewer_owns_job(job_id: str, viewer: object, created_by_user_id: int | None = None) -> bool:
+    """Whether ``viewer`` submitted analysis ``job_id``.
+
+    The job file records the submitting account for both users and admins.
+    ``created_by_user_id`` from provenance is a fallback for user jobs whose
+    status file is unavailable.
+    """
+    try:
+        path = _job_path(job_id)
+    except HTTPException:
+        return False
+    if path.exists():
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f).get("owner") == job_owner_key(viewer)
+    return isinstance(viewer, User) and created_by_user_id is not None and created_by_user_id == viewer.id
+
+
 def _now() -> str:
     return format_rfc3339(utc_now())
 

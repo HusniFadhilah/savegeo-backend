@@ -30,6 +30,7 @@ from __future__ import annotations
 import logging
 import hashlib
 import re
+import secrets
 import socket
 import threading
 from ipaddress import ip_address
@@ -1879,7 +1880,8 @@ def raster_toolbox(data: dict) -> dict:
         from pathlib import Path
         export_dir = Path(get_settings().upload_dir) / "imagery-toolbox"
         export_dir.mkdir(parents=True, exist_ok=True)
-        output_path = export_dir / f"toolbox-{datetime.now(UTC).strftime('%Y%m%d%H%M%S%f')}.tif"
+        # The random suffix keeps export download URLs unguessable by other users.
+        output_path = export_dir / f"toolbox-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}-{secrets.token_urlsafe(16)}.tif"
         out_profile = profile.copy()
         out_profile.update(dtype="float32", count=1, nodata=np.nan)
         with rasterio.open(output_path, "w", **out_profile) as target:

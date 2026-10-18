@@ -9,9 +9,10 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.orm import Session
 
+from app.core import auth_throttle
 from app.core.config import get_settings
 from app.core.security import (
     create_password_reset_token,
@@ -22,7 +23,7 @@ from app.core.security import (
     get_current_user,
     hash_password,
     set_session_cookie,
-    verify_password,
+    verify_login_password,
     ensure_current_session,
     revoke_account_sessions,
 )
@@ -60,10 +61,13 @@ def register(payload: UserRegisterRequest, response: Response, db: Session = Dep
 
 
 @router.post("/login")
-def login(payload: UserLoginRequest, response: Response, db: Session = Depends(get_db)):
+def login(payload: UserLoginRequest, request: Request, response: Response, db: Session = Depends(get_db)):
+    auth_throttle.ensure_login_allowed(request, "user", payload.username)
     user = db.query(User).filter_by(username=payload.username).first()
-    if not user or not user.is_active or not verify_password(payload.password, user.password_hash):
+    if not verify_login_password(payload.password, user):
+        auth_throttle.record_login_failure(request, "user", payload.username)
         raise HTTPException(status_code=401, detail="Invalid username or password")
+    auth_throttle.record_login_success(request, "user", payload.username)
     user.last_login = datetime.now(UTC)
     db.commit()
     set_session_cookie(response, USER_SESSION_COOKIE, create_user_access_token(user))
@@ -83,10 +87,11 @@ def me(user: User = Depends(get_current_user)):
 
 
 @router.post("/forgot-password")
-def forgot_password(payload: PasswordForgotRequest, db: Session = Depends(get_db)):
+def forgot_password(payload: PasswordForgotRequest, request: Request, db: Session = Depends(get_db)):
     identifier = payload.identifier.strip()
     if not identifier:
         raise HTTPException(status_code=400, detail="Email atau username wajib diisi")
+    auth_throttle.ensure_password_reset_request_allowed(request, "user", identifier)
 
     user = (
         db.query(User)

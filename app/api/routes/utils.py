@@ -8,13 +8,26 @@ import logging
 import zipfile
 
 import requests
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
-router = APIRouter(prefix="/utils", tags=["utils"])
+from app.core.security import get_current_app_viewer
+from app.services import geocode_service
+
+# Geocoding proxies a third-party service under SAVEGEO's identity and the
+# converters parse uploaded archives, so every utility requires a signed-in user.
+router = APIRouter(prefix="/utils", tags=["utils"], dependencies=[Depends(get_current_app_viewer)])
 logger = logging.getLogger(__name__)
 
 _UA = "GeoMoka/1.0 (geospatial platform; contact: admin@geomoka.id)"
+
+# Decompression limits for uploaded shapefile archives. The compressed upload is
+# capped at 50 MB; these bounds stop a small "zip bomb" from expanding into
+# gigabytes of memory when the members are read.
+_SHP_MAX_ZIP_ENTRIES = 1000
+_SHP_MAX_MEMBER_BYTES = 200 * 1024 * 1024
+_SHP_MAX_TOTAL_BYTES = 300 * 1024 * 1024
+_SHP_MAX_FEATURES = 100_000
 
 
 @router.get("/geocode")
@@ -94,6 +107,9 @@ def geocode_search(q: str = "", limit: int = 8):
                 "limit": limit,
                 "addressdetails": 1,
                 "polygon_geojson": 1,
+                # Server-side simplification (~50 m) keeps city/regency polygons
+                # small enough for the browser; geocode_service still caps vertices.
+                "polygon_threshold": 0.0005,
                 "countrycodes": "id",
             },
             headers={"User-Agent": _UA},
@@ -105,40 +121,11 @@ def geocode_search(q: str = "", limit: int = 8):
         logger.warning("Nominatim search error: %s", e)
         raise HTTPException(status_code=502, detail="Layanan pencarian lokasi tidak tersedia. Coba lagi.") from e
 
-    out = []
-    for d in results:
-        bb = d.get("boundingbox", [])  # [south, north, west, east]
-        bbox = [float(bb[2]), float(bb[0]), float(bb[3]), float(bb[1])] if len(bb) == 4 else None
-        addr = d.get("address", {})
-        # Nominatim's `geojson` can be a Point/LineString for a POI/road, not just
-        # a Polygon/MultiPolygon for an admin area - only pass through the shapes
-        # the frontend can actually use as an AOI, let it fall back to bbox otherwise.
-        gj = d.get("geojson")
-        if gj and gj.get("type") not in ("Polygon", "MultiPolygon"):
-            gj = None
-        if gj:
-            from app.services.gee_common import _validate_geojson
-            try:
-                _validate_geojson(gj)
-            except ValueError:
-                gj = None
-        out.append({
-            "osm_id": d.get("osm_id"),
-            "lat": float(d["lat"]),
-            "lng": float(d["lon"]),
-            "display_name": d.get("display_name", q),
-            "type": d.get("type", ""),
-            "class_": d.get("class", ""),
-            "bbox": bbox,
-            "geojson": gj,
-            "address_info": {
-                "province": addr.get("state") or addr.get("province") or addr.get("region") or "",
-                "city": addr.get("city") or addr.get("county") or addr.get("municipality") or addr.get("town") or "",
-                "district": addr.get("suburb") or addr.get("city_district") or "",
-                "village": addr.get("village") or addr.get("neighbourhood") or addr.get("quarter") or "",
-            },
-        })
-    return {"results": out}
+    if not isinstance(results, list):
+        raise HTTPException(status_code=502, detail="Layanan pencarian lokasi mengembalikan respons tidak valid.")
+
+    normalized = [c for c in (geocode_service.normalize_candidate(d) for d in results if isinstance(d, dict)) if c]
+    return {"results": geocode_service.rank_candidates(normalized, q)}
 
 
 class ParseAoiRequest(BaseModel):
@@ -229,6 +216,17 @@ async def convert_shp(request: Request):
     base = shp_name[:-4]
     name_label = base.split("/")[-1] or original_name.replace(".zip", "")
 
+    infos = zf.infolist()
+    if len(infos) > _SHP_MAX_ZIP_ENTRIES:
+        raise HTTPException(status_code=400, detail="ZIP berisi terlalu banyak file.")
+    sizes = {info.filename: info.file_size for info in infos}
+    wanted = [base + ext for ext in (".shp", ".dbf", ".shx", ".SHP", ".DBF", ".SHX")]
+    if (
+        any(sizes.get(name, 0) > _SHP_MAX_MEMBER_BYTES for name in wanted)
+        or sum(sizes.get(name, 0) for name in wanted) > _SHP_MAX_TOTAL_BYTES
+    ):
+        raise HTTPException(status_code=413, detail="Isi shapefile terlalu besar setelah diekstrak.")
+
     def _read(ext):
         try:
             return io.BytesIO(zf.read(base + ext))
@@ -253,18 +251,23 @@ async def convert_shp(request: Request):
             kwargs["shx"] = shx_buf
         sf = shapefile.Reader(**kwargs)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Gagal membaca shapefile: {e}") from e
+        raise HTTPException(status_code=400, detail="Gagal membaca shapefile.") from e
 
     try:
         fields = [f[0] for f in sf.fields[1:]]
         features = []
-        for sr in sf.shapeRecords():
+        for sr in sf.iterShapeRecords():
+            if len(features) >= _SHP_MAX_FEATURES:
+                raise HTTPException(status_code=413, detail=f"Shapefile melebihi {_SHP_MAX_FEATURES} feature.")
             geom = sr.shape.__geo_interface__
             props = dict(zip(fields, sr.record))
             props = {k: (v.decode("utf-8", "replace") if isinstance(v, bytes) else v) for k, v in props.items()}
             features.append({"type": "Feature", "geometry": geom, "properties": props})
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Gagal konversi ke GeoJSON: {e}") from e
+        logger.warning("Shapefile to GeoJSON conversion failed: %s", type(e).__name__)
+        raise HTTPException(status_code=400, detail="Gagal konversi shapefile ke GeoJSON.") from e
 
     if not features:
         raise HTTPException(status_code=400, detail="Shapefile tidak memiliki feature.")

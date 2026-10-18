@@ -9,6 +9,9 @@ from __future__ import annotations
 
 from app.agentic.action_catalog import APPLICATION_CONTROL_PROMPT, SHARED_CARBON_PARAMETERS, UI_ACTION_TARGETS
 
+import contextlib
+import contextvars
+import json
 import logging
 import re
 import time
@@ -1384,7 +1387,49 @@ Jika hanya 1 dataset, langsung pakai tanpa tanya.
 Kembalikan hanya JSON valid. Tidak ada teks lain di luar JSON."""
 
 
+_AI_SELECTION: contextvars.ContextVar[tuple[str, str] | None] = contextvars.ContextVar(
+    "savegeo_ai_selection", default=None
+)
+
+
+@contextlib.contextmanager
+def ai_selection(provider: str, model: str):
+    """Use ``provider``/``model`` for AI calls made inside this block (per request/thread).
+
+    The caller must already have validated the pair against the admin allowlist
+    (``ai_provider_service.resolve_selection``); this only applies it.
+    """
+    token = _AI_SELECTION.set((provider, model))
+    try:
+        yield
+    finally:
+        _AI_SELECTION.reset(token)
+
+
+def _parse_allowed_models(raw: str) -> list[dict]:
+    try:
+        value = json.loads(raw) if raw else []
+    except ValueError:
+        return []
+    if not isinstance(value, list):
+        return []
+    return [
+        {"provider": str(i["provider"]).lower(), "model": str(i["model"])}
+        for i in value
+        if isinstance(i, dict) and isinstance(i.get("provider"), str) and isinstance(i.get("model"), str)
+    ]
+
+
 def _get_ai_config() -> dict:
+    """Read AI provider config (DB, then env), applying any per-request selection."""
+    cfg = load_ai_config()
+    selection = _AI_SELECTION.get()
+    if selection:
+        cfg["provider"], cfg["model"] = selection
+    return cfg
+
+
+def load_ai_config() -> dict:
     """Read AI provider config from SystemConfig DB with env-var fallback."""
     import os
 
@@ -1431,6 +1476,9 @@ def _get_ai_config() -> dict:
                 "backup_keys_openai":        _db("ai.backup_keys.openai",        ""),
                 "backup_keys_openrouter":    _db("ai.backup_keys.openrouter",    ""),
                 "backup_keys_deepseek":      _db("ai.backup_keys.deepseek",      ""),
+                "fallback_provider":         _db("ai.fallback_provider",         _env("AI_FALLBACK_PROVIDER")),
+                "fallback_model":            _db("ai.fallback_model",            _env("AI_FALLBACK_MODEL")),
+                "allowed_models":            _parse_allowed_models(_db("ai.allowed_models", _env("AI_ALLOWED_MODELS"))),
             }
         finally:
             _db_session.close()
@@ -1453,6 +1501,9 @@ def _get_ai_config() -> dict:
             "backup_keys_openai":     "",
             "backup_keys_openrouter": "",
             "backup_keys_deepseek":   "",
+            "fallback_provider":      _env("AI_FALLBACK_PROVIDER"),
+            "fallback_model":         _env("AI_FALLBACK_MODEL"),
+            "allowed_models":         _parse_allowed_models(_env("AI_ALLOWED_MODELS")),
         }
 
 
@@ -2364,6 +2415,32 @@ def _call_gemini_tools(api_key: str, model: str, user_input: str,
     return _tool_round_limit_response()
 
 
+_MAX_ACTION_GEOMETRY_VERTICES = 30_000
+
+
+def _action_geometry_is_safe(geometry: object) -> bool:
+    """Finite, in-range coordinates and a bounded vertex count for AI-supplied geometry."""
+    vertices = 0
+    stack: list = [geometry.get("coordinates")] if isinstance(geometry, dict) else []
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (list, tuple)) and node and all(
+            isinstance(v, (int, float)) and not isinstance(v, bool) for v in node
+        ):
+            if len(node) < 2 or not (-180 <= node[0] <= 180 and -90 <= node[1] <= 90):
+                return False
+            if any(v != v or v in (float("inf"), float("-inf")) for v in node):
+                return False
+            vertices += 1
+            if vertices > _MAX_ACTION_GEOMETRY_VERTICES:
+                return False
+        elif isinstance(node, (list, tuple)) and node:
+            stack.extend(node)
+        else:
+            return False
+    return vertices > 0
+
+
 _GEOAI_UI_TARGETS = UI_ACTION_TARGETS
 
 
@@ -2464,7 +2541,7 @@ def validate_geoai_actions(
                 valid.append({"type": legacy_type, "hotspot_id": action["hotspot_id"][:80]})
             elif legacy_type == "zoom_to_location" and all(type(action.get(k)) in (int, float) for k in ("lat", "lng")) and -90 <= action["lat"] <= 90 and -180 <= action["lng"] <= 180 and type(action.get("zoom", 13)) in (int, float) and 0 <= action.get("zoom", 13) <= 24:
                 valid.append({"type": legacy_type, "lat": action["lat"], "lng": action["lng"], "zoom": action.get("zoom", 13)})
-            elif legacy_type in {"zoom_to_feature", "highlight_polygon"} and isinstance(action.get("geometry"), dict) and isinstance(action["geometry"].get("type"), str) and action["geometry"]["type"] in {"Polygon", "MultiPolygon", "Point", "MultiPoint", "LineString", "MultiLineString"}:
+            elif legacy_type in {"zoom_to_feature", "highlight_polygon"} and isinstance(action.get("geometry"), dict) and isinstance(action["geometry"].get("type"), str) and action["geometry"]["type"] in {"Polygon", "MultiPolygon", "Point", "MultiPoint", "LineString", "MultiLineString"} and _action_geometry_is_safe(action["geometry"]):
                 valid.append({"type": legacy_type, "geometry": action["geometry"]})
             else:
                 if isinstance(name, str) and name in _GEOAI_UI_TARGETS:

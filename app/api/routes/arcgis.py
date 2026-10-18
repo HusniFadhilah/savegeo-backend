@@ -12,15 +12,19 @@ import logging
 import math
 
 import requests
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 
+from app.core.security import get_current_app_viewer
 from app.providers.arcgis_client import _is_allowed_domain, get_arcgis_client
 from app.registries.carbon_dataset_registry import get_arcgis_carbon_meta, is_arcgis_carbon_dataset
 from app.registries.landcover_dataset_registry import LAND_COVER_DATASET_OPTIONS, LAND_COVER_LEGENDS
 from app.services.arcgis_helpers import _get_clip_poly, _year_ms_range
 
-router = APIRouter(tags=["arcgis"])
+# The proxy spends the server-side ArcGIS credential, so it is limited to
+# signed-in application users. Leaflet tile requests are same-origin and carry
+# the session cookie automatically.
+router = APIRouter(tags=["arcgis"], dependencies=[Depends(get_current_app_viewer)])
 logger = logging.getLogger(__name__)
 
 

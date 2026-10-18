@@ -1,0 +1,31 @@
+# Keep secrets, runtime data and local tooling out of the Docker build context.
+# The Dockerfile copies only explicit source directories, but the whole context
+# is still sent to the builder (and remote builders/CI caches) without this.
+.env
+.env.*
+!.env.example
+!.env.production.example
+var/
+tmp/
+docs/
+.git/
+.github/
+.venv/
+.venv-*/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+**/__pycache__/
+*.pyc
+*.db
+*.sqlite
+*.sqlite3
+*.pem
+*.key
+*service-account*.json
+*credentials*.json
+gee-*.json
+saved_models_local/
+build-metadata.json
+.claude/
+.tmp-*

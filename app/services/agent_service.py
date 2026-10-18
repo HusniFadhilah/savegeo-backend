@@ -21,7 +21,7 @@ from typing import Any
 from fastapi import Request
 from sqlalchemy.orm import Session
 
-from app.agentic import rate_limiter
+from app.agentic import agentic_ai, rate_limiter
 from app.agentic.geoai_tools import filter_direct_reference_layers
 from app.agentic.agentic_ai import (
     build_agent_capabilities,
@@ -35,6 +35,7 @@ from app.db.models.chat_session import ChatSession
 from app.db.models.uploaded_model import UploadedModel
 from app.providers.arcgis_client import get_arcgis_client
 from app.registries.landcover_dataset_registry import get_dataset_list
+from app.services import ai_provider_service as providers
 from app.services.carbon_service import get_carbon_dataset_list
 
 logger = logging.getLogger(__name__)
@@ -162,6 +163,81 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else ""
 
 
+class _AiCallError(Exception):
+    def __init__(self, selection: tuple[str, str], cause: BaseException):
+        super().__init__(str(cause))
+        self.provider, self.model = selection
+        self.cause = cause
+
+
+_DOWN_STATUSES = {"unreachable", "timeout", "unconfigured", "invalid_url", "model_missing", "auth_failed"}
+
+
+def _redact_secrets(text: str, cfg: dict) -> str:
+    """Strip configured API keys from text before it is logged."""
+    for key, value in cfg.items():
+        if "api_key" in key or key.startswith("backup_keys_"):
+            for secret in str(value or "").splitlines():
+                if len(secret.strip()) >= 8:
+                    text = text.replace(secret.strip(), "***")
+    return text
+
+
+def _is_connectivity_error(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return isinstance(exc, (ConnectionError, TimeoutError)) or "connection" in text or "timed out" in text
+
+
+def _run_with_fallback(compute, cfg: dict, primary: tuple[str, str]) -> tuple[dict, dict]:
+    """Run ``compute`` with ``primary``; on an outage use the admin fallback if it is healthy."""
+    fallback = providers.fallback_selection(cfg, primary)
+    cached = providers.peek_cached_health(primary[0], cfg, primary[1])
+    primary_error: BaseException | None = None
+
+    if cached is not None and cached["status"] in _DOWN_STATUSES:
+        primary_error = ConnectionError(f"provider {primary[0]} marked {cached['status']}")
+    else:
+        try:
+            with agentic_ai.ai_selection(*primary):
+                return compute(), {"provider": primary[0], "model": primary[1], "fallback_used": False}
+        except Exception as exc:  # noqa: BLE001 - classified below
+            if not (fallback and providers.is_availability_error(exc)):
+                raise _AiCallError(primary, exc) from exc
+            if _is_connectivity_error(exc):
+                providers.mark_unavailable(primary[0], cfg, primary[1], "unreachable")
+            primary_error = exc
+
+    if fallback and providers.check_provider_health(fallback[0], cfg, fallback[1])["status"] == "ok":
+        try:
+            with agentic_ai.ai_selection(*fallback):
+                result = compute()
+        except Exception as exc:  # noqa: BLE001
+            raise _AiCallError(fallback, exc) from exc
+        return result, {
+            "provider": fallback[0], "model": fallback[1], "fallback_used": True,
+            "fallback_from": primary[0], "fallback_reason": "provider_unavailable",
+        }
+    raise _AiCallError(primary, primary_error)
+
+
+def _user_error_message(provider: str, exc: BaseException) -> tuple[str, bool]:
+    """Return ``(fixed Indonesian message, retryable)``; never includes raw error text."""
+    err_str = str(exc)
+    if provider == "ollama" and providers.is_availability_error(exc):
+        return (
+            "Ollama tidak tersedia saat ini. Pastikan server Ollama berjalan atau pilih provider lain "
+            "(percakapan Anda tetap tersimpan).",
+            True,
+        )
+    if any(code in err_str for code in ("503", "UNAVAILABLE", "overloaded", "529")):
+        return "Server AI sedang sibuk. Coba lagi dalam beberapa detik.", True
+    if "429" in err_str or "quota" in err_str.lower():
+        return "Batas kuota AI tercapai. Coba lagi nanti atau ganti model/provider di admin.", True
+    if "401" in err_str or "403" in err_str or "API key" in err_str:
+        return "API key tidak valid atau belum dikonfigurasi. Cek pengaturan admin.", False
+    return "Terjadi kesalahan pada AI. Coba lagi beberapa saat.", providers.is_availability_error(exc)
+
+
 def run_agent_control(
     db: Session,
     request: Request,
@@ -246,7 +322,13 @@ def run_agent_control(
         history = [{"role": m.role, "content": m.content} for m in past]
 
     # ── AI call ──────────────────────────────────────────────────
+    ai_cfg = agentic_ai.load_ai_config()
     try:
+        selection = providers.resolve_selection(ai_cfg, payload.get("ai"))
+    except providers.SelectionNotAllowed as exc:
+        return {"error": str(exc)}, 400, {}
+
+    def _compute(page_state: dict = page_state) -> dict:
         if mode == "geoai":
             # SaveGeo Assistant: grounded tool-calling loop over already-computed
             # results + live hotspot search (see agentic_ai.geoai_with_ai). Screenshot/
@@ -304,17 +386,15 @@ def run_agent_control(
             result["actions"] = safe_actions
             if access_warnings:
                 result["warnings"] = (result.get("warnings") or []) + access_warnings
-    except Exception as e:  # noqa: BLE001
-        logger.error("agent_control error: %s", e)
-        err_str = str(e)
-        if any(code in err_str for code in ("503", "UNAVAILABLE", "overloaded", "529")):
-            user_msg = "Server AI sedang sibuk. Coba lagi dalam beberapa detik."
-        elif "429" in err_str or "quota" in err_str.lower():
-            user_msg = "Batas kuota AI tercapai. Coba lagi nanti atau ganti model/provider di admin."
-        elif "401" in err_str or "403" in err_str or "API key" in err_str:
-            user_msg = "API key tidak valid atau belum dikonfigurasi. Cek pengaturan admin."
-        else:
-            user_msg = "Terjadi kesalahan pada AI. Coba lagi beberapa saat."
+        return result
+
+    try:
+        result, ai_meta = _run_with_fallback(_compute, ai_cfg, selection)
+        result["ai"] = ai_meta
+    except _AiCallError as err:
+        cause = err.cause
+        logger.error("agent_control error (%s): %s", err.provider, _redact_secrets(str(cause), ai_cfg))
+        user_msg, retryable = _user_error_message(err.provider, cause)
         return (
             {
                 "intent": "error",
@@ -323,6 +403,8 @@ def run_agent_control(
                 "message": user_msg,
                 "warnings": [],
                 "actions": [],
+                "retryable": retryable,
+                "ai": {"provider": err.provider, "model": err.model, "fallback_used": False},
             },
             500,
             {},

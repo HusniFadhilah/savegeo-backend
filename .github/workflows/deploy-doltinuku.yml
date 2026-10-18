@@ -5,6 +5,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Least privilege by default; jobs that need more declare it explicitly.
+permissions:
+  contents: read
+
 concurrency:
   group: savegeo-doltinuku-beta
   cancel-in-progress: false
@@ -132,7 +136,7 @@ jobs:
         run: docker build -t savegeo-backend:doltinuku-ci .
 
       - name: Scan backend image
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: savegeo-backend:doltinuku-ci
           format: json

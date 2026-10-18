@@ -51,6 +51,13 @@ class Settings(BaseSettings):
     # Viewport raster requests are numerous and should not consume the budget
     # reserved for JSON/API operations such as hotspot region statistics.
     rate_limit_map_tiles_per_minute: int = 600
+    # Credential brute-force and reset-email throttles (0 disables a limit).
+    # Counted per worker within a sliding window; see app/core/auth_throttle.py.
+    auth_throttle_window_seconds: int = 900
+    login_failures_per_account: int = 10
+    login_failures_per_ip: int = 50
+    password_reset_requests_per_account: int = 3
+    password_reset_requests_per_ip: int = 20
 
     # --- Mail / SMTP ---
     mail_mailer: str = "smtp"

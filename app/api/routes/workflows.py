@@ -89,7 +89,8 @@ def list_workflows(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    query = db.query(Workflow).filter(or_(Workflow.owner_id == user.id, Workflow.visibility.in_(["public", "unlisted"])))
+    # "unlisted" means reachable by its share link only, never discoverable here.
+    query = db.query(Workflow).filter(or_(Workflow.owner_id == user.id, Workflow.visibility == "public"))
     if category:
         query = query.filter(Workflow.category == category)
     if search:
