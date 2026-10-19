@@ -1,4 +1,4 @@
-"""Cached access to geoBoundaries open country and ADM1/ADM2 boundaries."""
+"""Cached access to geoBoundaries open country and ADM1-ADM4 boundaries."""
 from __future__ import annotations
 
 import json
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 _API_ROOT = "https://www.geoboundaries.org/api/current/gbOpen"
 _COUNTRY_ISO = re.compile(r"^[A-Z]{3}$")
 _BOUNDARY_ID = re.compile(r"^[A-Z0-9-]{1,100}$")
-_LEVELS = {"ADM0", "ADM1", "ADM2"}
+_LEVELS = {"ADM0", "ADM1", "ADM2", "ADM3", "ADM4"}
 _METADATA_TTL = 7 * 24 * 60 * 60
 _GEOMETRY_TTL = 30 * 24 * 60 * 60
 _METADATA_MAX_BYTES = 12 * 1024 * 1024
@@ -113,7 +113,7 @@ def _validate_iso3(iso3: str) -> str:
 def _validate_level(level: str) -> str:
     value = level.upper()
     if value not in _LEVELS:
-        raise HTTPException(status_code=400, detail="level must be ADM0, ADM1, or ADM2")
+        raise HTTPException(status_code=400, detail="level must be ADM0, ADM1, ADM2, ADM3, or ADM4")
     return value
 
 
@@ -206,7 +206,7 @@ def _feature_belongs_to_parent(parent_geometry, child_geometry: dict) -> bool:
             return True
         return child.area > 0 and parent_geometry.intersection(child).area / child.area >= 0.5
     except Exception:  # noqa: BLE001 - malformed upstream topology should not break the list endpoint
-        logger.warning("Could not compare geoBoundaries ADM2 polygon with its ADM1 parent")
+        logger.warning("Could not compare geoBoundaries child boundary with its parent")
         return False
 
 
@@ -240,13 +240,15 @@ def list_global_boundaries(
     level = _validate_level(level)
     if level == "ADM0":
         raise HTTPException(status_code=400, detail="Use /countries for ADM0 boundaries")
-    if level == "ADM2" and parent_index is None:
-        raise HTTPException(status_code=400, detail="parent_index is required for ADM2 boundaries")
+    level_number = int(level[3:])
+    if level_number > 1 and parent_index is None:
+        raise HTTPException(status_code=400, detail=f"parent_index is required for {level} boundaries")
     try:
         metadata, features = _geometry_features(iso3, level)
         options = _feature_options(metadata, features, level)
-        if level == "ADM2":
-            _, parent_features = _geometry_features(iso3, "ADM1")
+        if level_number > 1:
+            parent_level = f"ADM{level_number - 1}"
+            _, parent_features = _geometry_features(iso3, parent_level)
             if parent_index is None or parent_index >= len(parent_features):
                 raise BoundaryNotFound
             try:
