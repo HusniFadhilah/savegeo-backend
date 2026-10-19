@@ -27,6 +27,7 @@ from app.api.routes import (
     imagery,
     imagery_tiles,
     geospatial,
+    global_boundaries,
     landcover,
     landcover_models,
     maps,
@@ -52,6 +53,7 @@ api_router.include_router(maps.router)
 api_router.include_router(models.router)
 api_router.include_router(vegetation.router)
 api_router.include_router(regions.router)
+api_router.include_router(global_boundaries.router)
 api_router.include_router(companies.router)
 api_router.include_router(chat.router)
 api_router.include_router(utils.router)

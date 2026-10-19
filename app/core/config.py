@@ -140,6 +140,9 @@ class Settings(BaseSettings):
 
     # --- Region API ---
     region_api_base_url: str = "https://api.sp3stab.id/api/en"
+    # Persistent cache for global geoBoundaries country/subnational layers.
+    # Empty stores it beside UPLOAD_DIR under the mounted /app/var volume.
+    global_boundary_cache_dir: str = ""
 
     # --- Disaster adapters ---
     bmkg_cap_url: str = "https://www.bmkg.go.id/alerts/nowcast/id"
