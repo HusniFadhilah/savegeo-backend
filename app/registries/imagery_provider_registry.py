@@ -117,7 +117,7 @@ IMAGERY_PROVIDERS: dict[str, dict[str, Any]] = {
         "cloud_property": "eo:cloud_cover",
         "cloud_mask_techniques": None,
         "license": "Planet customer license",
-        "description": "Katalog Planet berlisensi melalui konektor STAC backend. Dukungan STAC Planet saat ini beta; produk, cakupan, resolusi, asset, dan hak akses mengikuti koleksi serta entitlement akun yang dikonfigurasi. Search/preview tidak membuat order atau tasking.",
+        "description": "Katalog Planet berlisensi melalui konektor STAC backend. Pilih PlanetScope (PSScene) atau SkySat (SkySatScene/SkySatCollect) jika koleksinya dikonfigurasi. Dukungan STAC Planet saat ini beta; cakupan, resolusi, asset, dan hak akses mengikuti entitlement akun. Search/preview tidak membuat order atau tasking.",
         "capabilities": {
             "searchable": True, "downloadable": True, "supports_preview": True,
             "supports_compare": True, "supports_mosaic": False,
@@ -189,7 +189,7 @@ IMAGERY_PROVIDERS: dict[str, dict[str, Any]] = {
         "cloud_mask_techniques": None,
         "license": "OneAtlas customer contract and product-specific terms",
         "configuration_message": "OneAtlas API key, account workspace ID, and a streaming entitlement are required. Preview is available only for returned scenes with WMTS rights.",
-        "description": "OneAtlas Data Living Library through the official OpenSearch API. Scene search is separate from STAC; RGB preview uses the authenticated provider WMTS only when the account response grants that right. No order or tasking is performed.",
+        "description": "OneAtlas Data Living Library melalui OpenSearch resmi. Pencarian dapat difilter ke PNEO (Pléiades Neo), PHR (Pléiades), atau SPOT. Pratinjau RGB memakai WMTS terautentikasi hanya jika hak akun mengizinkan; pencarian tidak membuat order atau tasking.",
         "capabilities": {
             "searchable": True, "downloadable": False, "supports_preview": True,
             "supports_compare": True, "supports_mosaic": False,

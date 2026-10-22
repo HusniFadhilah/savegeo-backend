@@ -270,6 +270,10 @@ def create_analysis_job(
     # gate for all GEE workflows, but allow COG/SoilGrids references to work
     # during credential outages and in offline deployments.
     needs_ee = job_type not in {"carbon_local"}
+    if job_type == "carbon_local" and payload.get("model_name") == "ibm_granite_geospatial_biomass":
+        # Granite's local inference stage consumes an HLS composite downloaded
+        # from Earth Engine, so it still needs the EE session initialized.
+        needs_ee = True
     if job_type == "carbon":
         from app.registries.carbon_dataset_registry import get_external_carbon_meta
         dataset = str(payload.get("reference_dataset") or "")

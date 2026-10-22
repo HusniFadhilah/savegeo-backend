@@ -440,6 +440,7 @@ def _scene_from_stac_item(
         "footprint": item.get("geometry"),
         "resolution_m": props.get("gsd") or default_asset.get("resolution_m") or meta.get("resolution_m"),
         "platform": props.get("platform") or props.get("constellation"),
+        "collection": item.get("collection"),
         "producer": producer or meta.get("provider"),
         "title": props.get("title") or props.get("catalog_id") or item.get("id"),
         "assets": [
@@ -1018,7 +1019,27 @@ def list_scenes(data: dict, request=None, settings=None) -> dict:
                 f"{config['label']} belum lengkap. Lengkapi URL STAC, koleksi STAC, dan credential di konfigurasi backend.",
                 503,
             )
-        commercial_data = {**data, "stac_collections": config["collection"]}
+        configured_collections = {
+            value.strip()
+            for value in str(config.get("collection") or "").split(",")
+            if value.strip()
+        }
+        requested_collections = data.get("stac_collections")
+        if isinstance(requested_collections, str):
+            requested_collections = [value.strip() for value in requested_collections.split(",") if value.strip()]
+        elif isinstance(requested_collections, list):
+            requested_collections = [str(value).strip() for value in requested_collections if str(value).strip()]
+        else:
+            requested_collections = []
+        if requested_collections and not set(requested_collections).issubset(configured_collections):
+            raise AnalysisError(
+                "Koleksi produk yang dipilih tidak termasuk koleksi yang dikonfigurasi untuk akun provider ini.",
+                400,
+            )
+        commercial_data = {
+            **data,
+            "stac_collections": requested_collections or sorted(configured_collections),
+        }
         return _list_cog_stac_scenes(
             commercial_data,
             provider_key,

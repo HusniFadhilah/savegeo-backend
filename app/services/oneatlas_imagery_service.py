@@ -250,7 +250,7 @@ def _normalize_feature(feature: Any, request=None) -> dict[str, Any] | None:
         "bbox": feature.get("bbox"),
         "footprint": feature.get("geometry"),
         "resolution_m": resolution_m,
-        "platform": props.get("platform") or props.get("constellation"),
+        "platform": props.get("constellation") or props.get("platform"),
         "producer": props.get("organisationName") or "Airbus Defence and Space",
         "title": props.get("title") or props.get("sourceIdentifier") or provider_id,
         "assets": assets,
@@ -270,6 +270,9 @@ def list_scenes(data: dict[str, Any], request=None, *, settings: Settings | None
     max_cloud = _number(data.get("max_cloud_cover"), minimum=0, maximum=100)
     if data.get("max_cloud_cover") is not None and max_cloud is None:
         raise AnalysisError("max_cloud_cover harus di antara 0 dan 100", 400)
+    constellation = str(data.get("constellation") or "").strip().upper()
+    if constellation and constellation not in {"PNEO", "PHR", "SPOT"}:
+        raise AnalysisError("Konstelasi OneAtlas tidak dikenal. Pilih PNEO, PHR, atau SPOT.", 400)
 
     timeout = max(5, int((settings or get_settings()).commercial_imagery_timeout_seconds or 30))
     scenes: list[dict[str, Any]] = []
@@ -289,9 +292,12 @@ def list_scenes(data: dict[str, Any], request=None, *, settings: Settings | None
                 }
                 if max_cloud is not None:
                     body["cloudCover"] = f"[0,{max_cloud:g}]"
+                search_params = {"workspaceId": config.workspace_id}
+                if constellation:
+                    search_params["constellation"] = constellation
                 response = client.post(
                     _SEARCH_URL,
-                    params={"workspaceId": config.workspace_id},
+                    params=search_params,
                     json=body,
                     headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json", "Cache-Control": "no-cache"},
                     follow_redirects=False,

@@ -10,6 +10,7 @@ from app.db.session import get_db
 from app.registries.model_compatibility import backfill_legacy_metadata, get_compatible_datasets
 from app.registries.carbon_dataset_registry import canonical_carbon_dataset_key
 from app.registries.carbon_pool_models import builtin_carbon_models, get_builtin_carbon_model
+from app.registries.granite_biomass_registry import granite_biomass_model
 
 router = APIRouter(
     tags=["models"],
@@ -48,6 +49,19 @@ def models_list(
             continue
         results.append(m.to_dict_public())
 
+    if model_type in (None, "carbon") and gee_deployable is not True:
+        granite_model = granite_biomass_model()
+        if granite_model:
+            existing_names = {m["name"] for m in results}
+            requested_key = canonical_carbon_dataset_key(target_dataset) if target_dataset else None
+            compatible = granite_model["metadata_json"]["compatible_reference_datasets"]
+            if (
+                granite_model["name"] not in existing_names
+                and (requested_key is None or requested_key in compatible)
+                and (gee_deployable is None or not granite_model["metadata_json"].get("gee_deployable"))
+            ):
+                results.append(granite_model)
+
     if model_type in (None, "carbon") and gee_deployable is not False:
         existing_names = {m["name"] for m in results}
         results.extend(m for m in builtin_carbon_models(target_dataset, db=db) if m["name"] not in existing_names)
@@ -64,6 +78,9 @@ def model_detail(model_id: int, db: Session = Depends(get_db)):
 
 @router.get("/models/by-name/{model_name}")
 def model_by_name(model_name: str, db: Session = Depends(get_db)):
+    granite_model = granite_biomass_model()
+    if granite_model and granite_model["name"] == model_name:
+        return granite_model
     builtin = get_builtin_carbon_model(model_name, db=db)
     if builtin:
         return builtin

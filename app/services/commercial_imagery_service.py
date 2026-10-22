@@ -158,6 +158,15 @@ def provider_meta(provider_key: str, settings: Settings | None = None) -> dict[s
         "stac_configured": bool(config["catalog_configured"] and config.get("collection_configured")) if provider_key in _CONFIG else False,
         "credential_configured": config["credential_configured"],
     }
+    # Collection identifiers are product names (e.g. PSScene/SkySatScene),
+    # not secrets. Returning them lets the scene explorer offer only the
+    # Planet products that the administrator has actually configured.
+    if config.get("collection"):
+        result["configured_stac_collections"] = [
+            collection.strip()
+            for collection in str(config["collection"]).split(",")
+            if collection.strip()
+        ]
     if "collection_configured" in config:
         result["collection_configured"] = config["collection_configured"]
     if "workspace_configured" in config:

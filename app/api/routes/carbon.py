@@ -124,8 +124,13 @@ def analyze_carbon(request: Request, data: dict = Body(...), db: Session = Depen
 
 
 @router.post("/analyze/carbon-local", dependencies=[Depends(get_current_app_viewer)])
-def analyze_carbon_local(data: dict = Body(...), db: Session = Depends(get_db)):
-    """Non-GEE carbon estimation path — does NOT require Earth Engine."""
+def analyze_carbon_local(request: Request, data: dict = Body(...), db: Session = Depends(get_db)):
+    """Local/STAC inference; Granite additionally downloads its HLS source from EE."""
+    if (
+        data.get("model_name") == "ibm_granite_geospatial_biomass"
+        and not getattr(request.app.state, "ee_initialized", False)
+    ):
+        raise HTTPException(status_code=503, detail="Google Earth Engine belum diinisialisasi. Cek kredensial di Admin Panel.")
     try:
         return carbon_service.analyze_carbon_local(db, data)
     except AnalysisError as e:

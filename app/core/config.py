@@ -80,6 +80,13 @@ class Settings(BaseSettings):
     # --- Local storage ---
     upload_dir: str = "./var/uploads"
     model_dir: str = "./var/saved_models"
+    # IBM Granite geospatial biomass is an optional, CPU/GPU-heavy inference
+    # backend. It stays out of the model catalog until the operator explicitly
+    # enables it and supplies the official checkpoint, config, and SHA-256.
+    ibm_granite_biomass_enabled: bool = False
+    ibm_granite_biomass_checkpoint_path: str = ""
+    ibm_granite_biomass_config_path: str = ""
+    ibm_granite_biomass_checkpoint_sha256: str = ""
     # Self-hosted disaster-imagery rasters (e.g. commercial GeoTIFFs not in the
     # public GEE catalog) served as XYZ tiles by app/services/local_tile_service.py -
     # chosen specifically to avoid needing a billed GCS bucket for GEE asset

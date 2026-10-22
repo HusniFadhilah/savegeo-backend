@@ -25,6 +25,7 @@ from app.inference.carbon_inference_local import LocalCarbonInferenceEngine
 from app.providers.external_carbon_provider import ExternalRasterProvider
 from app.registries import model_compatibility
 from app.registries.carbon_pool_models import builtin_carbon_models, get_builtin_carbon_model
+from app.registries.granite_biomass_registry import MODEL_NAME as GRANITE_BIOMASS_MODEL_NAME, granite_biomass_model
 from app.registries.carbon_dataset_registry import (
     CARBON_ARCGIS_REGISTRY,
     CARBON_DATASET_REGISTRY,
@@ -252,6 +253,12 @@ def active_carbon_model_compatibility(db: Session) -> dict[str, list[str]]:
             names = grouped.setdefault(dataset_key, [])
             if model["name"] not in names:
                 names.append(model["name"])
+    granite_model = granite_biomass_model()
+    if granite_model:
+        for dataset_key in granite_model["metadata_json"]["compatible_reference_datasets"]:
+            names = grouped.setdefault(dataset_key, [])
+            if granite_model["name"] not in names:
+                names.append(granite_model["name"])
     return grouped
 
 
@@ -983,6 +990,9 @@ def calculate_carbon_summary_for_year(
 
 
 def analyze_carbon(db: Session, data: dict) -> dict:
+    if data.get("model_name") == GRANITE_BIOMASS_MODEL_NAME:
+        raise AnalysisError("Model IBM Granite menggunakan jalur HLS khusus. Jalankan melalui estimasi karbon lokal.", 422)
+
     if "aoi" not in data:
         raise AnalysisError("Missing required field: aoi", 400)
 
@@ -1768,20 +1778,21 @@ def analyze_carbon(db: Session, data: dict) -> dict:
 
 
 def analyze_carbon_local(db: Session, data: dict) -> dict:
-    """Non-GEE carbon estimation: features come from Microsoft Planetary
-    Computer STAC (Sentinel-2/DEM/WorldCover) via LocalCarbonInferenceEngine,
-    never ee.Image. Does NOT require EE_INITIALIZED. Only works with models
-    trained via training/train_carbon_non_gee.py (metadata provider in
-    {"non_gee_stac","local_raster"}, gee_deployable=False) — model_name is
-    required (no silent fallback to the GEE registry default, since that
-    would mix a GEE-trained model's coefficients with STAC-sourced features).
+    """Run explicitly named local/STAC carbon models or optional HLS Granite.
 
-    Response envelope deliberately mirrors analyze_carbon's non-gee-deployable
-    ("sampled_sklearn") branch shape (carbon_estimated / carbon_reference /
-    area_info / model_info) — only inference_mode differs ("sampled_stac" vs
-    "sampled_sklearn"), and tile_url is always null (no tile map for this
-    pipeline yet).
+    STAC-trained sklearn models do not require EE. IBM Granite is the separate
+    exception: TerraTorch inference is local, but its HLS composite is fetched
+    from Earth Engine. No model silently falls back to another provider.
+
+    Both paths keep the established carbon response envelope. Granite uses
+    inference_mode="ibm_granite_hls_stats" and currently returns statistics,
+    not a prediction tile layer.
     """
+    if data.get("model_name") == GRANITE_BIOMASS_MODEL_NAME:
+        from app.services.granite_biomass_service import analyze_granite_biomass
+
+        return analyze_granite_biomass(db, data)
+
     import time as _time
 
     _t0 = _time.perf_counter()
