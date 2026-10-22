@@ -43,7 +43,7 @@ RUN python -m venv /opt/samgeo \
        torch==2.13.0 torchvision==0.28.0 \
        --index-url https://download.pytorch.org/whl/cpu \
     && /opt/samgeo/bin/python -m pip install --no-cache-dir \
-       segment-geospatial==1.4.2 transformers==5.19.0 \
+       "Pillow>=13.0.0" segment-geospatial==1.4.2 transformers==5.19.0 \
     && /opt/samgeo/bin/python -m pip uninstall -y pip setuptools
 
 # Keep compilers and development headers out of the production image. Start
