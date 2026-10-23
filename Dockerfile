@@ -18,7 +18,7 @@ COPY scripts ./scripts
 
 RUN python -m venv --without-pip "${VIRTUAL_ENV}" \
     && /usr/local/bin/python -m pip install --no-cache-dir \
-    --target "${VIRTUAL_ENV}/lib/python3.11/site-packages" ".[cams]" \
+    --target "${VIRTUAL_ENV}/lib/python3.11/site-packages" ".[cams,granite-biomass]" \
     && /usr/local/bin/python -m pip install --no-cache-dir --upgrade \
     --target "${VIRTUAL_ENV}/lib/python3.11/site-packages" \
     "msgpack>=1.2.1" \

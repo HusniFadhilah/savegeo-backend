@@ -15,6 +15,9 @@ from app.core.config import Settings, get_settings
 MODEL_NAME = "ibm_granite_geospatial_biomass"
 TARGET_DATASET = "GEDI_L4A_MONTHLY"
 MODEL_VERSION = "1"
+MODEL_REPO = "ibm-granite/granite-geospatial-biomass"
+MODEL_REVISION = "b472652a3d223d51e888877a1365262687f6906d"
+OFFICIAL_CHECKPOINT_SHA256 = "32e91101c75c02c94c7dfa86f48290457812b7a92b7adc903c74953b5fa28b65"
 CHECKPOINT_SHA256_RE = re.compile(r"^[a-fA-F0-9]{64}$")
 
 
@@ -26,13 +29,22 @@ def granite_biomass_paths(settings: Settings | None = None) -> tuple[Path, Path,
     checkpoint_text = settings.ibm_granite_biomass_checkpoint_path.strip()
     config_text = settings.ibm_granite_biomass_config_path.strip()
     checksum = settings.ibm_granite_biomass_checkpoint_sha256.strip().lower()
-    if not checkpoint_text or not config_text or not CHECKPOINT_SHA256_RE.fullmatch(checksum):
-        return None
+    if checkpoint_text or config_text or checksum:
+        # Explicit custom paths retain the strict operator-managed behavior.
+        if not checkpoint_text or not config_text or not CHECKPOINT_SHA256_RE.fullmatch(checksum):
+            return None
+        checkpoint = Path(checkpoint_text).expanduser().resolve()
+        config = Path(config_text).expanduser().resolve()
+        if not checkpoint.is_file() or not config.is_file():
+            return None
+    else:
+        # Default assets live in persistent model storage and are downloaded
+        # from IBM's pinned Hugging Face revision on first inference.
+        asset_dir = Path(settings.model_dir).expanduser().resolve() / MODEL_NAME
+        checkpoint = asset_dir / "biomass_model.ckpt"
+        config = asset_dir / "config.yaml"
+        checksum = OFFICIAL_CHECKPOINT_SHA256
 
-    checkpoint = Path(checkpoint_text).expanduser().resolve()
-    config = Path(config_text).expanduser().resolve()
-    if not checkpoint.is_file() or not config.is_file():
-        return None
     try:
         if importlib.util.find_spec("torch") is None or importlib.util.find_spec("terratorch") is None:
             return None
@@ -42,9 +54,12 @@ def granite_biomass_paths(settings: Settings | None = None) -> tuple[Path, Path,
 
 
 def granite_biomass_model(settings: Settings | None = None) -> dict | None:
-    """Return a public-compatible model record only when runtime is complete."""
-    if granite_biomass_paths(settings) is None:
+    """Return a model record when runtime is installed; assets can be fetched later."""
+    paths = granite_biomass_paths(settings)
+    if paths is None:
         return None
+    checkpoint, config, _ = paths
+    assets_ready = checkpoint.is_file() and config.is_file()
 
     description = (
         "IBM Granite geospatial biomass v1 estimates above-ground biomass from a 30 m HLS L30 composite. "
@@ -81,6 +96,7 @@ def granite_biomass_model(settings: Settings | None = None) -> dict | None:
             "source_url": "https://huggingface.co/ibm-granite/granite-geospatial-biomass",
             "license": "Apache-2.0",
             "accuracy_status": "global_zero_shot; local_field_validation_required",
+            "runtime_state": "ready" if assets_ready else "download_on_first_use",
             "description": description,
         },
     }

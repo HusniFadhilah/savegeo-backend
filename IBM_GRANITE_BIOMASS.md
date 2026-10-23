@@ -1,36 +1,41 @@
 # IBM Granite geospatial biomass (optional carbon model)
 
-SAVEGEO exposes IBM Granite only when the backend operator enables it and the
-matching model runtime, configuration, and checkpoint are installed. The model
-is kept separate from the Sentinel-2/STAC estimators because it expects NASA
-HLS L30 reflectance bands and returns above-ground biomass (AGB).
+SAVEGEO exposes IBM Granite in the carbon model picker when TerraTorch is
+installed. The production Docker image includes the optional Granite runtime.
+The model checkpoint and config are downloaded from IBM's pinned Hugging Face
+revision on the first analysis and stored under `MODEL_DIR/ibm_granite_geospatial_biomass`.
+The production compose file mounts `/app/var`, so downloaded artifacts persist
+across container restarts. The model remains separate from the
+Sentinel-2/STAC estimators because it expects NASA HLS L30 reflectance bands and
+returns above-ground biomass (AGB).
 
-## Server setup
+## Use it
 
-1. Install the optional IBM/TerraTorch runtime in the same Python environment
-   as the SAVEGEO backend. On a compatible Python 3.11 environment, the pinned
-   upstream versions are available through
-   `pip install -e '.[granite-biomass]'`. Select the appropriate PyTorch wheel
-   for the server's CUDA setup; verify the runtime in an isolated environment
-   before enabling production traffic.
-2. Download the official `biomass_model.ckpt` from the IBM Granite model
-   repository and place it in a server-owned, read-only model directory. Obtain
-   the matching `configs/config.yaml` from IBM's official repository and keep it
-   beside the checkpoint. Do not accept either path from a client request.
-3. Calculate the checkpoint SHA-256 on the server (`sha256sum
-   biomass_model.ckpt`) and set these backend environment variables:
+1. Select **GEDI L4A Monthly** in the carbon reference dataset picker.
+2. Choose **IBM Granite Geospatial Biomass · HLS** from the model picker.
+3. Run the analysis. On first use, the backend downloads the official 350 MB
+   checkpoint and config, verifies the checkpoint SHA-256, and caches both for
+   subsequent runs. Earth Engine must be initialized to build the NASA HLS
+   composite.
 
-   ```dotenv
-   IBM_GRANITE_BIOMASS_ENABLED=true
-   IBM_GRANITE_BIOMASS_CHECKPOINT_PATH=/opt/savegeo/models/granite/biomass_model.ckpt
-   IBM_GRANITE_BIOMASS_CONFIG_PATH=/opt/savegeo/models/granite/config.yaml
-   IBM_GRANITE_BIOMASS_CHECKPOINT_SHA256=<64-character-checkpoint-sha256>
-   ```
+Local Python environments need the optional runtime installed once:
 
-   Restart the backend. The model appears in `/api/models?model_type=carbon`
-   under `GEDI_L4A_MONTHLY` only after all files and optional modules are
-   discoverable. If any setting is absent, SAVEGEO hides the model and the
-   existing estimators continue to work.
+```bash
+pip install -e '.[granite-biomass]'
+```
+
+The model is omitted from the picker when the optional runtime is unavailable.
+To disable it on a server, set `IBM_GRANITE_BIOMASS_ENABLED=false`.
+
+For operator-managed artifacts, configure all three values below. The
+checkpoint path, config path, and SHA-256 must be supplied together; these
+paths are server-side only.
+
+```dotenv
+IBM_GRANITE_BIOMASS_CHECKPOINT_PATH=/opt/savegeo/models/granite/biomass_model.ckpt
+IBM_GRANITE_BIOMASS_CONFIG_PATH=/opt/savegeo/models/granite/config.yaml
+IBM_GRANITE_BIOMASS_CHECKPOINT_SHA256=<64-character-checkpoint-sha256>
+```
 
 ## Analysis behavior
 
@@ -55,6 +60,10 @@ HLS L30 reflectance bands and returns above-ground biomass (AGB).
 - [IBM Granite model card](https://huggingface.co/ibm-granite/granite-geospatial-biomass)
 - [IBM's archived code and configuration](https://github.com/ibm-granite/granite-geospatial-biomass)
 - [NASA HLS L30 v2 Earth Engine catalog](https://developers.google.com/earth-engine/datasets/catalog/NASA_HLS_HLSL30_v002)
+
+The automatic downloader pins repository revision
+`b472652a3d223d51e888877a1365262687f6906d` and verifies the checkpoint against
+SHA-256 `32e91101c75c02c94c7dfa86f48290457812b7a92b7adc903c74953b5fa28b65`.
 
 IBM's repository states it is provided without a commitment to maintenance or
 support. Keep the dependency environment and downloaded checkpoint pinned and

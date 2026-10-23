@@ -11,6 +11,7 @@ import hashlib
 import io
 import logging
 import math
+import os
 import threading
 import time
 import zipfile
@@ -25,7 +26,10 @@ from sqlalchemy.orm import Session
 
 from app.registries.granite_biomass_registry import (
     MODEL_NAME,
+    MODEL_REPO,
+    MODEL_REVISION,
     TARGET_DATASET,
+    OFFICIAL_CHECKPOINT_SHA256,
     granite_biomass_paths,
 )
 from app.services import config_service
@@ -42,6 +46,8 @@ MODEL_SCALE_M = 30
 MAX_AOI_AREA_HA = 25_000  # 250 km²; keeps EE transfer and local inference bounded.
 MAX_RASTER_PIXELS = 300_000
 MAX_DOWNLOAD_BYTES = 30 * 1024 * 1024
+MAX_MODEL_CHECKPOINT_BYTES = 400 * 1024 * 1024
+MAX_MODEL_CONFIG_BYTES = 128 * 1024
 _MODEL_LOCK = threading.RLock()
 
 
@@ -51,6 +57,95 @@ def _sha256(path: Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _download_official_asset(destination: Path, filename: str, *, max_bytes: int, expected_sha256: str | None = None) -> None:
+    """Download one pinned IBM artifact atomically; verify the binary checkpoint."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.is_file():
+        if expected_sha256 is None and 0 < destination.stat().st_size <= max_bytes:
+            return
+        if expected_sha256 and _sha256(destination).lower() == expected_sha256.lower():
+            return
+
+    url = f"https://huggingface.co/{MODEL_REPO}/resolve/{MODEL_REVISION}/{filename}"
+    temp_path = destination.with_name(f".{destination.name}.{os.getpid()}.{threading.get_ident()}.part")
+    digest = hashlib.sha256()
+    byte_count = 0
+    try:
+        with requests.get(url, stream=True, timeout=(20, 180), headers={"User-Agent": "SAVEGEO/IBM-Granite-setup"}) as response:
+            response.raise_for_status()
+            content_length = response.headers.get("Content-Length")
+            if content_length and int(content_length) > max_bytes:
+                raise AnalysisError("Ukuran artefak IBM Granite melebihi batas unduhan yang diizinkan.", 413)
+            with temp_path.open("wb") as output:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if not chunk:
+                        continue
+                    byte_count += len(chunk)
+                    if byte_count > max_bytes:
+                        raise AnalysisError("Ukuran artefak IBM Granite melebihi batas unduhan yang diizinkan.", 413)
+                    digest.update(chunk)
+                    output.write(chunk)
+        if byte_count == 0:
+            raise AnalysisError("IBM Hugging Face mengembalikan artefak model kosong.", 503)
+        if expected_sha256 and digest.hexdigest().lower() != expected_sha256.lower():
+            raise AnalysisError("Checkpoint IBM Granite tidak cocok dengan SHA-256 resmi.", 503)
+        os.replace(temp_path, destination)
+    except AnalysisError:
+        raise
+    except requests.RequestException as exc:
+        logger.warning("IBM Granite artifact download failed (%s)", type(exc).__name__)
+        raise AnalysisError("Checkpoint atau konfigurasi IBM Granite tidak dapat diunduh dari Hugging Face.", 503) from exc
+    except (OSError, ValueError) as exc:
+        logger.exception("Could not store IBM Granite model artifact")
+        raise AnalysisError("Artefak IBM Granite tidak dapat disimpan di direktori model server.", 503) from exc
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def _ensure_model_assets(paths: tuple[Path, Path, str]) -> tuple[Path, Path, str]:
+    checkpoint, config, expected_sha256 = paths
+    asset_dir = checkpoint.parent
+    asset_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = asset_dir / ".ibm-granite-download.lock"
+    lock_deadline = time.monotonic() + 900
+    lock_owned = False
+
+    while not lock_owned:
+        if checkpoint.is_file() and config.is_file() and _sha256(checkpoint).lower() == expected_sha256.lower():
+            return checkpoint, config, expected_sha256
+        try:
+            lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.close(lock_fd)
+            lock_owned = True
+        except FileExistsError:
+            try:
+                if time.time() - lock_path.stat().st_mtime > 1800:
+                    lock_path.unlink(missing_ok=True)
+                    continue
+            except FileNotFoundError:
+                continue
+            if time.monotonic() >= lock_deadline:
+                raise AnalysisError("Unduhan model IBM Granite masih berjalan terlalu lama. Coba lagi nanti.", 503)
+            time.sleep(1)
+        except OSError as exc:
+            logger.exception("Could not create IBM Granite artifact lock")
+            raise AnalysisError("Direktori model IBM Granite tidak dapat disiapkan.", 503) from exc
+
+    try:
+        _download_official_asset(
+            checkpoint,
+            "biomass_model.ckpt",
+            max_bytes=MAX_MODEL_CHECKPOINT_BYTES,
+            expected_sha256=expected_sha256 or OFFICIAL_CHECKPOINT_SHA256,
+        )
+        _download_official_asset(config, "config.yaml", max_bytes=MAX_MODEL_CONFIG_BYTES)
+        if _sha256(checkpoint).lower() != expected_sha256.lower():
+            raise AnalysisError("Checkpoint IBM Granite tidak lolos verifikasi SHA-256.", 503)
+        return checkpoint, config, expected_sha256
+    finally:
+        lock_path.unlink(missing_ok=True)
 
 
 @lru_cache(maxsize=1)
@@ -93,7 +188,7 @@ def _get_model():
             "Model IBM Granite belum diaktifkan atau runtime/checkpoint belum lengkap di server.",
             503,
         )
-    checkpoint, config, expected_sha256 = paths
+    checkpoint, config, expected_sha256 = _ensure_model_assets(paths)
     stat = checkpoint.stat()
     return _load_model_cached(
         str(checkpoint), str(config), expected_sha256, stat.st_size, stat.st_mtime_ns

@@ -80,10 +80,10 @@ class Settings(BaseSettings):
     # --- Local storage ---
     upload_dir: str = "./var/uploads"
     model_dir: str = "./var/saved_models"
-    # IBM Granite geospatial biomass is an optional, CPU/GPU-heavy inference
-    # backend. It stays out of the model catalog until the operator explicitly
-    # enables it and supplies the official checkpoint, config, and SHA-256.
-    ibm_granite_biomass_enabled: bool = False
+    # IBM Granite geospatial biomass is available when the optional TerraTorch
+    # runtime is installed. Official assets are fetched on first use unless
+    # explicit server-side paths are configured below.
+    ibm_granite_biomass_enabled: bool = True
     ibm_granite_biomass_checkpoint_path: str = ""
     ibm_granite_biomass_config_path: str = ""
     ibm_granite_biomass_checkpoint_sha256: str = ""
