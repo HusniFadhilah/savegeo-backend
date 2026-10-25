@@ -163,7 +163,17 @@ class CarbonInferenceEngine:
 
         self._s2_image_counts.append(int(size))
         self.last_s2_image_count = sum(self._s2_image_counts)
-        composite = collection.median().multiply(0.0001).select(S2_BANDS)
+        # ImageCollection reducers return a composite with a generic default
+        # projection (often EPSG:4326 at 1 degree). Keep the computation lazy,
+        # but anchor the composite to Sentinel-2's native 10 m B8 grid so map
+        # tiles do not inherit coarse or tile-dependent projection artifacts.
+        native_projection = ee.Image(collection.first()).select("B8").projection()
+        composite = (
+            collection.median()
+            .multiply(0.0001)
+            .select(S2_BANDS)
+            .setDefaultProjection(native_projection)
+        )
 
         if not self.quality_checks:
             # Keep the lightweight prediction path free of extra reduceRegion
@@ -201,7 +211,13 @@ class CarbonInferenceEngine:
             wide_end = (date.fromisoformat(end_date) + timedelta(days=90)).isoformat()
             wide_collection = _build_collection(max(cloud_threshold, 70), wide_start, wide_end)
             if wide_collection.size().getInfo() > 0:
-                wide_composite = wide_collection.median().multiply(0.0001).select(S2_BANDS)
+                wide_projection = ee.Image(wide_collection.first()).select("B8").projection()
+                wide_composite = (
+                    wide_collection.median()
+                    .multiply(0.0001)
+                    .select(S2_BANDS)
+                    .setDefaultProjection(wide_projection)
+                )
                 composite = composite.unmask(wide_composite)
                 self.last_gap_filled = self.last_valid_pixel_pct is not None and self.last_valid_pixel_pct < 99.5
         except Exception as e:  # noqa: BLE001

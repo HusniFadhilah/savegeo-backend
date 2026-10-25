@@ -1539,7 +1539,11 @@ def analyze_carbon(db: Session, data: dict) -> dict:
             .combine(ee.Reducer.percentile([25, 50, 75]), "", True)
             .combine(ee.Reducer.histogram(32, None, 10000), "", True)
         )
-        if data.get("include_percentiles", False):
+        # The map API uses auto_vis by default. Include robust percentiles in
+        # the same reduceRegion call so a few extreme pixels do not flatten
+        # the density map's color stretch across the rest of the AOI.
+        include_percentiles = bool(data.get("include_percentiles", False)) or auto_vis
+        if include_percentiles:
             carbon_reducer = carbon_reducer.combine(ee.Reducer.percentile([2, 98]), "", True)
         try:
             carbon_stats = carbon_estimated.clip(roi_for_calculation).reduceRegion(
@@ -1563,8 +1567,14 @@ def analyze_carbon(db: Session, data: dict) -> dict:
         _user_pinned_vis = ("vis_min" in data or "vis_max" in data) and not auto_vis
         _default_vis = vis_params
         if auto_vis and not _user_pinned_vis:
-            _est_min = carbon_stats.get("carbon_estimated_min")
-            _est_max = carbon_stats.get("carbon_estimated_max")
+            # Use the 2nd/98th percentile range for display; retain actual
+            # min/max in statistics and fall back to them if the percentile
+            # range is empty (for example, a constant-valued raster).
+            _est_min = carbon_stats.get("carbon_estimated_p2")
+            _est_max = carbon_stats.get("carbon_estimated_p98")
+            if _est_min is None or _est_max is None or _est_max <= _est_min:
+                _est_min = carbon_stats.get("carbon_estimated_min")
+                _est_max = carbon_stats.get("carbon_estimated_max")
             if _est_min is not None and _est_max is not None and _est_max > _est_min:
                 _default_vis = {"min": _est_min, "max": _est_max, "palette": vis_palette}
 
