@@ -49,6 +49,10 @@ RUN python -m venv /opt/samgeo \
 # Granite/TerraTorch has a newer NumPy and geospatial stack than the API.
 # Keep it in its own interpreter so it cannot upgrade or shadow API packages.
 FROM python:3.12-slim-bookworm AS granite-builder
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates libbz2-1.0 libexpat1 libffi8 libgomp1 liblzma5 \
+    libpq5 libsqlite3-0 libssl3 libstdc++6 libuuid1 zlib1g \
+    && rm -rf /var/lib/apt/lists/*
 RUN python -m venv /opt/granite \
     && /opt/granite/bin/python -m pip install --no-cache-dir --no-deps \
        --index-url https://download.pytorch.org/whl/cpu \
