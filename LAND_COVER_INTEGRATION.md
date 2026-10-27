@@ -68,6 +68,25 @@ visualization with a different raster for statistics.
    the workflow has a probability surface, including RF votes and configured
    prediction confidence bands; missing values remain null.
 
+## Quality-gated optical/SAR fusion
+
+`POST /api/analyze/landcover-fusion` (job type `landcover_fusion`, LC-Change
+tab **Fusi Optik-SAR**) computes per pixel and period:
+
+- `Q_o = V_o x (1 - C_o) x A_o`: clear Sentinel-2 observation exists, median
+  s2cloudless probability of the clear observations, and clear count / 3.
+- `Q_s = V_s x S_s x A_s`: valid Sentinel-1 IW VV+VH observation exists,
+  `1 - CV` of speckle-filtered linear VV in a 30 m window, and count / 2.
+
+`routing` picks the joint, optical-only or SAR-only Random Forest per pixel
+from `q_min` (no-data when both fail); `weighted` blends optical and SAR class
+probabilities by `Q_o`/`Q_s`. The three classifiers share one MapBiomas 4.1
+sample table. Change uses the total-variation distance
+`D = 1/2 sum_k |P_t0,k - P_t1,k|`; a pixel changes only when `D >= tau_change`
+(default 0.2), the top classes differ and both periods pass `q_min`. Label flips
+below `tau_change` are reported as `suppressed_change_area_ha`. The scores are
+input-fitness indicators, not accuracy, and RF vote shares are not calibrated.
+
 ## Admin and durable classifiers
 
 Open **Admin → Model Registry** (`/admin/ml-models`). The land-cover section

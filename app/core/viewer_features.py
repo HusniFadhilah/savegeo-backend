@@ -136,6 +136,7 @@ JOB_TYPE_FEATURES: dict[str, str] = {
     "landcover_transition": FEATURE_CODES["land_cover_change"],
     "landcover_change_map": FEATURE_CODES["land_cover_change"],
     "landcover_hotspots": FEATURE_CODES["land_cover_change"],
+    "landcover_fusion": FEATURE_CODES["land_cover_change"],
     "crop_monitoring": FEATURE_CODES["crop_monitoring"],
 }
 

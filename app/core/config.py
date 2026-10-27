@@ -80,6 +80,10 @@ class Settings(BaseSettings):
     # --- Local storage ---
     upload_dir: str = "./var/uploads"
     model_dir: str = "./var/saved_models"
+    # Carbon results include temporary Earth Engine map IDs; keep their cache
+    # shorter than the documented few-hour lifetime of those IDs.
+    carbon_gee_cache_ttl_seconds: int = 3600
+    carbon_local_cache_ttl_seconds: int = 21600
     # IBM Granite geospatial biomass is available when the optional TerraTorch
     # runtime is installed. Official assets are fetched on first use unless
     # explicit server-side paths are configured below.

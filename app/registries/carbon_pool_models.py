@@ -27,9 +27,9 @@ for _key, _meta in CARBON_DATASET_REGISTRY.items():
     _name = "pool_rf_" + _key.lower()
     BUILTIN_CARBON_POOL_MODELS[_name] = _model(
         _name, f"Random Forest · {_meta['name']}", "Random Forest", [_key],
-        "Random Forest fitted on demand to the selected reference raster and Landsat/terrain predictors. "
-        "Spatial holdout metrics measure reference-raster agreement; independent field accuracy is not established. "
-        "The output retains the reference period and unit; it is not an annual carbon-change model.",
+        "Random Forest fitted to the selected reference raster and its reference-year Landsat/terrain predictors, "
+        "then applied to the selected analysis year's predictors. Spatial holdout metrics measure agreement with "
+        "the reference raster; independent field accuracy and annual change accuracy are not established.",
         preliminary=True, training_mode="reference_raster", validation_type="spatial_reference_holdout",
         rf_trees=60, rf_samples=1600, rf_seed=42,
     )

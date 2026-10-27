@@ -7,13 +7,14 @@ so the frontend starts a short job request and polls this route for completion.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import tempfile
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import BoundedSemaphore
 from typing import Any
@@ -24,17 +25,21 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.core.temporal import format_rfc3339, utc_now
 from app.core.security import get_current_app_viewer
+from app.core.temporal import format_rfc3339, utc_now
+from app.core.version import get_product_version
 from app.core.viewer_features import ensure_job_feature_access
-from app.db.models.user import User
 from app.db.models.analysis_provenance import AnalysisProvenance
+from app.db.models.carbon_inference_cache import CarbonInferenceCache
 from app.db.session import get_db
 from app.db.session import SessionLocal
+from app.db.models.uploaded_model import UploadedModel
+from app.db.models.user import User
 from app.services import (
     carbon_service,
     crop_monitoring_service,
     download_service,
+    landcover_fusion_service,
     landcover_service,
     provenance_service,
     output_registry_service,
@@ -59,8 +64,11 @@ _ALLOWED_JOB_TYPES = {
     "landcover_transition",
     "landcover_change_map",
     "landcover_hotspots",
+    "landcover_fusion",
     "crop_monitoring",
 }
+_CARBON_CACHEABLE_TYPES = {"carbon", "carbon_local", "carbon_delta"}
+_CARBON_CACHE_SCHEMA = 2
 _UPSTREAM_CONNECTION_ERROR = (
     "Koneksi ke layanan data eksternal terputus sebelum respons diterima. "
     "Coba jalankan ulang analisis; jika berulang, kecilkan AOI/rentang waktu "
@@ -131,9 +139,172 @@ def _read_job(job_id: str) -> dict[str, Any]:
         return json.load(f)
 
 
-def _run_job(job_id: str, job_type: str, payload: dict[str, Any]) -> None:
+def _carbon_cache_ttl(job_type: str) -> int:
+    settings = get_settings()
+    configured = (
+        settings.carbon_local_cache_ttl_seconds
+        if job_type == "carbon_local"
+        else settings.carbon_gee_cache_ttl_seconds
+    )
+    ttl = max(60, int(configured))
+    # GEE-backed carbon results can contain temporary Map IDs. Keep the TTL
+    # below the documented expiry window even if an env value is misconfigured.
+    return ttl if job_type == "carbon_local" else min(ttl, 3600)
+
+
+def _carbon_cache_key(db: Session, job_type: str, payload: dict[str, Any], owner: str) -> str:
+    """Hash exact inputs and model identity so AOIs/years never share results."""
+    model_name = str(payload.get("model_name") or "")
+    model_identity: dict[str, Any] = {"name": model_name}
+    if model_name:
+        uploaded = db.query(UploadedModel).filter_by(name=model_name, model_type="carbon").first()
+        if uploaded is not None:
+            model_identity.update({
+                "id": uploaded.id,
+                "version": uploaded.version,
+                "updated_at": uploaded.updated_at.isoformat() if uploaded.updated_at else None,
+                "file_size_kb": uploaded.file_size_kb,
+                "metadata": uploaded.metadata_json or {},
+            })
+            try:
+                path = Path(uploaded.filepath)
+                if path.is_file():
+                    stat = path.stat()
+                    model_identity["file_signature"] = [stat.st_size, stat.st_mtime_ns]
+            except OSError:
+                pass
+        else:
+            from app.registries.carbon_pool_models import get_builtin_carbon_model
+
+            builtin = get_builtin_carbon_model(model_name, db=db)
+            if builtin:
+                model_identity.update({"version": builtin.get("version"), "metadata": builtin.get("metadata_json")})
+
+    encoded = json.dumps(
+        {
+            "type": job_type,
+            "owner": owner,
+            "cache_schema": _CARBON_CACHE_SCHEMA,
+            "application_version": get_product_version(),
+            "model": model_identity,
+            "payload": payload,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        default=str,
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _upsert_carbon_cache(
+    db: Session,
+    *,
+    cache_key: str,
+    owner: str,
+    job_id: str,
+    job_type: str,
+    status: str,
+    result: dict[str, Any] | None = None,
+) -> None:
+    """Keep cache writes best-effort so cache storage cannot fail an analysis."""
+    try:
+        now = datetime.now(UTC)
+        entry = db.get(CarbonInferenceCache, cache_key)
+        if entry is None:
+            entry = CarbonInferenceCache(
+                cache_key=cache_key,
+                owner_key=owner,
+                job_id=job_id,
+                job_type=job_type,
+                status=status,
+                result=result,
+                expires_at=now + timedelta(seconds=_carbon_cache_ttl(job_type)),
+                created_at=now,
+                updated_at=now,
+            )
+            db.add(entry)
+        else:
+            entry.owner_key = owner
+            entry.job_id = job_id
+            entry.job_type = job_type
+            entry.status = status
+            entry.result = result
+            entry.expires_at = now + timedelta(seconds=_carbon_cache_ttl(job_type))
+            entry.updated_at = now
+        db.commit()
+    except Exception:  # noqa: BLE001 - analysis must succeed if optional caching is unavailable
+        db.rollback()
+        logger.warning("Carbon inference cache write failed", exc_info=True)
+
+
+def _cache_entry_is_fresh(entry: CarbonInferenceCache) -> bool:
+    expires_at = entry.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    return expires_at > datetime.now(UTC)
+
+
+def _get_carbon_cache(db: Session, cache_key: str) -> CarbonInferenceCache | None:
+    """Missing cache schema should fall back to the normal inference path."""
+    try:
+        return db.get(CarbonInferenceCache, cache_key)
+    except Exception:  # noqa: BLE001 - caching is an optimization, not a prerequisite
+        rollback = getattr(db, "rollback", None)
+        if callable(rollback):
+            rollback()
+        logger.warning("Carbon inference cache read failed", exc_info=True)
+        return None
+
+
+def _complete_cached_job(
+    db: Session,
+    *,
+    job_type: str,
+    payload: dict[str, Any],
+    owner: str,
+    result: dict[str, Any],
+    viewer: object,
+) -> dict[str, Any]:
+    """Materialize a normal, pollable job from a cached result."""
+    job_id = str(uuid.uuid4())
+    now = datetime.now(UTC)
+    provenance_service.create_analysis_provenance(
+        db,
+        analysis_id=job_id,
+        analysis_type=job_type,
+        payload=payload,
+        user_id=viewer.id if isinstance(viewer, User) else None,
+    )
+    _write_job(job_id, {
+        "job_id": job_id,
+        "type": job_type,
+        "status": "succeeded",
+        "created_at": _now(),
+        "started_at": format_rfc3339(now),
+        "finished_at": format_rfc3339(now),
+        "cache_hit": True,
+        "owner": owner,
+        "result": result,
+    })
+    output_registry_service.register_action_outputs(db, job_id, result)
+    provenance_service.update_analysis_provenance(
+        db, job_id, status="succeeded", started_at=now, completed_at=now
+    )
+    return {"job_id": job_id, "status": "succeeded", "status_url": f"/analysis-jobs/{job_id}", "cache_hit": True}
+
+
+def _run_job(
+    job_id: str,
+    job_type: str,
+    payload: dict[str, Any],
+    cache_key: str | None = None,
+    owner: str | None = None,
+) -> None:
     _write_job(job_id, {"job_id": job_id, "type": job_type, "status": "running", "started_at": _now()})
     db = SessionLocal()
+    if cache_key and owner:
+        _upsert_carbon_cache(db, cache_key=cache_key, owner=owner, job_id=job_id, job_type=job_type, status="running")
     provenance_service.update_analysis_provenance(
         db,
         job_id,
@@ -159,6 +330,8 @@ def _run_job(job_id: str, job_type: str, payload: dict[str, Any]) -> None:
             result = landcover_service.analyze_landcover_change_map(payload)
         elif job_type == "landcover_hotspots":
             result = landcover_service.analyze_landcover_hotspots(payload)
+        elif job_type == "landcover_fusion":
+            result = landcover_fusion_service.analyze_landcover_fusion(payload)
         elif job_type == "crop_monitoring":
             result = crop_monitoring_service.run_crop_monitoring(db, payload)
         else:  # defensive; validated before submit
@@ -174,6 +347,13 @@ def _run_job(job_id: str, job_type: str, payload: dict[str, Any]) -> None:
                 "result": result,
             },
         )
+        if cache_key and owner:
+            # Result payloads have already been JSON-serialized by the job store.
+            cached_result = json.loads(json.dumps(result, ensure_ascii=False, default=str))
+            _upsert_carbon_cache(
+                db, cache_key=cache_key, owner=owner, job_id=job_id,
+                job_type=job_type, status="completed", result=cached_result,
+            )
         output_registry_service.register_action_outputs(db, job_id, result)
         provenance_service.update_analysis_provenance(
             db,
@@ -182,6 +362,8 @@ def _run_job(job_id: str, job_type: str, payload: dict[str, Any]) -> None:
             completed_at=datetime.now(UTC),
         )
     except AnalysisError as exc:
+        if cache_key and owner:
+            _upsert_carbon_cache(db, cache_key=cache_key, owner=owner, job_id=job_id, job_type=job_type, status="failed")
         _write_job(
             job_id,
             {
@@ -201,6 +383,8 @@ def _run_job(job_id: str, job_type: str, payload: dict[str, Any]) -> None:
             completed_at=datetime.now(UTC),
         )
     except ee.EEException:
+        if cache_key and owner:
+            _upsert_carbon_cache(db, cache_key=cache_key, owner=owner, job_id=job_id, job_type=job_type, status="failed")
         _write_job(
             job_id,
             {
@@ -216,6 +400,8 @@ def _run_job(job_id: str, job_type: str, payload: dict[str, Any]) -> None:
             db, job_id, status="failed", error_code="earth_engine_error", completed_at=datetime.now(UTC)
         )
     except requests.RequestException as exc:
+        if cache_key and owner:
+            _upsert_carbon_cache(db, cache_key=cache_key, owner=owner, job_id=job_id, job_type=job_type, status="failed")
         logger.warning("Analysis job %s upstream connection failed: %s", job_id, type(exc).__name__)
         _write_job(
             job_id,
@@ -232,6 +418,8 @@ def _run_job(job_id: str, job_type: str, payload: dict[str, Any]) -> None:
             db, job_id, status="failed", error_code="upstream_unavailable", completed_at=datetime.now(UTC)
         )
     except Exception:
+        if cache_key and owner:
+            _upsert_carbon_cache(db, cache_key=cache_key, owner=owner, job_id=job_id, job_type=job_type, status="failed")
         logger.error("Analysis job %s failed", job_id)
         _write_job(
             job_id,
@@ -280,6 +468,29 @@ def create_analysis_job(
         meta = get_external_carbon_meta(dataset)
         direct = bool(payload.get("reference_only")) or not payload.get("model_name")
         needs_ee = not (direct and meta and meta.get("ingestion_method") in {"cog_rasterio", "soilgrids_rest"})
+    owner = job_owner_key(viewer)
+    cache_key = _carbon_cache_key(db, job_type, payload, owner) if job_type in _CARBON_CACHEABLE_TYPES else None
+    if cache_key:
+        cached = _get_carbon_cache(db, cache_key)
+        if cached is not None and _cache_entry_is_fresh(cached):
+            if cached.status == "completed" and isinstance(cached.result, dict):
+                return _complete_cached_job(
+                    db, job_type=job_type, payload=payload, owner=owner,
+                    result=cached.result, viewer=viewer,
+                )
+            if cached.status in {"queued", "running"}:
+                try:
+                    pending = _read_job(cached.job_id)
+                    if pending.get("owner") == owner and pending.get("status") in {"queued", "running"}:
+                        return {
+                            "job_id": cached.job_id,
+                            "status": pending["status"],
+                            "status_url": f"/analysis-jobs/{cached.job_id}",
+                            "cache_hit": True,
+                        }
+                except HTTPException:
+                    pass
+
     if needs_ee and not getattr(request.app.state, "ee_initialized", False):
         raise HTTPException(status_code=503, detail="Google Earth Engine belum diinisialisasi. Cek kredensial di Admin Panel.")
 
@@ -308,11 +519,14 @@ def create_analysis_job(
         raise
     try:
         output_registry_service.register_action_outputs(db, job_id)
-        owner = f"user:{viewer.id}" if isinstance(viewer, User) else f"admin:{viewer.id}"
         _write_job(job_id, {"job_id": job_id, "type": job_type, "status": "queued", "created_at": _now(), "owner": owner})
-        future = _executor.submit(_run_job, job_id, job_type, payload)
+        if cache_key:
+            _upsert_carbon_cache(db, cache_key=cache_key, owner=owner, job_id=job_id, job_type=job_type, status="queued")
+        future = _executor.submit(_run_job, job_id, job_type, payload, cache_key, owner)
         future.add_done_callback(lambda _future: _job_slots.release())
     except Exception:
+        if cache_key:
+            _upsert_carbon_cache(db, cache_key=cache_key, owner=owner, job_id=job_id, job_type=job_type, status="failed")
         _job_slots.release()
         raise
     return {"job_id": job_id, "status": "queued", "status_url": f"/analysis-jobs/{job_id}"}

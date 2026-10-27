@@ -1761,6 +1761,8 @@ def analyze_carbon(db: Session, data: dict) -> dict:
             # {analysis_year} imagery, trained on {reference_dataset} ground truth
             # from {reference.year}" instead of implying a direct measurement.
             "analysis_year": year,
+            "analysis_year_partial": year == datetime.now(UTC).year,
+            "analysis_year_mode": "annual_covariate_inference",
             "reference_dataset": reference_dataset,
             "scale": carbon_scale,
             "images_used": inference_engine.last_s2_image_count,
@@ -1783,6 +1785,7 @@ def analyze_carbon(db: Session, data: dict) -> dict:
             "model_r2": (model_info.get("cv_metrics") or {}).get("r2_mean"),
             "model_rmse": (model_info.get("cv_metrics") or {}).get("rmse_mean"),
             "cloud_mask_technique": cloud_mask_technique,
+            "analysis_year_partial": year == datetime.now(UTC).year,
         },
     }
 

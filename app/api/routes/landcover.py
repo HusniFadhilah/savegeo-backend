@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from app.api.deps import require_ee
 from app.core.security import get_current_app_viewer
 from app.core.viewer_features import require_feature
-from app.services import landcover_service
+from app.services import landcover_fusion_service, landcover_service
 from app.services.gee_common import AnalysisError, public_analysis_error
 
 router = APIRouter(tags=["landcover"], dependencies=[Depends(get_current_app_viewer)])
@@ -139,4 +139,22 @@ async def analyze_landcover_hotspots(request: Request):
         raise HTTPException(status_code=400, detail="Invalid analysis parameters") from e
     except Exception as e:  # noqa: BLE001
         logger.error("Land cover hotspot error (%s)", type(e).__name__)
+        raise HTTPException(status_code=500, detail="Analysis failed. Please try again")
+
+
+@router.post("/analyze/landcover-fusion", dependencies=[Depends(require_feature("app.feature.land_cover_change")), Depends(require_ee)])
+async def analyze_landcover_fusion(request: Request):
+    """Quality-gated optical/SAR fusion classification and change - see
+    landcover_fusion_service for Q_o/Q_s, routing and the change score D."""
+    data = await request.json()
+    try:
+        return landcover_fusion_service.analyze_landcover_fusion(data)
+    except AnalysisError as e:
+        raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
+    except ee.EEException:
+        raise HTTPException(status_code=400, detail="Earth Engine rejected the analysis parameters")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="Invalid analysis parameters") from e
+    except Exception as e:  # noqa: BLE001
+        logger.error("Land cover fusion error (%s)", type(e).__name__)
         raise HTTPException(status_code=500, detail="Analysis failed. Please try again")

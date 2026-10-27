@@ -1,5 +1,6 @@
 """Reference maps and executable BGB/SOC models with explicit pool/unit semantics."""
 import math
+from datetime import UTC, datetime
 
 import ee
 
@@ -23,7 +24,12 @@ def _geometry(aoi):
 
 def _landsat_predictors(region, year):
     older = year < 2013
-    collection = ee.ImageCollection("LANDSAT/LT05/C02/T1_L2" if older else "LANDSAT/LC08/C02/T1_L2")
+    if older:
+        collection = ee.ImageCollection("LANDSAT/LT05/C02/T1_L2")
+    else:
+        collection = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
+        if year >= 2021:
+            collection = collection.merge(ee.ImageCollection("LANDSAT/LC09/C02/T1_L2"))
     bands = ["SR_B1", "SR_B2", "SR_B3", "SR_B4", "SR_B5", "SR_B7"] if older else ["SR_B2", "SR_B3", "SR_B4", "SR_B5", "SR_B6", "SR_B7"]
 
     def prepare(image):
@@ -37,28 +43,31 @@ def _landsat_predictors(region, year):
     return optical.addBands([ndvi, ndmi, dem.rename("elevation"), ee.Terrain.slope(dem).rename("slope")])
 
 
-def _random_forest(reference, roi, meta, model):
+def _random_forest(reference, roi, meta, model, analysis_year):
     # Bounded regional fitting keeps global-load requests separate from model calibration.
     region = roi.bounds(maxError=100).buffer(20000, maxError=100).bounds(maxError=100)
     area = region.area(maxError=100).divide(1e6).getInfo()
     if area > 100000:
         raise AnalysisError("Model RF BGB/SOC mendukung AOI regional hingga 100.000 km² termasuk buffer. Kecilkan AOI atau muat raster referensi langsung.", 422)
-    source_year = meta.get("selection_year") or (meta.get("year") if isinstance(meta.get("year"), int) else 2020)
-    predictors = _landsat_predictors(region, source_year)
+    reference_year = meta.get("selection_year") or (meta.get("year") if isinstance(meta.get("year"), int) else 2020)
+    training_predictors = _landsat_predictors(region, reference_year)
+    prediction_predictors = (
+        training_predictors if analysis_year == reference_year else _landsat_predictors(region, analysis_year)
+    )
     feature_names = ["blue", "green", "red", "nir", "swir1", "swir2", "ndvi", "ndmi", "elevation", "slope"]
     # Sample at no finer than 300 m, including 30 m modeled references. This
     # does not turn coarse soil/root training labels into field measurements.
     sample_scale = max(300, int(meta["resolution"]))
     lonlat = ee.Image.pixelLonLat()
     block = lonlat.select("longitude").divide(0.05).floor().add(lonlat.select("latitude").divide(0.05).floor().multiply(7)).abs().mod(5).rename("holdout")
-    samples = reference.addBands(predictors).addBands(block).sample(region=region, scale=sample_scale, numPixels=1600, seed=42, geometries=False, tileScale=4)
+    samples = reference.addBands(training_predictors).addBands(block).sample(region=region, scale=sample_scale, numPixels=1600, seed=42, geometries=False, tileScale=4)
     train = samples.filter(ee.Filter.neq("holdout", 0))
     valid = samples.filter(ee.Filter.eq("holdout", 0))
     counts = ee.Dictionary({"training": train.size(), "validation": valid.size()}).getInfo()
     if counts["training"] < 60 or counts["validation"] < 20:
         raise AnalysisError("Piksel referensi/kovariat valid terlalu sedikit untuk kalibrasi RF dan spatial holdout. Pilih AOI daratan lebih luas atau mode referensi.", 422)
     classifier = ee.Classifier.smileRandomForest(numberOfTrees=60, minLeafPopulation=5, bagFraction=0.7, seed=42).setOutputMode("REGRESSION").train(train, "agb", feature_names)
-    predicted = predictors.classify(classifier, "agb").max(0).updateMask(reference.mask())
+    predicted = prediction_predictors.classify(classifier, "agb").max(0).updateMask(reference.mask())
     checked = valid.classify(classifier, "prediction")
     average = ee.Number(checked.aggregate_mean("agb"))
 
@@ -73,9 +82,10 @@ def _random_forest(reference, roi, meta, model):
     metrics = ee.Dictionary({"rmse": mse.sqrt(), "mae": checked.aggregate_mean("absolute_error"), "bias": checked.aggregate_mean("bias"),
                              "r2": ee.Algorithms.If(variance.gt(0), ee.Number(1).subtract(mse.divide(variance)), None)}).getInfo()
     return predicted, {"n_samples": counts["training"], "validation_samples": counts["validation"],
-                       "validation_metrics": metrics, "validation_type": "spatial_reference_holdout", "covariate_year": source_year,
+                       "validation_metrics": metrics, "validation_type": "spatial_reference_holdout",
                        "sample_scale_m": sample_scale, "feature_names": feature_names,
-                       "validation_note": "Metrik mengukur kesesuaian dengan raster referensi pada blok spasial terpisah; belum merupakan validasi lapangan."}
+                       "reference_year": reference_year, "covariate_year": analysis_year,
+                       "validation_note": "Metrik mengukur kesesuaian dengan raster referensi pada blok spasial terpisah; pemetaan tahun lain adalah transfer kovariat, belum divalidasi dengan data lapangan tahun tersebut."}
 
 
 def _ipcc_image(meta, model, roi):
@@ -112,12 +122,19 @@ def analyze_carbon_pool(db, data):
         raise AnalysisError("Model BGB/SOC tidak kompatibel dengan dataset/kedalaman yang dipilih.", 422)
     extras = {}
     image = reference
+    method = model["metadata_json"].get("method") if model else None
+    source_year = int(meta.get("selection_year") or meta.get("year") or year)
+    requested_analysis_year = int(data.get("year", datetime.now(UTC).year))
+    current_year = datetime.now(UTC).year
+    if not 1984 <= requested_analysis_year <= current_year:
+        raise AnalysisError(f"Tahun inferensi harus antara 1984-{current_year}.", 400)
+    annual_model = bool(model and method not in {"soil_stock_integration", "ipcc_root_to_shoot"})
+    analysis_year = requested_analysis_year if annual_model else source_year
     if model:
-        method = model["metadata_json"].get("method")
         if method == "saved_reference_ensemble":
             from app.services.carbon_saved_models import saved_model_image
 
-            image, extras = saved_model_image(calculation_roi, model, meta)
+            image, extras = saved_model_image(calculation_roi, model, meta, analysis_year=analysis_year)
             if reference is not None:
                 image = image.updateMask(reference.mask())
         elif method == "soil_stock_integration":
@@ -125,7 +142,7 @@ def analyze_carbon_pool(db, data):
         elif method == "ipcc_root_to_shoot":
             image = _ipcc_image(meta, model, calculation_roi)
         else:
-            image, extras = _random_forest(reference, calculation_roi, meta, model)
+            image, extras = _random_forest(reference, calculation_roi, meta, model, analysis_year)
     scale = max(int(meta["resolution"]), int(data.get("scale") or meta["resolution"]))
     vis = {"min": meta.get("vis_min", defaults["carbon_vis_min"]),
            "max": meta.get("vis_max", defaults["carbon_vis_max"]),
@@ -176,11 +193,16 @@ def analyze_carbon_pool(db, data):
               "model_info": {"model_name": model["name"] if model else "reference_only", "algorithm": model["algorithm"] if model else "direct_raster",
                              "display_mode": "model" if model else "reference_only", "scale": scale,
                              "calculation_mode": area_info["calculation_mode"], "model_version": model["version"] if model else None,
-                             "reference_dataset": key, "reference_dataset_year": meta["year"], "analysis_year": meta["year"],
+                             "reference_dataset": key, "reference_dataset_year": meta["year"], "analysis_year": analysis_year,
+                             "requested_analysis_year": requested_analysis_year,
+                             "analysis_year_partial": analysis_year == current_year,
+                             "analysis_year_mode": "annual_covariate_inference" if annual_model else "static_reference",
+                             "reference_year": source_year,
                              "target_pool": meta["target_pool"], "depth_cm": meta.get("depth_cm"), "source_period": meta.get("source_period"),
                              "load_only": bool(data.get("load_only")), "statistics_available": stats is not None,
                              "method_description": model["description"] if model else meta["description"], **extras},
               "data_quality": {"valid_pixel_pct": coverage, "gap_filled": None, "images_used": None,
+                               "analysis_year_partial": analysis_year == current_year,
                                "coefficient_of_variation_pct": stats["std_dev"] / stats["mean"] * 100 if stats and stats["mean"] and stats["std_dev"] is not None else None,
                                "model_r2": None, "model_rmse": None}}
     if key == "ORNL_BGB":
