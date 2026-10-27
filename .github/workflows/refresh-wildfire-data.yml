@@ -40,12 +40,12 @@ permissions:
 
 # Avoid API container restarts during the data synchronization.
 concurrency:
-  group: savegeo-backend-production
+  group: ${{ github.event_name == 'workflow_run' && 'savegeo-wildfire-data-refresh' || 'savegeo-backend-production' }}
   cancel-in-progress: false
 
 jobs:
   refresh:
-    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_sha == github.sha) }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     environment: production
