@@ -46,6 +46,19 @@ RUN python -m venv /opt/samgeo \
        "Pillow>=13.0.0" segment-geospatial==1.4.2 transformers==5.19.0 \
     && /opt/samgeo/bin/python -m pip uninstall -y pip setuptools
 
+# Granite/TerraTorch has a newer NumPy and geospatial stack than the API.
+# Keep it in its own interpreter so it cannot upgrade or shadow API packages.
+FROM python:3.11-slim-bookworm AS granite-builder
+RUN python -m venv /opt/granite \
+    && /opt/granite/bin/python -m pip install --no-cache-dir --no-deps \
+       --index-url https://download.pytorch.org/whl/cpu \
+       torch==2.10.0 torchvision==0.25.0 \
+    && /opt/granite/bin/python -m pip install --no-cache-dir \
+       terratorch==1.2.13 lightning>=2.6.6 filelock>=4.2.1 \
+       fsspec>=2026.6.0 geopandas>=1.1.2 \
+    && /opt/granite/bin/python -m pip uninstall -y pip setuptools
+RUN /opt/granite/bin/python -c "from terratorch.cli_tools import LightningInferenceModel; import torch, torchvision; print(torch.__version__, torchvision.__version__)"
+
 # Keep compilers and development headers out of the production image. Start
 # from a plain Debian runtime so its system Python metadata cannot reintroduce
 # stale packaging versions; copy only the patched interpreter from the builder.
@@ -63,6 +76,7 @@ LABEL org.opencontainers.image.title="SAVEGEO backend" \
 
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+ENV GRANITE_PYTHON=/opt/granite/bin/python
 ENV SAVEGEO_BUILD_NUMBER="${SAVEGEO_BUILD_NUMBER}" \
     SAVEGEO_COMMIT_SHA="${SAVEGEO_COMMIT_SHA}" \
     SAVEGEO_PRODUCT_VERSION="${SAVEGEO_PRODUCT_VERSION}" \
@@ -79,6 +93,7 @@ RUN tar -C /usr/local -xf /tmp/python-runtime.tar \
     && rm -f /tmp/python-runtime.tar
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=samgeo-builder /opt/samgeo /opt/samgeo
+COPY --from=granite-builder /opt/granite /opt/granite
 ENV SAMGEO_PYTHON=/opt/samgeo/bin/python
 RUN /opt/samgeo/bin/python -c "from samgeo import SamGeo; from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection; from torchvision.ops import nms"
 

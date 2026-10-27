@@ -9,13 +9,15 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import logging
 import math
 import os
+import subprocess
+import sys
 import threading
 import time
 import zipfile
-from functools import lru_cache
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -49,6 +51,8 @@ MAX_DOWNLOAD_BYTES = 30 * 1024 * 1024
 MAX_MODEL_CHECKPOINT_BYTES = 400 * 1024 * 1024
 MAX_MODEL_CONFIG_BYTES = 128 * 1024
 _MODEL_LOCK = threading.RLock()
+_ROOT = Path(__file__).resolve().parents[2]
+_WORKER = _ROOT / "scripts" / "granite_worker.py"
 
 
 def _sha256(path: Path) -> str:
@@ -148,51 +152,37 @@ def _ensure_model_assets(paths: tuple[Path, Path, str]) -> tuple[Path, Path, str
         lock_path.unlink(missing_ok=True)
 
 
-@lru_cache(maxsize=1)
-def _load_model_cached(
-    checkpoint_path: str,
-    config_path: str,
-    expected_sha256: str,
-    checkpoint_size: int,
-    checkpoint_mtime_ns: int,
-):
-    del checkpoint_size, checkpoint_mtime_ns  # included in cache key to reload replaced files
-    checkpoint = Path(checkpoint_path)
-    if _sha256(checkpoint) != expected_sha256:
-        raise AnalysisError(
-            "Checkpoint IBM Granite tidak lolos verifikasi SHA-256. Periksa konfigurasi administrator.",
-            503,
-        )
-
+def _run_model_inference(input_dir: Path, checkpoint: Path, config: Path, output_path: Path) -> list[str]:
+    python = os.getenv("GRANITE_PYTHON", sys.executable)
+    metadata_path = output_path.with_suffix(".json")
     try:
-        from terratorch.cli_tools import LightningInferenceModel
-
-        model = LightningInferenceModel.from_config(
-            config_path,
-            checkpoint_path,
-            PREDICT_DATASET_BANDS,
+        subprocess.run(
+            [
+                str(python),
+                str(_WORKER),
+                str(input_dir),
+                str(checkpoint),
+                str(config),
+                str(output_path),
+                str(metadata_path),
+                json.dumps(PREDICT_DATASET_BANDS),
+            ],
+            capture_output=True,
+            check=True,
+            text=True,
+            timeout=900,
         )
-        model.eval()
-        return model
-    except AnalysisError:
-        raise
-    except Exception as exc:  # noqa: BLE001 - upstream model load details stay server-side
-        logger.exception("Could not load configured IBM Granite biomass model")
-        raise AnalysisError("Model IBM Granite belum dapat dimuat. Periksa runtime dan berkas model di server.", 503) from exc
-
-
-def _get_model():
-    paths = granite_biomass_paths()
-    if paths is None:
-        raise AnalysisError(
-            "Model IBM Granite belum diaktifkan atau runtime/checkpoint belum lengkap di server.",
-            503,
-        )
-    checkpoint, config, expected_sha256 = _ensure_model_assets(paths)
-    stat = checkpoint.stat()
-    return _load_model_cached(
-        str(checkpoint), str(config), expected_sha256, stat.st_size, stat.st_mtime_ns
-    )
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        filenames = payload.get("filenames")
+        if not isinstance(filenames, list) or any(not isinstance(name, str) for name in filenames):
+            raise ValueError("invalid worker response")
+        return filenames
+    except subprocess.TimeoutExpired as exc:
+        logger.warning("IBM Granite worker timed out")
+        raise AnalysisError("Inferensi IBM Granite melewati batas waktu server.", 503) from exc
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError) as exc:
+        logger.error("IBM Granite worker failed (%s)", type(exc).__name__)
+        raise AnalysisError("Inferensi IBM Granite gagal. Periksa runtime TerraTorch di server.", 503) from exc
 
 
 def _analysis_period(data: dict[str, Any]) -> tuple[int, int, int, str, str]:
@@ -390,24 +380,25 @@ def analyze_granite_biomass(db: Session, data: dict[str, Any]) -> dict[str, Any]
         if int(valid.sum()) > MAX_RASTER_PIXELS:
             raise AnalysisError("AOI menghasilkan terlalu banyak piksel untuk inferensi IBM Granite.", 413)
 
-        try:
-            import torch
-
-            with _MODEL_LOCK:
-                model = _get_model()
-                with torch.inference_mode():
-                    results, filenames = model.inference_on_dir(str(input_dir))
-        except AnalysisError:
-            raise
-        except Exception as exc:  # noqa: BLE001 - never expose checkpoint internals
-            logger.exception("IBM Granite inference failed")
-            raise AnalysisError("Inferensi IBM Granite gagal. Periksa kompatibilitas runtime TerraTorch di server.", 503) from exc
-        if len(results) != 1 or len(filenames) != 1:
+        paths = granite_biomass_paths()
+        if paths is None:
+            raise AnalysisError("Model IBM Granite belum diaktifkan atau runtime/checkpoint belum lengkap di server.", 503)
+        checkpoint, config, expected_sha256 = _ensure_model_assets(paths)
+        if _sha256(checkpoint).lower() != expected_sha256.lower():
+            raise AnalysisError("Checkpoint IBM Granite tidak lolos verifikasi SHA-256.", 503)
+        output_path = work_path / "granite_prediction.npy"
+        with _MODEL_LOCK:
+            filenames = _run_model_inference(input_dir, checkpoint, config, output_path)
+        if len(filenames) != 1 or not output_path.is_file():
             raise AnalysisError("TerraTorch tidak mengembalikan tepat satu hasil untuk AOI.", 422)
         returned_name = Path(str(filenames[0])).name
         if returned_name and returned_name != model_input.name:
             logger.warning("TerraTorch returned unexpected input filename for IBM Granite inference")
-        agb = _prediction_array(results[0])
+        try:
+            prediction = np.load(output_path, allow_pickle=False)
+        except (OSError, ValueError) as exc:
+            raise AnalysisError("TerraTorch menghasilkan keluaran raster yang tidak valid.", 422) from exc
+        agb = _prediction_array(prediction)
 
         import rasterio
 

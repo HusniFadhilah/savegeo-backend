@@ -1,4 +1,5 @@
 """The optional Granite model stays isolated and undiscoverable until configured."""
+from pathlib import Path
 import pytest
 
 from app.api.routes import models as model_routes
@@ -104,6 +105,39 @@ def test_granite_period_and_prediction_output_validation():
 
     result = granite_biomass_service._prediction_array(np.ones((1, 1, 4, 5), dtype=np.float32))
     assert result.shape == (4, 5)
+
+
+def test_granite_inference_uses_isolated_runtime_and_validates_worker_response(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    input_dir = tmp_path / "input"
+    checkpoint = tmp_path / "model.ckpt"
+    config = tmp_path / "config.yaml"
+    output = tmp_path / "prediction.npy"
+    monkeypatch.setenv("GRANITE_PYTHON", "/opt/granite/bin/python")
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        Path(command[6]).write_text('{"filenames":["hls_l30_aoi.tif"]}', encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(granite_biomass_service.subprocess, "run", fake_run)
+    assert granite_biomass_service._run_model_inference(input_dir, checkpoint, config, output) == [
+        "hls_l30_aoi.tif"
+    ]
+    command, options = calls[0]
+    assert command[0] == "/opt/granite/bin/python"
+    assert Path(command[1]).name == "granite_worker.py"
+    assert command[2:7] == [
+        str(input_dir),
+        str(checkpoint),
+        str(config),
+        str(output),
+        str(output.with_suffix(".json")),
+    ]
+    assert options["timeout"] == 900
+    assert options["check"] is True
 
 
 def test_granite_input_raster_preserves_ibm_band_order_and_valid_mask(tmp_path):

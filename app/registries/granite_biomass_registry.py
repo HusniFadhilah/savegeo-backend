@@ -7,7 +7,12 @@ TerraTorch inference path.
 from __future__ import annotations
 
 import importlib.util
+import json
+import os
 import re
+import subprocess
+import sys
+from functools import lru_cache
 from pathlib import Path
 
 from app.core.config import Settings, get_settings
@@ -19,6 +24,27 @@ MODEL_REPO = "ibm-granite/granite-geospatial-biomass"
 MODEL_REVISION = "b472652a3d223d51e888877a1365262687f6906d"
 OFFICIAL_CHECKPOINT_SHA256 = "32e91101c75c02c94c7dfa86f48290457812b7a92b7adc903c74953b5fa28b65"
 CHECKPOINT_SHA256_RE = re.compile(r"^[a-fA-F0-9]{64}$")
+
+
+@lru_cache(maxsize=4)
+def _runtime_has_granite(python: str) -> bool:
+    if python == sys.executable:
+        try:
+            return importlib.util.find_spec("torch") is not None and importlib.util.find_spec("terratorch") is not None
+        except (ImportError, ValueError):
+            return False
+    try:
+        result = subprocess.run(
+            [python, "-c", "import importlib.util,json; print(json.dumps({m:bool(importlib.util.find_spec(m)) for m in ('torch','terratorch')}))"],
+            capture_output=True,
+            check=True,
+            text=True,
+            timeout=15,
+        )
+        modules = json.loads(result.stdout)
+        return bool(modules.get("torch") and modules.get("terratorch"))
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        return False
 
 
 def granite_biomass_paths(settings: Settings | None = None) -> tuple[Path, Path, str] | None:
@@ -45,10 +71,8 @@ def granite_biomass_paths(settings: Settings | None = None) -> tuple[Path, Path,
         config = asset_dir / "config.yaml"
         checksum = OFFICIAL_CHECKPOINT_SHA256
 
-    try:
-        if importlib.util.find_spec("torch") is None or importlib.util.find_spec("terratorch") is None:
-            return None
-    except (ImportError, ValueError):
+    runtime = os.getenv("GRANITE_PYTHON", sys.executable)
+    if not _runtime_has_granite(runtime):
         return None
     return checkpoint, config, checksum
 
