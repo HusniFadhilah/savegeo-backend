@@ -68,11 +68,20 @@ def province_cache(tmp_path, monkeypatch):
     _prepared_provinces.cache_clear()
 
 
-@pytest.mark.parametrize("slug", sorted(PROVINCE_MASK_EVENTS))
+@pytest.mark.parametrize("slug", sorted(PROVINCE_MASK_EVENTS - {"all"}))
 def test_all_new_scopes_use_validated_province_mask(province_cache, slug):
     event = SimpleNamespace(slug=slug, province_codes=["73"])
     inside = {"geometry": {"type": "Point", "coordinates": [120.5, -2.5]}}
     outside = {"geometry": {"type": "Point", "coordinates": [121.5, -2.5]}}
+    assert is_feature_in_event_scope(event, inside)
+    assert not is_feature_in_event_scope(event, outside)
+
+
+def test_national_scope_uses_indonesia_land_mask_without_live_province_api():
+    event = SimpleNamespace(slug="all", province_codes=["11", "91", "96"])
+    inside = {"geometry": {"type": "Point", "coordinates": [106.8, -6.2]}}
+    outside = {"geometry": {"type": "Point", "coordinates": [110.0, 10.0]}}
+
     assert is_feature_in_event_scope(event, inside)
     assert not is_feature_in_event_scope(event, outside)
 

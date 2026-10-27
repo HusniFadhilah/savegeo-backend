@@ -5,9 +5,11 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from sqlalchemy.dialects import postgresql
+from shapely.geometry import shape
 
 from app.api.routes import wildfire_events
 from app.services import wildfire_hotspot_service
+from app.services import wildfire_geometry
 from app.services.wildfire_catalog import PROVINCE_MASK_EVENTS
 
 
@@ -64,3 +66,13 @@ def test_hotspot_default_date_window_uses_current_week_instead_of_stale_last_dat
         (today - dt.timedelta(days=today.weekday())).isoformat(),
         today.isoformat(),
     )
+
+
+def test_static_province_boundaries_cover_all_38_unique_codes():
+    geometries = wildfire_geometry.province_geometries()
+
+    assert len(geometries) == 38
+    assert all(shape(feature["geometry"]).is_valid for feature in geometries.values())
+    assert geometries["93"]["properties"]["PROVINSI"] == "Papua Selatan"
+    assert geometries["96"]["properties"]["PROVINSI"] == "Papua Barat Daya"
+    assert wildfire_events._admin_geometry("province", "93")["properties"]["KODE_PROV"] == "93"

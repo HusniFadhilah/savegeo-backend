@@ -28,6 +28,7 @@ from app.services import (
     disaster_capability_service,
     firms_service,
     wildfire_hotspot_service,
+    wildfire_geometry,
     wildfire_region_service,
 )
 
@@ -53,11 +54,13 @@ def _admin_geometry(level: str, code: str) -> dict:
         cached = _ADMIN_GEOMETRY_CACHE.get(key)
         if cached and time.time() - cached[0] <= _ADMIN_GEOMETRY_CACHE_TTL:
             return cached[1]
-    geometry = (
-        regions_route.get_province_geometry(code)
-        if level == "province"
-        else regions_route.get_region_geometry(endpoint=level, code=code)
-    )
+    geometry = wildfire_geometry.province_geometry(code) if level == "province" else None
+    if geometry is None:
+        geometry = (
+            regions_route.get_province_geometry(code)
+            if level == "province"
+            else regions_route.get_region_geometry(endpoint=level, code=code)
+        )
     with _ADMIN_GEOMETRY_CACHE_LOCK:
         _ADMIN_GEOMETRY_CACHE[key] = (time.time(), geometry)
     return geometry

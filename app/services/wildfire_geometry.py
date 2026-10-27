@@ -18,6 +18,8 @@ KALIMANTAN_GEOMETRY_PATH = (
     Path(__file__).resolve().parents[1] / "static" / "geo" / "islands" / "Kalimantan.geojson"
 )
 SUMATRA_GEOMETRY_PATH = KALIMANTAN_GEOMETRY_PATH.with_name("Sumatra.geojson")
+INDONESIA_GEOMETRY_PATH = KALIMANTAN_GEOMETRY_PATH.parents[1] / "indonesia_whole.geojson"
+PROVINCES_GEOMETRY_PATH = KALIMANTAN_GEOMETRY_PATH.parents[1] / "indonesia_provinces_38.geojson"
 
 
 def _ring_contains(point: tuple[float, float], ring: list[Any]) -> bool:
@@ -72,6 +74,39 @@ def kalimantan_geometry() -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+@lru_cache(maxsize=1)
+def indonesia_geometry() -> dict[str, Any] | None:
+    """Load the checked-in Indonesia land mask used by nationwide FIRMS sync."""
+    try:
+        payload = json.loads(INDONESIA_GEOMETRY_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+@lru_cache(maxsize=1)
+def province_geometries() -> dict[str, dict[str, Any]]:
+    """Load the complete 38-province boundary set, keyed by Kemendagri code."""
+    try:
+        payload = json.loads(PROVINCES_GEOMETRY_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    features = payload.get("features", []) if isinstance(payload, dict) else []
+    return {
+        str(feature.get("properties", {}).get("KODE_PROV")): feature
+        for feature in features
+        if isinstance(feature, dict)
+        and isinstance(feature.get("properties"), dict)
+        and feature.get("properties", {}).get("KODE_PROV") is not None
+        and isinstance(feature.get("geometry"), dict)
+    }
+
+
+def province_geometry(code: str) -> dict[str, Any] | None:
+    """Return a local province feature when its boundary is available."""
+    return province_geometries().get(str(code))
+
+
 @lru_cache(maxsize=2)
 def _prepared_island(island: str) -> PreparedGeometry | None:
     """Prepare the land mask once, avoiding a polygon scan for every hotspot."""
@@ -91,6 +126,21 @@ def _prepared_island(island: str) -> PreparedGeometry | None:
     else:
         region = shape(payload.get("geometry", payload))
     return prep(make_valid(region))
+
+
+@lru_cache(maxsize=1)
+def _prepared_indonesia() -> PreparedGeometry | None:
+    payload = indonesia_geometry()
+    if not isinstance(payload, dict):
+        return None
+    try:
+        if payload.get("type") == "FeatureCollection":
+            region = unary_union([shape(feature["geometry"]) for feature in payload["features"]])
+        else:
+            region = shape(payload.get("geometry", payload))
+        return prep(make_valid(region))
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _point_from_geojson(geojson: dict[str, Any]) -> tuple[float, float] | None:
@@ -130,6 +180,10 @@ def is_feature_in_event_scope(event: object, feature: dict[str, Any]) -> bool:
     island = EVENT_ISLANDS.get(slug) if isinstance(slug, str) else None
     if island is None:
         return True
+    if island == "Indonesia":
+        country = _prepared_indonesia()
+        point = _point_from_geojson(feature)
+        return country is not None and point is not None and country.covers(Point(*point))
     if slug in PROVINCE_MASK_EVENTS:
         codes = tuple(str(code) for code in (getattr(event, "province_codes", None) or []))
         region = _prepared_provinces(codes)
@@ -143,17 +197,16 @@ def is_feature_in_event_scope(event: object, feature: dict[str, Any]) -> bool:
 
 def prepare_event_scope(event: object) -> None:
     """Check new province masks before issuing expensive upstream queries."""
-    if getattr(event, "slug", None) in PROVINCE_MASK_EVENTS:
+    if getattr(event, "slug", None) == "all":
+        if _prepared_indonesia() is None:
+            raise ValueError("Indonesia boundary is missing or invalid")
+    elif getattr(event, "slug", None) in PROVINCE_MASK_EVENTS:
         _prepared_provinces(tuple(str(code) for code in (getattr(event, "province_codes", None) or [])))
 
 
 @lru_cache(maxsize=8)
 def _prepared_provinces(codes: tuple[str, ...]) -> PreparedGeometry:
-    """Require validated boundaries before ingesting a new monitoring scope.
-
-    CAMS sync writes these polygons first. Missing files stop synchronization;
-    neighbouring countries or ocean detections must never pass an absent mask.
-    """
+    """Require validated cached boundaries before new province-scoped syncs."""
     from app.services.cams_archive_service import event_directory
 
     if not codes:

@@ -20,7 +20,7 @@ from sqlalchemy import select
 # Also supports the temporary /app/var copy used by the operations workflow.
 sys.path.insert(0, str(Path.cwd()))
 
-from app.api.routes import regions, wildfire_events as route  # noqa: E402
+from app.api.routes import wildfire_events as route  # noqa: E402
 from app.db.models.disaster_event import DisasterEvent  # noqa: E402
 from app.db.session import SessionLocal  # noqa: E402
 from app.services import cams_archive_service as cams, wildfire_hotspot_service as hotspots  # noqa: E402
@@ -80,9 +80,8 @@ def main() -> None:
         record('hotspot_map', {'metadata': payload['metadata'], 'from': map_start, 'to': args.end.isoformat()})
         island = EVENT_ISLANDS[args.slug]
         codes = set(event.province_codes)
-        options = regions.get_provinces(island=None if island == 'Indonesia' else island)
-        if island == 'Indonesia':
-            options = {name: code for name, code in options.items() if code in codes}
+        province_payload = route.get_wildfire_regions(args.slug, viewer=None, db=db)['provinces']
+        options = {item['name']: item['code'] for item in province_payload}
         if set(options.values()) != codes:
             raise RuntimeError('Province dropdown does not match the event coverage')
         record('province_options', options)
