@@ -3,6 +3,10 @@ name: Refresh production wildfire satellite data
 on:
   schedule:
     - cron: "17 2 * * *"
+  workflow_run:
+    workflows: ["Test and deploy SAVEGEO backend"]
+    branches: [main]
+    types: [completed]
   workflow_dispatch:
     inputs:
       slug:
@@ -41,6 +45,7 @@ concurrency:
 
 jobs:
   refresh:
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     environment: production
@@ -54,12 +59,12 @@ jobs:
       HOTSPOT_TO: ${{ inputs.hotspot_to }}
       CAMS_FROM: ${{ inputs.cams_from }}
       CAMS_TO: ${{ inputs.cams_to }}
-      REFRESH_HOTSPOTS: ${{ (github.event_name == 'schedule' || inputs.refresh_hotspots) && 'true' || 'false' }}
+      REFRESH_HOTSPOTS: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_run' || inputs.refresh_hotspots) && 'true' || 'false' }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Set rolling data window for scheduled refresh
-        if: github.event_name == 'schedule'
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_run'
         shell: bash
         run: |
           today="$(date -u +%F)"
