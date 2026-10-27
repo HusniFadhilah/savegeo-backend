@@ -5,6 +5,7 @@ in the regional monitoring window. Observation counts always come from the DB.
 """
 
 EVENT_ISLANDS = {
+    "all": "Indonesia",
     "kalimantan-2026": "Kalimantan",
     "sumatra-2026": "Sumatra",
     "jawa-2026": "Jawa",

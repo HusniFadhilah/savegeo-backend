@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import math
 import threading
 import time
@@ -10,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response
 from fastapi.responses import FileResponse
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.security import get_current_disaster_viewer
@@ -39,6 +40,7 @@ router = APIRouter(
     dependencies=[Depends(require_feature("app.feature.disaster_mapping"))],
 )
 MAX_MAP_FEATURES = 5000
+logger = logging.getLogger(__name__)
 ADMIN_REGION_LEVELS = {"province", "city", "district", "village"}
 _ADMIN_GEOMETRY_CACHE: dict[tuple[str, str], tuple[float, dict]] = {}
 _ADMIN_GEOMETRY_CACHE_LOCK = threading.RLock()
@@ -275,18 +277,9 @@ def _feature(hotspot: Hotspot) -> dict | None:
 
 
 def _period_dates(event: DisasterEvent, from_date: str | None, to: str | None) -> tuple[str, str]:
-    end_date = (
-        to
-        or (event.last_data_at.date().isoformat() if event.last_data_at else None)
-        or (event.monitoring_to.isoformat() if event.monitoring_to else None)
-        or dt.datetime.now(dt.UTC).date().isoformat()
-    )
-    start_date = (
-        from_date
-        or (event.monitoring_from.isoformat() if event.monitoring_from else None)
-        or (event.start_date.isoformat() if event.start_date else None)
-        or (dt.date.fromisoformat(end_date) - dt.timedelta(days=6)).isoformat()
-    )
+    end_date = to or dt.datetime.now(dt.UTC).date().isoformat()
+    end = dt.date.fromisoformat(end_date)
+    start_date = from_date or (end - dt.timedelta(days=end.weekday())).isoformat()
     return start_date, end_date
 
 
@@ -307,13 +300,15 @@ def _stored_wildfire_data(
     confidence: str | None = None,
     include_features: bool = True,
 ) -> tuple[list[dict], dict, dict]:
-    """Read the persisted cache, initializing it once when necessary."""
+    """Read the persisted cache and refresh its recent observations when stale."""
+    refresh_failed = False
     try:
         wildfire_hotspot_service.ensure_initial_sync(db, event)
-    except firms_service.FirmsRequestError:
-        # Keep the public endpoint useful when NASA is temporarily unavailable;
-        # an already-populated database cache remains the source of truth.
-        pass
+    except (firms_service.FirmsRequestError, OSError, ValueError) as exc:
+        # Keep the public endpoint useful when source data or cached boundaries
+        # are temporarily unavailable; persisted observations remain readable.
+        logger.warning("Unable to refresh FIRMS cache for wildfire scope %s: %s", event.slug, exc)
+        refresh_failed = True
 
     start_date, end_date = _period_dates(event, from_date, to)
     normalized_sensor = None if not sensor or sensor.casefold() == "all" else sensor
@@ -360,7 +355,7 @@ def _stored_wildfire_data(
             "storage": "database",
             "fetched_at": synced_at.isoformat() if synced_at else None,
             "last_synced_at": synced_at.isoformat() if synced_at else None,
-            "stale": False,
+            "stale": refresh_failed or wildfire_hotspot_service.hotspot_cache_is_stale(event),
             "attribution": "Data: NASA FIRMS / NASA EOSDIS LANCE",
             "disclaimer": "Hotspot adalah indikasi anomali termal dan bukan bukti tunggal area terbakar.",
         }
@@ -404,7 +399,9 @@ def list_wildfire_events(
     db: Session = Depends(get_db),
 ):
     stmt = select(DisasterEvent).where(
-        DisasterEvent.status == "published", DisasterEvent.disaster_type == "forest_fire"
+        DisasterEvent.status == "published",
+        DisasterEvent.disaster_type == "forest_fire",
+        or_(DisasterEvent.slug.is_(None), DisasterEvent.slug != "all"),
     )
     if year:
         stmt = stmt.where(DisasterEvent.year == year)
@@ -417,12 +414,15 @@ def list_wildfire_events(
         events = [event for event in events if province in (event.province or [])]
     items = []
     for event in events:
-        try:
-            wildfire_hotspot_service.ensure_initial_sync(db, event)
-        except firms_service.FirmsRequestError:
-            # The persisted cache remains readable when NASA FIRMS is
-            # temporarily unavailable.
-            pass
+        # Keep the catalog endpoint quick; a public detail request refreshes
+        # stale observations for its selected region.
+        if event.hotspot_last_synced_at is None:
+            try:
+                wildfire_hotspot_service.ensure_initial_sync(db, event)
+            except firms_service.FirmsRequestError:
+                # The persisted cache remains readable when NASA FIRMS is
+                # temporarily unavailable.
+                pass
         confidence = func.lower(func.coalesce(
             WildfireHotspot.stats["confidence_category"].as_string(),
             WildfireHotspot.stats["confidence_label"].as_string(),
@@ -472,7 +472,7 @@ def get_wildfire_event(slug: str, viewer=Depends(get_current_disaster_viewer), d
     burned_area = _published_burned_area(db, event)
     data["status"] = _public_status(event)
     data["title"] = data["name"]
-    data["provinces"] = data.get("province", [])
+    data["provinces"] = ["Seluruh Indonesia"] if event.slug == "all" else data.get("province", [])
     data.update(_burned_area_summary_fields(burned_area))
     return {"event": data}
 

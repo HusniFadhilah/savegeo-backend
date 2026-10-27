@@ -80,7 +80,9 @@ def main() -> None:
         record('hotspot_map', {'metadata': payload['metadata'], 'from': map_start, 'to': args.end.isoformat()})
         island = EVENT_ISLANDS[args.slug]
         codes = set(event.province_codes)
-        options = regions.get_provinces(island=island)
+        options = regions.get_provinces(island=None if island == 'Indonesia' else island)
+        if island == 'Indonesia':
+            options = {name: code for name, code in options.items() if code in codes}
         if set(options.values()) != codes:
             raise RuntimeError('Province dropdown does not match the event coverage')
         record('province_options', options)

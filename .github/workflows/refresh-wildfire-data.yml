@@ -1,13 +1,15 @@
 name: Refresh production wildfire satellite data
 
 on:
+  schedule:
+    - cron: "17 2 * * *"
   workflow_dispatch:
     inputs:
       slug:
-        description: Published wildfire event
+        description: Published wildfire event or national monitoring scope
         required: true
         type: choice
-        options: [sumatra-2026, kalimantan-2026, jawa-2026, sulawesi-2026, bali-nusa-tenggara-2026, maluku-2026, papua-2026, other-indonesia-2026]
+        options: [sumatra-2026, kalimantan-2026, jawa-2026, sulawesi-2026, bali-nusa-tenggara-2026, maluku-2026, papua-2026, all, other-indonesia-2026]
       hotspot_from:
         description: FIRMS start date (YYYY-MM-DD, maximum 90 days)
         required: true
@@ -47,14 +49,26 @@ jobs:
       DEPLOY_SSH_PORT: ${{ secrets.DEPLOY_SSH_PORT }}
       DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
       BACKEND_REMOTE_DIR: ${{ secrets.BACKEND_REMOTE_DIR }}
-      EVENT_SLUG: ${{ inputs.slug }}
+      EVENT_SLUG: ${{ inputs.slug || 'all' }}
       HOTSPOT_FROM: ${{ inputs.hotspot_from }}
       HOTSPOT_TO: ${{ inputs.hotspot_to }}
       CAMS_FROM: ${{ inputs.cams_from }}
       CAMS_TO: ${{ inputs.cams_to }}
-      REFRESH_HOTSPOTS: ${{ inputs.refresh_hotspots }}
+      REFRESH_HOTSPOTS: ${{ (github.event_name == 'schedule' || inputs.refresh_hotspots) && 'true' || 'false' }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set rolling data window for scheduled refresh
+        if: github.event_name == 'schedule'
+        shell: bash
+        run: |
+          today="$(date -u +%F)"
+          echo "HOTSPOT_FROM=$(date -u -d '6 days ago' +%F)" >> "$GITHUB_ENV"
+          echo "HOTSPOT_TO=$today" >> "$GITHUB_ENV"
+          # CAMS/GFAS products arrive with a short publication lag; re-fetch an
+          # overlapping five-day window so late frames replace older versions.
+          echo "CAMS_FROM=$(date -u -d '7 days ago' +%F)" >> "$GITHUB_ENV"
+          echo "CAMS_TO=$(date -u -d '3 days ago' +%F)" >> "$GITHUB_ENV"
 
       - name: Validate operation arguments and secrets
         env:
@@ -71,7 +85,7 @@ jobs:
           if any(not os.environ.get(key) for key in required):
               raise SystemExit('Required production operation secret is missing')
           if os.environ['EVENT_SLUG'] not in {'sumatra-2026','kalimantan-2026','jawa-2026','sulawesi-2026',
-                                           'bali-nusa-tenggara-2026','maluku-2026','papua-2026','other-indonesia-2026'}:
+                                           'bali-nusa-tenggara-2026','maluku-2026','papua-2026','all','other-indonesia-2026'}:
               raise SystemExit('Unsupported wildfire event')
           if os.environ['REFRESH_HOTSPOTS'] not in {'true','false'}:
               raise SystemExit('Invalid hotspot refresh option')

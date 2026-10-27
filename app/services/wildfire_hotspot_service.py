@@ -22,6 +22,8 @@ MAX_SYNC_SPAN_DAYS = 4
 MAX_RETURNED_FEATURES = 50_000
 MAX_SPATIAL_SPLIT_DEPTH = 6
 EXISTING_ID_QUERY_BATCH_SIZE = 10_000
+HOTSPOT_REFRESH_INTERVAL = dt.timedelta(hours=3)
+RECENT_REFRESH_DAYS = 7
 
 
 class IncompleteFirmsSyncError(firms_service.FirmsRequestError):
@@ -271,14 +273,31 @@ def sync_event_hotspots(
 
 
 def ensure_initial_sync(db: Session, event: DisasterEvent) -> dict | None:
-    """Populate an event lazily exactly once when its cache is uninitialized."""
-    if event.hotspot_last_synced_at is not None:
+    """Initialize persisted hotspots and refresh the latest week every three hours."""
+    now = dt.datetime.now(dt.UTC)
+    last_sync = _utc_datetime(event.hotspot_last_synced_at)
+    if last_sync is not None and now - last_sync < HOTSPOT_REFRESH_INTERVAL:
         return None
     with _INITIAL_SYNC_LOCK:
         db.refresh(event)
-        if event.hotspot_last_synced_at is not None:
+        now = dt.datetime.now(dt.UTC)
+        last_sync = _utc_datetime(event.hotspot_last_synced_at)
+        if last_sync is not None and now - last_sync < HOTSPOT_REFRESH_INTERVAL:
             return None
+        today = now.date()
+        end = min(today, event.monitoring_to) if event.monitoring_to else today
+        if event.slug == "all" or last_sync is not None:
+            start = max(today - dt.timedelta(days=RECENT_REFRESH_DAYS - 1), event.monitoring_from or today)
+            if start > end:
+                return None
+            return sync_event_hotspots(db, event, from_date=start, to_date=end)
+        # Preserve the established full backfill behavior for regional events.
         return sync_event_hotspots(db, event)
+
+
+def hotspot_cache_is_stale(event: DisasterEvent) -> bool:
+    last_sync = _utc_datetime(event.hotspot_last_synced_at)
+    return last_sync is None or dt.datetime.now(dt.UTC) - last_sync >= HOTSPOT_REFRESH_INTERVAL
 
 
 def list_event_features(

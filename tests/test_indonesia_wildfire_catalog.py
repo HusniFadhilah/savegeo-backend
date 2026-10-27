@@ -28,7 +28,7 @@ def test_five_scopes_are_drafts_without_invented_observations(monkeypatch):
     seed.upgrade()
     inserts = [call.args[0].compile(dialect=postgresql.dialect()).params
                for call in db.execute.call_args_list if call.args[0].is_insert]
-    assert {entry["slug"] for entry in inserts} == set(PROVINCE_MASK_EVENTS)
+    assert {entry["slug"] for entry in inserts} == set(PROVINCE_MASK_EVENTS) - {"all"}
     assert len(inserts) == 5
     for entry in inserts:
         assert entry["status"] == "draft"
@@ -49,7 +49,7 @@ def test_seed_preserves_existing_admin_decisions(monkeypatch):
 
 
 def test_scopes_have_official_incident_references():
-    assert set(OFFICIAL_REPORTS) == set(PROVINCE_MASK_EVENTS)
+    assert set(OFFICIAL_REPORTS) == set(PROVINCE_MASK_EVENTS) - {"all"}
     for slug, reports in OFFICIAL_REPORTS.items():
         assert slug in EVENT_ISLANDS
         assert reports and all("bnpb.go.id/" in report["url"] for report in reports)
