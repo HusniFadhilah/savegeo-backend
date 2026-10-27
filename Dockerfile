@@ -18,7 +18,7 @@ COPY scripts ./scripts
 
 RUN python -m venv --without-pip "${VIRTUAL_ENV}" \
     && /usr/local/bin/python -m pip install --no-cache-dir \
-    --target "${VIRTUAL_ENV}/lib/python3.11/site-packages" ".[cams,granite-biomass]" \
+    --target "${VIRTUAL_ENV}/lib/python3.11/site-packages" ".[cams]" \
     && /usr/local/bin/python -m pip install --no-cache-dir --upgrade \
     --target "${VIRTUAL_ENV}/lib/python3.11/site-packages" \
     "msgpack>=1.2.1" \
@@ -48,16 +48,27 @@ RUN python -m venv /opt/samgeo \
 
 # Granite/TerraTorch has a newer NumPy and geospatial stack than the API.
 # Keep it in its own interpreter so it cannot upgrade or shadow API packages.
-FROM python:3.11-slim-bookworm AS granite-builder
+FROM python:3.12-slim-bookworm AS granite-builder
 RUN python -m venv /opt/granite \
     && /opt/granite/bin/python -m pip install --no-cache-dir --no-deps \
        --index-url https://download.pytorch.org/whl/cpu \
        torch==2.10.0 torchvision==0.25.0 \
     && /opt/granite/bin/python -m pip install --no-cache-dir \
-       terratorch==1.1 lightning>=2.6.6 filelock>=4.2.1 \
+       terratorch==1.2.13 lightning>=2.6.6 filelock>=4.2.1 \
        fsspec>=2026.6.0 geopandas>=1.1.2 \
     && /opt/granite/bin/python -m pip uninstall -y pip setuptools
 RUN /opt/granite/bin/python -c "from terratorch.cli_tools import LightningInferenceModel; import torch, torchvision; print(torch.__version__, torchvision.__version__)"
+RUN rm -rf \
+    /usr/local/lib/python3.12/site-packages \
+    /usr/local/lib/python3.12/dist-packages \
+    /usr/local/lib/python3.12/ensurepip \
+    && tar -C /usr/local \
+    --exclude='lib/python3.12/site-packages' \
+    --exclude='lib/python3.12/dist-packages' \
+    --exclude='lib/python3.12/ensurepip' \
+    --exclude='bin/python' \
+    --exclude='bin/python3' \
+    -cf /tmp/python312-runtime.tar .
 
 # Keep compilers and development headers out of the production image. Start
 # from a plain Debian runtime so its system Python metadata cannot reintroduce
@@ -89,8 +100,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /tmp/python-runtime.tar /tmp/python-runtime.tar
+COPY --from=granite-builder /tmp/python312-runtime.tar /tmp/python312-runtime.tar
 RUN tar -C /usr/local -xf /tmp/python-runtime.tar \
-    && rm -f /tmp/python-runtime.tar
+    && tar -C /usr/local -xf /tmp/python312-runtime.tar \
+    && rm -f /tmp/python-runtime.tar \
+    && rm -f /tmp/python312-runtime.tar
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=samgeo-builder /opt/samgeo /opt/samgeo
 COPY --from=granite-builder /opt/granite /opt/granite
