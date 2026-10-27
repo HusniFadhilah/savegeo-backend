@@ -36,7 +36,7 @@ def test_granite_model_is_hidden_until_all_runtime_inputs_are_configured(tmp_pat
         ibm_granite_biomass_config_path=str(config),
         ibm_granite_biomass_checkpoint_sha256="a" * 64,
     )
-    monkeypatch.setattr(registry.importlib.util, "find_spec", lambda _name: object())
+    monkeypatch.setattr(registry, "_runtime_has_granite", lambda _python: True)
 
     model = registry.granite_biomass_model(settings)
     assert model is not None

@@ -101,7 +101,7 @@ cams = [
 granite-biomass = [
     "torch==2.10.0",
     "torchvision==0.25.0",
-    "terratorch==1.2.13",
+    "terratorch==1.1",
     "lightning>=2.6.6",
     "filelock>=4.2.1",
     "fsspec>=2026.6.0",

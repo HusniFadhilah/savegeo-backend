@@ -54,7 +54,7 @@ RUN python -m venv /opt/granite \
        --index-url https://download.pytorch.org/whl/cpu \
        torch==2.10.0 torchvision==0.25.0 \
     && /opt/granite/bin/python -m pip install --no-cache-dir \
-       terratorch==1.2.13 lightning>=2.6.6 filelock>=4.2.1 \
+       terratorch==1.1 lightning>=2.6.6 filelock>=4.2.1 \
        fsspec>=2026.6.0 geopandas>=1.1.2 \
     && /opt/granite/bin/python -m pip uninstall -y pip setuptools
 RUN /opt/granite/bin/python -c "from terratorch.cli_tools import LightningInferenceModel; import torch, torchvision; print(torch.__version__, torchvision.__version__)"
