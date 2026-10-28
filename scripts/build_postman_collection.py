@@ -40,7 +40,7 @@ PARAMETER_DEFAULTS = {
     "user_id": "1",
     "job_id": "replace-with-job-id",
     "key": "dynamic_world_v1",
-    "dataset_key": "gedi_l4a_monthly",
+    "dataset_key": "gedi_l4a_monthly",  # gitleaks:allow — OpenAPI sample value, not a credential.
     "z": "0",
     "x": "0",
     "y": "0",
@@ -315,7 +315,6 @@ def build_collection(spec: dict[str, Any]) -> dict[str, Any]:
                 method = entry["method"]
                 operation = entry["operation"]
                 parameters = list(operation.get("parameters", []))
-                params_by_name = {(p.get("in"), p.get("name")): p for p in parameters}
                 path_with_vars = re.sub(r"\{([^{}]+)\}", r"{{\1}}", path)
                 query_items = []
                 raw_query: list[str] = []
@@ -407,7 +406,6 @@ def build_collection(spec: dict[str, Any]) -> dict[str, Any]:
         "item": docs_items,
     })
 
-    now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     variables = [
         ("baseUrl", "http://127.0.0.1:8000", "Origin backend tanpa suffix /api."),
         ("username", "", "Username akun app user untuk POST /api/auth/login."),
