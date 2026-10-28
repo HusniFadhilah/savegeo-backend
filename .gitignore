@@ -44,3 +44,6 @@ Thumbs.db
 .claude/
 .tmp-disaster*
 .tmp-flood*
+
+# Local Postman collections/environments may contain machine-specific values.
+postman/

@@ -78,6 +78,9 @@ MAP_LAYER_REGISTRY: list[dict] = [
         "source":          "ArcGIS World Imagery + transportation",
         "tile_url":        "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
         "overlay_tile_url": "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}",
+        # Road-reference tiles can be missing at close zooms in some areas.
+        # The frontend overzooms this independent layer while imagery stays sharp.
+        "overlay_max_native_zoom": 17,
         "attribution":     "Tiles &copy; Esri, Maxar, Earthstar Geographics",
         "overlay_attribution": "Road reference &copy; Esri",
         "default_opacity": 1.0,
