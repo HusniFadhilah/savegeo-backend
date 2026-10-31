@@ -65,3 +65,23 @@ def test_routes_and_job_registration():
     assert [item["value"] for item in fusion.ROUTE_LEGEND] == [1, 2, 3]
     assert "landcover_fusion" in analysis_jobs._ALLOWED_JOB_TYPES
     assert "land_cover_change" in FEATURE_CODES
+
+
+def test_parse_params_event_variants():
+    flood = fusion.parse_params({"aoi": AOI, "from_year": 2023, "to_year": 2024,
+                                 "event": {"type": "flood_sar", "pre_date": "2024-01-20", "post_date": "2024-03-18"}})
+    assert flood["event"]["type"] == "flood_sar"
+    assert flood["event"]["pre_date"] < flood["event"]["post_date"]
+    polygon = fusion.parse_params({"aoi": AOI, "from_year": 2023, "to_year": 2024, "event": {"type": "geometry", "geojson": AOI["geojson"]}})
+    assert polygon["event"]["type"] == "geometry"
+    assert fusion.parse_params({"aoi": AOI, "from_year": 2023, "to_year": 2024})["event"] is None
+
+
+@pytest.mark.parametrize("event", [
+    {"type": "earthquake"},
+    {"type": "flood_sar", "pre_date": "2024-03-18", "post_date": "2024-01-20"},
+    {"type": "geometry"},
+])
+def test_parse_params_rejects_invalid_event(event):
+    with pytest.raises(AnalysisError):
+        fusion.parse_params({"aoi": AOI, "from_year": 2023, "to_year": 2024, "event": event})

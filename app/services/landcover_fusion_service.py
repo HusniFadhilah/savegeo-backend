@@ -35,9 +35,24 @@ Change between t0 and t1 uses the class-probability vectors:
 vectors with disjoint support; unlike 1 - sum_k P_t0,k * P_t1,k it does not
 report change merely because both vectors are uncertain)
 
-and is valid only when D >= tau_change, the top classes differ and both
-periods pass the quality gate. Areas are summed on the EPSG:6933 equal-area
-grid used by the other land-cover change endpoints.
+Per-period routing picks the best source available in *that* period, so the
+two periods of one pixel can be classified by different models (e.g. SAR in
+a cloudy t0, joint in t1). Their probability vectors are not comparable: D
+would partly measure the model switch. Change is therefore computed on a
+**common path** chosen from both periods at once:
+
+    joint   if Q_o >= q_min and Q_s >= q_min in t0 and in t1
+    optical if only optical passes in both periods
+    SAR     if only SAR passes in both periods
+    none    otherwise (no change decision for that pixel)
+
+and the same classifier produces P_t0 and P_t1 for that pixel. In weighted
+mode both periods use the same weights w_o = min(Q_o(t0), Q_o(t1)) and
+w_s = min(Q_s(t0), Q_s(t1)). A change is valid only when D >= tau_change,
+the top classes of the common-path vectors differ and the common path exists.
+Areas are summed on the EPSG:6933 equal-area grid used by the other
+land-cover change endpoints. An optional event extent (SAR new-water mask or
+a supplied polygon) restricts change and class-area statistics.
 """
 from __future__ import annotations
 
@@ -62,7 +77,7 @@ from app.services.landcover_service import LC_EQUAL_AREA_CRS
 
 logger = logging.getLogger(__name__)
 
-METHOD_VERSION = "quality-gated-fusion-v2"
+METHOD_VERSION = "quality-gated-fusion-v3-common-path"
 OPTICAL_BANDS = ["B2", "B3", "B4", "B8", "B11", "B12"]
 OPTICAL_FEATURES = OPTICAL_BANDS + ["NDVI", "MNDWI", "NDBI"]
 SAR_FEATURES = ["VV", "VH", "VV_VH"]
@@ -73,6 +88,7 @@ PATH_FEATURES = {
     "sar": SAR_FEATURES + AUX_FEATURES,
 }
 ROUTES = {0: "no_data", 1: "optical_dominant", 2: "sar_dominant", 3: "joint_fusion"}
+EVENT_TYPES = {"flood_sar", "geometry"}
 ROUTE_LEGEND = [
     {"value": 1, "label": "Optical-dominant", "color": "#f59e0b"},
     {"value": 2, "label": "SAR-dominant", "color": "#2563eb"},
@@ -141,6 +157,17 @@ def parse_params(data: dict) -> dict:
         return value
 
     confidence = data.get("confidence_threshold")
+    event = data.get("event") or None
+    if event is not None:
+        if not isinstance(event, dict) or event.get("type") not in EVENT_TYPES:
+            raise AnalysisError("event.type harus 'flood_sar' atau 'geometry'", 400)
+        if event["type"] == "flood_sar":
+            pre, post = _iso(event.get("pre_date", ""), "event.pre_date"), _iso(event.get("post_date", ""), "event.post_date")
+            if pre >= post:
+                raise AnalysisError("event.pre_date harus sebelum event.post_date", 400)
+            event = {"type": "flood_sar", "pre_date": pre, "post_date": post}
+        elif not event.get("geojson"):
+            raise AnalysisError("event.geojson wajib untuk event.type 'geometry'", 400)
     return {
         "t0": t0, "t1": t1, "fusion_mode": mode,
         "q_min": unit("q_min", 0.5),
@@ -149,6 +176,7 @@ def parse_params(data: dict) -> dict:
         "optical_reference_count": max(1, min(int(data.get("optical_reference_count", 3)), 30)),
         "sar_reference_count": max(1, min(int(data.get("sar_reference_count", 2)), 30)),
         "scale": max(10, min(int(data.get("scale", 20)), 100)),
+        "event": event,
     }
 
 
@@ -350,12 +378,60 @@ def fuse_period(inputs: dict, classifiers: dict, class_codes: list[int], params:
     index = prob.toArray().arrayArgmax().arrayGet([0])
     label = index.remap(list(range(len(class_codes))), class_codes).rename("landcover").toInt16()
     return {
+        "paths": {path: probabilities(path) for path in PATH_FEATURES},
+        "q_o": q_o, "q_s": q_s, "footprint": footprint,
         "route": route.updateMask(footprint).clip(aoi),
         "probabilities": prob.updateMask(valid).clip(aoi),
         "label": label.updateMask(valid).clip(aoi),
         "confidence": confidence.updateMask(valid).clip(aoi),
         "valid": valid.unmask(0).clip(aoi),
     }
+
+
+def common_basis(f0: dict, f1: dict, class_codes: list[int], params: dict, aoi) -> dict:
+    """Probability vectors for t0 and t1 produced by the *same* model per pixel."""
+    q = params["q_min"]
+    optical_both = f0["q_o"].gte(q).And(f1["q_o"].gte(q))
+    sar_both = f0["q_s"].gte(q).And(f1["q_s"].gte(q))
+    path = route_image(f0["q_o"].min(f1["q_o"]), f0["q_s"].min(f1["q_s"]), q).rename("common_path")
+    if params["fusion_mode"] == "routing":
+        def pick(f):
+            return f["paths"]["joint"].where(path.eq(1), f["paths"]["optical"]).where(path.eq(2), f["paths"]["sar"])
+        p0, p1 = pick(f0), pick(f1)
+    else:
+        w_o = f0["q_o"].min(f1["q_o"]).multiply(optical_both)
+        w_s = f0["q_s"].min(f1["q_s"]).multiply(sar_both)
+        denominator = w_o.add(w_s).max(_EPS)
+
+        def blend(f):
+            return f["paths"]["optical"].multiply(w_o).add(f["paths"]["sar"].multiply(w_s)).divide(denominator)
+        p0, p1 = blend(f0), blend(f1)
+    valid = path.gt(0).And(f0["footprint"])
+    if params["confidence_threshold"] is not None:
+        valid = valid.And(p0.reduce(ee.Reducer.max()).gte(params["confidence_threshold"]))
+        valid = valid.And(p1.reduce(ee.Reducer.max()).gte(params["confidence_threshold"]))
+
+    def label(p):
+        index = p.toArray().arrayArgmax().arrayGet([0])
+        return index.remap(list(range(len(class_codes))), class_codes).toInt16()
+
+    return {
+        "path": path.updateMask(f0["footprint"]).clip(aoi),
+        "p0": p0.updateMask(valid).clip(aoi), "p1": p1.updateMask(valid).clip(aoi),
+        "label0": label(p0).updateMask(valid).clip(aoi), "label1": label(p1).updateMask(valid).clip(aoi),
+        "valid": valid.unmask(0).clip(aoi),
+    }
+
+
+def event_mask(event: dict | None, aoi):
+    if not event:
+        return None
+    if event["type"] == "geometry":
+        geometry = create_geometry_from_payload({"geojson": event["geojson"]})
+        return ee.Image(0).paint(ee.FeatureCollection([ee.Feature(geometry)]), 1).clip(aoi).rename("event")
+    from app.services.disaster_analysis_service import flood_water_masks
+    pre_water, post_water = flood_water_masks(aoi, event["pre_date"], event["post_date"])
+    return post_water.And(pre_water.Not()).unmask(0).clip(aoi).rename("event")
 
 
 def change_score(prob_t0, prob_t1):
@@ -392,6 +468,31 @@ def _route_summary(groups: list[dict]) -> dict:
     }
 
 
+def _event_report(event: dict | None, stats: dict, legend: dict) -> dict | None:
+    if not event:
+        return None
+
+    def classes(groups):
+        out = []
+        for group in groups or []:
+            code = str(int(float(group["cls"])))
+            if code in legend:
+                out.append({"class": legend[code]["label"], "class_code": int(code), "color": legend[code]["color"], "area_ha": round(float(group.get("sum") or 0), 2)})
+        return sorted(out, key=lambda item: item["area_ha"], reverse=True)
+
+    areas = stats.get("event_areas") or {}
+    return {
+        "type": event["type"],
+        **({"pre_date": event["pre_date"].isoformat(), "post_date": event["post_date"].isoformat()} if event["type"] == "flood_sar" else {}),
+        "event_area_ha": round(float(areas.get("event") or 0), 2),
+        "event_valid_area_ha": round(float(areas.get("event_valid") or 0), 2),
+        "changed_in_event_ha": round(float(areas.get("event_changed") or 0), 2),
+        "classes_t0": classes(stats.get("event_classes_t0")),
+        "classes_t1": classes(stats.get("event_classes_t1")),
+        "note": "Luas kelas dihitung pada piksel cakupan kejadian yang memiliki jalur bersama; bukan penilaian kerusakan.",
+    }
+
+
 def _tile(image, vis: dict, name: str) -> str | None:
     tile = get_tile_url(image, vis, name)
     return tile["tile_url"] if tile else None
@@ -419,19 +520,30 @@ def analyze_landcover_fusion(data: dict) -> dict:
         periods[key] = {"inputs": inputs, "fused": fuse_period(inputs, classifiers, class_codes, params, aoi)}
 
     f0, f1 = periods["t0"]["fused"], periods["t1"]["fused"]
-    both_valid = f0["valid"].And(f1["valid"])
-    d_score = change_score(f0["probabilities"], f1["probabilities"]).updateMask(both_valid).clip(aoi)
-    labels_differ = f0["label"].neq(f1["label"])
+    basis = common_basis(f0, f1, class_codes, params, aoi)
+    both_valid = basis["valid"]
+    d_score = change_score(basis["p0"], basis["p1"]).updateMask(both_valid).clip(aoi)
+    labels_differ = basis["label0"].neq(basis["label1"])
     changed = d_score.gte(params["tau_change"]).And(labels_differ).unmask(0).And(both_valid)
     suppressed = labels_differ.And(d_score.lt(params["tau_change"])).unmask(0).And(both_valid)
     transition = (
-        f0["label"].multiply(1000)
-        .add(f1["label"].where(changed.Not(), f0["label"]))
+        basis["label0"].multiply(1000)
+        .add(basis["label1"].where(changed.Not(), basis["label0"]))
         .updateMask(both_valid).rename("transition")
     )
+    # Reference: what per-period routing alone would report (models may differ between periods).
+    per_period_valid = f0["valid"].And(f1["valid"])
+    per_period_changed = (
+        change_score(f0["probabilities"], f1["probabilities"]).gte(params["tau_change"])
+        .And(f0["label"].neq(f1["label"])).unmask(0).And(per_period_valid)
+    )
+    route_switch = f0["route"].neq(f1["route"]).unmask(0).And(per_period_valid)
+    event = event_mask(params["event"], aoi)
 
     area_band = ee.Image.pixelArea().divide(10000)
-    stats = ee.Dictionary({
+    # Earth Engine limits concurrent aggregations per request, so statistics are
+    # fetched in a few smaller batches instead of one large dictionary.
+    stats_batches = [{
         "aoi_area_ha": aoi.area(1).divide(10000),
         "routes_t0": _grouped_area(f0["route"].unmask(0), "route", aoi, scale).get("groups"),
         "routes_t1": _grouped_area(f1["route"].unmask(0), "route", aoi, scale).get("groups"),
@@ -444,9 +556,29 @@ def analyze_landcover_fusion(data: dict) -> dict:
             .reduceRegion(reducer=ee.Reducer.sum(), geometry=aoi, scale=scale, crs=LC_EQUAL_AREA_CRS,
                           maxPixels=int(get_settings().max_pixels), bestEffort=False, tileScale=4),
         "d_mean": _mean(d_score, aoi, scale).get("D"),
+    }, {
+        "common_paths": _grouped_area(basis["path"].unmask(0).rename("route"), "route", aoi, scale).get("groups"),
+        "reference_areas": area_band.updateMask(per_period_changed).rename("per_period_changed")
+            .addBands(area_band.updateMask(route_switch).rename("route_switch"))
+            .addBands(area_band.updateMask(route_switch.And(per_period_changed)).rename("route_switch_changed"))
+            .reduceRegion(reducer=ee.Reducer.sum(), geometry=aoi, scale=scale, crs=LC_EQUAL_AREA_CRS,
+                          maxPixels=int(get_settings().max_pixels), bestEffort=False, tileScale=4),
+    }, {
+        **({
+            "event_areas": area_band.updateMask(event).rename("event")
+                .addBands(area_band.updateMask(event.And(both_valid)).rename("event_valid"))
+                .addBands(area_band.updateMask(event.And(changed)).rename("event_changed"))
+                .reduceRegion(reducer=ee.Reducer.sum(), geometry=aoi, scale=scale, crs=LC_EQUAL_AREA_CRS,
+                              maxPixels=int(get_settings().max_pixels), bestEffort=False, tileScale=4),
+            "event_classes_t0": _grouped_area(basis["label0"].updateMask(event), "cls", aoi, scale).get("groups"),
+            "event_classes_t1": _grouped_area(basis["label1"].updateMask(event), "cls", aoi, scale).get("groups"),
+        } if event is not None else {}),
         "confidence_t0": _mean(f0["confidence"], aoi, scale).get("confidence"),
         "confidence_t1": _mean(f1["confidence"], aoi, scale).get("confidence"),
-    }).getInfo()
+    }]
+    stats = {}
+    for batch in stats_batches:
+        stats.update(ee.Dictionary(batch).getInfo() or {})
 
     legend = {str(code): MAPBIOMAS_DETAIL_LEGEND[str(code)] for code in MAPBIOMAS_CLASS_CODES}
     flows, gains, losses = [], {}, {}
@@ -492,8 +624,11 @@ def analyze_landcover_fusion(data: dict) -> dict:
         "landcover_t0": _tile(_lc_vis_image(f0["label"]), lc_vis, "Tutupan lahan fusi t0"),
         "landcover_t1": _tile(_lc_vis_image(f1["label"]), lc_vis, "Tutupan lahan fusi t1"),
         "change_score": _tile(d_score, {"min": 0, "max": 1, "palette": ["#f8fafc", "#fde047", "#dc2626"]}, "Skor perubahan D"),
-        "changed": _tile(_lc_vis_image(f1["label"]).updateMask(changed.selfMask()), lc_vis, "Perubahan valid (kelas tujuan)"),
+        "changed": _tile(_lc_vis_image(basis["label1"]).updateMask(changed.selfMask()), lc_vis, "Perubahan valid (kelas tujuan)"),
+        "common_path": _tile(basis["path"].selfMask(), route_vis, "Jalur bersama t0-t1"),
     }
+    if event is not None:
+        tiles["event"] = _tile(event.selfMask(), {"min": 1, "max": 1, "palette": ["#0ea5e9"]}, "Cakupan kejadian")
     if not all(tiles.values()):
         raise AnalysisError("Tile hasil fusi gagal dibuat", 502)
 
@@ -519,7 +654,8 @@ def analyze_landcover_fusion(data: dict) -> dict:
             "q_s": "Q_s = V_s x S_s x A_s",
             "routing": "joint jika Q_o>=q_min dan Q_s>=q_min; optical/SAR jika hanya satu; no-data jika keduanya di bawah q_min",
             "weighted": "P = (Q_o x P_opt + Q_s x P_sar) / max(Q_o + Q_s, eps)",
-            "change": "D = 1/2 x sum_k |P_t0,k - P_t1,k|; valid jika D>=tau_change, kelas berbeda, dan kedua periode lolos q_min",
+            "change": "D = 1/2 x sum_k |P_t0,k - P_t1,k| dari pengklasifikasi yang sama pada t0 dan t1 (jalur bersama); valid jika D>=tau_change, kelas berbeda, dan jalur bersama ada",
+            "common_path": "jalur bersama: gabungan jika optik dan SAR lolos q_min pada kedua periode; optik atau SAR jika hanya satu sumber lolos pada kedua periode; tanpa data jika tidak ada",
         },
         "periods": {"t0": period_report("t0"), "t1": period_report("t1")},
         "statistics": {
@@ -531,7 +667,12 @@ def analyze_landcover_fusion(data: dict) -> dict:
             "suppressed_change_area_ha": round(float(areas.get("suppressed") or 0), 2),
             "changed_percentage": round(changed_ha / valid_ha * 100, 2),
             "mean_change_score": round(float(stats.get("d_mean") or 0), 4),
+            "per_period_changed_area_ha": round(float((stats.get("reference_areas") or {}).get("per_period_changed") or 0), 2),
+            "route_switch_area_ha": round(float((stats.get("reference_areas") or {}).get("route_switch") or 0), 2),
+            "route_switch_changed_area_ha": round(float((stats.get("reference_areas") or {}).get("route_switch_changed") or 0), 2),
         },
+        "common_path": _route_summary(stats.get("common_paths")),
+        "event": _event_report(params["event"], stats, legend),
         "flows": flows,
         "net_changes": net_changes,
         "tiles": tiles,
