@@ -46,6 +46,8 @@ from app.services import (
     vegetation_service,
 )
 from app.services.gee_common import AnalysisError, public_analysis_error
+from app.services.carbon_retry import run_carbon_with_retry
+from app.services.aoi_reference import resolve_region_aoi
 
 router = APIRouter(tags=["analysis-jobs"])
 logger = logging.getLogger(__name__)
@@ -294,6 +296,19 @@ def _complete_cached_job(
     return {"job_id": job_id, "status": "succeeded", "status_url": f"/analysis-jobs/{job_id}", "cache_hit": True}
 
 
+def _analyze_carbon_job(db: Session, payload: dict) -> dict:
+    # Use the same boundary provider and coordinate order as the AOI picker.
+    from app.api.routes.regions import get_region_geometry
+
+    def load_geometry(level: str, code: str) -> dict:
+        try:
+            return get_region_geometry(endpoint=level, code=code)
+        except HTTPException as exc:
+            raise AnalysisError("Batas wilayah AOI belum dapat dimuat.", exc.status_code) from exc
+
+    return carbon_service.analyze_carbon(db, resolve_region_aoi(payload, load_geometry))
+
+
 def _run_job(
     job_id: str,
     job_type: str,
@@ -313,7 +328,9 @@ def _run_job(
     )
     try:
         if job_type == "carbon":
-            result = carbon_service.analyze_carbon(db, payload)
+            result = run_carbon_with_retry(
+                lambda: _analyze_carbon_job(db, payload), job_id=job_id,
+            )
         elif job_type == "carbon_local":
             result = carbon_service.analyze_carbon_local(db, payload)
         elif job_type == "carbon_delta":
