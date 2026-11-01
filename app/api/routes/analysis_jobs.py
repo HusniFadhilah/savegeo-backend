@@ -47,7 +47,7 @@ from app.services import (
 )
 from app.services.gee_common import AnalysisError, public_analysis_error
 from app.services.carbon_retry import run_carbon_with_retry
-from app.services.aoi_reference import resolve_region_aoi
+from app.services.aoi_reference import resolve_known_aoi
 
 router = APIRouter(tags=["analysis-jobs"])
 logger = logging.getLogger(__name__)
@@ -297,16 +297,7 @@ def _complete_cached_job(
 
 
 def _analyze_carbon_job(db: Session, payload: dict) -> dict:
-    # Use the same boundary provider and coordinate order as the AOI picker.
-    from app.api.routes.regions import get_region_geometry
-
-    def load_geometry(level: str, code: str) -> dict:
-        try:
-            return get_region_geometry(endpoint=level, code=code)
-        except HTTPException as exc:
-            raise AnalysisError("Batas wilayah AOI belum dapat dimuat.", exc.status_code) from exc
-
-    return carbon_service.analyze_carbon(db, resolve_region_aoi(payload, load_geometry))
+    return carbon_service.analyze_carbon(db, resolve_known_aoi(payload))
 
 
 def _run_job(

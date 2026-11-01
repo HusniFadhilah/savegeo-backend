@@ -26,6 +26,10 @@ def _landsat_predictors(region, year):
     older = year < 2013
     if older:
         collection = ee.ImageCollection("LANDSAT/LT05/C02/T1_L2")
+        # Landsat 5 has regional acquisition gaps in the 2010 BGB reference
+        # year (including Bali). Landsat 7 uses the same optical band names;
+        # its annual observations also fill SLC-off gaps through compositing.
+        collection = collection.merge(ee.ImageCollection("LANDSAT/LE07/C02/T1_L2"))
     else:
         collection = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
         if year >= 2021:
@@ -103,6 +107,12 @@ def _ipcc_image(meta, model, roi):
     return mass.multiply(ratio).multiply(info["carbon_fractions"]["bgb"]).updateMask(mask).rename("agb")
 
 
+def summary_scale(native_scale, bounds_area_m2, max_pixels):
+    """Bound a reference summary's pixel count; the displayed raster stays native."""
+    budget = max(1, min(int(max_pixels), 1_000_000))
+    return max(int(native_scale), math.ceil(math.sqrt(bounds_area_m2 / budget)))
+
+
 def analyze_carbon_pool(db, data):
     key = data["reference_dataset"]
     year = int(data.get("dataset_year", 2020))
@@ -144,6 +154,10 @@ def analyze_carbon_pool(db, data):
         else:
             image, extras = _random_forest(reference, calculation_roi, meta, model, analysis_year)
     scale = max(int(meta["resolution"]), int(data.get("scale") or meta["resolution"]))
+    simple_baseline = bool(data.get("simple_mode") and not model)
+    if simple_baseline:
+        bounds_area = calculation_roi.bounds(maxError=100).area(maxError=100).getInfo()
+        scale = summary_scale(scale, bounds_area, defaults["max_pixels"])
     vis = {"min": meta.get("vis_min", defaults["carbon_vis_min"]),
            "max": meta.get("vis_max", defaults["carbon_vis_max"]),
            "palette": meta.get("vis_palette", defaults["carbon_vis_palette"])}
@@ -200,6 +214,7 @@ def analyze_carbon_pool(db, data):
                              "reference_year": source_year,
                              "target_pool": meta["target_pool"], "depth_cm": meta.get("depth_cm"), "source_period": meta.get("source_period"),
                              "load_only": bool(data.get("load_only")), "statistics_available": stats is not None,
+                             "large_aoi_baseline": simple_baseline,
                              "method_description": model["description"] if model else meta["description"], **extras},
               "data_quality": {"valid_pixel_pct": coverage, "gap_filled": None, "images_used": None,
                                "analysis_year_partial": analysis_year == current_year,

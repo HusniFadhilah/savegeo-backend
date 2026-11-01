@@ -990,6 +990,10 @@ def calculate_carbon_summary_for_year(
 
 
 def analyze_carbon(db: Session, data: dict) -> dict:
+    if data.get("simple_mode") and data.get("reference_only") and data.get("reference_dataset") in {"SPAWN", "ORNL_BGB", "SOILGRIDS_OCS_0_30CM"}:
+        from app.services.carbon_pool_service import analyze_carbon_pool
+
+        return analyze_carbon_pool(db, data)
     if data.get("model_name") == GRANITE_BIOMASS_MODEL_NAME:
         raise AnalysisError("Model IBM Granite menggunakan jalur HLS khusus. Jalankan melalui estimasi karbon lokal.", 422)
 

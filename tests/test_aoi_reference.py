@@ -49,3 +49,22 @@ def test_invalid_reference_never_contacts_provider(reference):
 def test_geojson_payload_is_unchanged():
     payload = {"aoi": {"geojson": {"type": "Polygon", "coordinates": []}}}
     assert resolve_region_aoi(payload, lambda *_: pytest.fail("unexpected provider call")) is payload
+
+
+@pytest.mark.parametrize("reference", [{"scope": "island", "code": "Jawa"}, {"scope": "indonesia"}])
+def test_static_scope_keeps_exact_boundary(reference):
+    geometry = {"type": "Polygon", "coordinates": [[[110, -7], [111, -7], [111, -6], [110, -7]]]}
+    calls = []
+
+    def load_scope(scope, code):
+        calls.append((scope, code))
+        return {"type": "Feature", "geometry": geometry}
+
+    result = resolve_region_aoi({"aoi": {"region": reference}}, lambda *_: pytest.fail("unexpected admin fetch"), load_scope)
+    assert result["aoi"]["geojson"]["geometry"] == geometry
+    assert calls == [(reference["scope"], reference.get("code"))]
+
+
+def test_invalid_island_does_not_access_static_path():
+    with pytest.raises(AnalysisError):
+        resolve_region_aoi({"aoi": {"region": {"scope": "island", "code": "../secret"}}}, lambda *_: {}, lambda *_: pytest.fail("invalid island reached loader"))

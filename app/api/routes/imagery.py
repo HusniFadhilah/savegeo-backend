@@ -32,6 +32,7 @@ from app.services import samgeo_service
 from app.services import advanced_imagery_service
 from app.services.copernicus_geosave_service import CopernicusAnalysisError
 from app.services.gee_common import AnalysisError, public_analysis_error
+from app.services.aoi_reference import resolve_known_aoi
 
 router = APIRouter(tags=["imagery"], dependencies=[Depends(require_feature("app.feature.satellite_exploration"))])
 logger = logging.getLogger(__name__)
@@ -210,6 +211,7 @@ async def imagery_scenes(request: Request, db: Session = Depends(get_db)):
     try:
         if _requires_ee(data):
             require_ee(request)
+        data = await run_in_threadpool(resolve_known_aoi, data)
         return await run_in_threadpool(imagery_service.list_scenes, data, request, settings)
     except CopernicusAnalysisError as e:
         logger.warning("Imagery scenes provider error request_id=%s status=%s provider=%s", request_id, e.status_code, data.get("satellite"))
@@ -238,6 +240,7 @@ async def imagery_scene_tile(request: Request, db: Session = Depends(get_db)):
     try:
         if _requires_ee(data):
             require_ee(request)
+        data = await run_in_threadpool(resolve_known_aoi, data)
         return await run_in_threadpool(imagery_service.get_scene_tile, data, request, settings)
     except CopernicusAnalysisError as e:
         raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
