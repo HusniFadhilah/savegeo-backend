@@ -8,6 +8,7 @@ from app.db.models.analysis_run import AnalysisRun
 from app.db.models.analysis_provenance import AnalysisProvenance
 from app.db.models.analysis_output import AnalysisOutput
 from app.db.models.carbon_inference_cache import CarbonInferenceCache
+from app.db.models.carbon_annual_estimate import CarbonAnnualEstimate
 from app.db.models.audit_log import AuditLog
 from app.db.models.chat_message import ChatMessage
 from app.db.models.chat_session import ChatSession
@@ -43,6 +44,7 @@ __all__ = [
     "AnalysisProvenance",
     "AnalysisOutput",
     "CarbonInferenceCache",
+    "CarbonAnnualEstimate",
     "AuditLog",
     "ChatMessage",
     "ChatSession",

@@ -74,7 +74,7 @@ def saved_model_image(roi, model, dataset_meta, analysis_year=None):
     info = model["metadata_json"]
     bbox = info["training_bbox"]
     if not ee.Geometry.Rectangle(bbox, proj="EPSG:4326", geodesic=False).contains(roi.bounds(maxError=100), maxError=100).getInfo():
-        raise AnalysisError("Model regional ini hanya dikalibrasi di Jawa. Gunakan raster referensi atau model lain untuk AOI di luar wilayah training.", 422)
+        raise AnalysisError("AOI berada di luar cakupan kalibrasi model. Pilih model dengan cakupan wilayah yang sesuai.", 422)
     requested = dataset_meta.get("selection_year") or dataset_meta.get("year")
     if isinstance(requested, int) and requested != info["reference_year"]:
         raise AnalysisError(f"Model dikalibrasi terhadap referensi {info['reference_year']}. Pilih tahun tersebut atau gunakan raster referensi langsung.", 422)

@@ -28,6 +28,8 @@ from app.services.gee_service import _init_from_key_file
 
 BBOX = [108.0, -8.3, 112.0, -6.0]
 ROOT = Path("var/training_runs/carbon_reference_20261009")
+DOMAIN = "java"
+PUBLISH = True
 
 
 def dump(path, value):
@@ -47,8 +49,12 @@ def sample_group(keys, year, count):
     if cache.exists():
         return json.loads(cache.read_text(encoding="utf-8"))
     region = ee.Geometry.Rectangle(BBOX, proj="EPSG:4326", geodesic=False)
-    names = FEATURES + (["s1_vv", "s1_vh"] if year >= 2015 else [])
+    # Keep the national models usable before Sentinel-1 became available.
+    names = FEATURES + (["s1_vv", "s1_vh"] if year >= 2015 and DOMAIN == "java" else [])
     stack = predictors(region, year, names).addBands(ee.Image.pixelLonLat())
+    if DOMAIN == "indonesia":
+        country = ee.FeatureCollection("FAO/GAUL/2015/level0").filter(ee.Filter.eq("ADM0_NAME", "Indonesia"))
+        stack = stack.clipToCollection(country)
     # Sampling predictor masks only prevents one dataset's missing values from
     # removing usable training data in other datasets. Sentinel nodata never trains.
     for key in keys:
@@ -142,9 +148,9 @@ def evaluate(frame, key, names):
 
 
 def deploy(key, year, clean, names, algorithm, estimator, score, all_scores, sample_scale):
-    slug = f"reference_{key.lower()}_{year}_{algorithm}_java_v1"
+    slug = f"reference_{key.lower()}_{year}_{algorithm}_{DOMAIN}_v1"
     settings = get_settings()
-    output = settings.model_path
+    output = settings.model_path if PUBLISH else ROOT / "candidates"
     output.mkdir(parents=True, exist_ok=True)
     trees = estimator.estimators_.ravel() if algorithm == "gradient_boosting" else estimator.estimators_
     artifact = {"algorithm": algorithm, "trees": [tree_string(tree, names) for tree in trees]}
@@ -181,23 +187,28 @@ def deploy(key, year, clean, names, algorithm, estimator, score, all_scores, sam
         "frozen_ensemble_file": artifact_path.name, "artifact_sha256": hashlib.sha256(artifact_path.read_bytes()).hexdigest(),
         "compatible_reference_datasets": [key], "target_dataset_key": key, "target_pool": meta["target_pool"],
         "target_unit": meta["unit"], "feature_names": names, "covariate_year": year, "reference_year": year,
-        "training_bbox": BBOX, "time_series_supported": False, "accuracy_status": "local_field_validation_required",
+        "training_bbox": BBOX, "training_domain": DOMAIN,
+        "training_country_mask": "FAO/GAUL/2015/level0:Indonesia" if DOMAIN == "indonesia" else None,
+        "time_series_supported": False, "accuracy_status": "local_field_validation_required",
         "preliminary": True, "training_mode": "reference_raster", "validation_type": "spatial_reference_holdout",
         "n_samples": len(clean), "validation_samples": len(clean), "spatial_block_degrees": 0.1,
         "validation_metrics": score, "candidate_metrics": all_scores, "sample_scale_m": sample_scale,
         "trained_at": datetime.now(UTC).isoformat(), "frozen_gee_parity_max_error": parity,
-        "description": "Frozen regional regression, calibrated to the reference raster in Java. Three spatial folds; not independently field validated. Baseline/year and training domain are enforced.",
+        "description": f"Frozen regression calibrated to the reference raster in {DOMAIN}. Three spatial folds; not independently field validated. Annual estimates transfer the reference-year relationship to the selected year's Landsat predictors; annual change accuracy is not established. Baseline/year and training domain are enforced.",
     }
     if key == "CHLORIS_AGB_STOCK":
         metadata.update(source_license="CC BY-NC-SA-4.0 (public Chloris reference)",
                         description="Regional model calibrated to PUBLIC Chloris 4633 m biomass, not the licensed high-resolution product. Non-commercial/share-alike reference license applies. Not independently field validated.")
     dump(output / f"{slug}.json", metadata)
+    if not PUBLISH:
+        return {"name": slug, "metrics": score, "parity_max_error": parity,
+                "candidate_artifact": str(artifact_path), "published": False}
     with SessionLocal() as db:
         row = db.query(UploadedModel).filter_by(name=slug).first()
         if row is None:
             row = UploadedModel(name=slug, model_type="carbon")
             db.add(row)
-        row.display_name = f"{algorithm.replace('_', ' ').title()} · {meta['name']} · Jawa {year}"
+        row.display_name = f"{algorithm.replace('_', ' ').title()} · {meta['name']} · {DOMAIN.title()} {year}"
         row.algorithm = algorithm
         row.filename = artifact_path.name
         row.filepath = str(artifact_path.resolve())
@@ -214,10 +225,21 @@ def deploy(key, year, clean, names, algorithm, estimator, score, all_scores, sam
 
 
 def main():
+    global BBOX, ROOT, DOMAIN, PUBLISH
     parser = argparse.ArgumentParser()
     parser.add_argument("--samples", type=int, default=1800)
     parser.add_argument("--keys", nargs="*")
+    parser.add_argument("--domain", choices=["java", "indonesia"], default="java")
+    parser.add_argument("--dry-run", action="store_true", help="Write validated candidate artifacts only; do not register or activate models.")
+    parser.add_argument("--publish-national", action="store_true", help="Explicitly register new national models after review.")
     args = parser.parse_args()
+    if args.domain == "indonesia" and not args.dry_run and not args.publish_national:
+        parser.error("National models require --dry-run or explicit --publish-national after candidate review.")
+    DOMAIN = args.domain
+    PUBLISH = not args.dry_run
+    if DOMAIN == "indonesia":
+        BBOX = [94.0, -12.0, 142.0, 7.0]
+        ROOT = Path("var/training_runs/carbon_reference_indonesia_v1_country")
     settings = get_settings()
     _init_from_key_file(settings.gee_service_account, settings.gee_key_file)
     ee.data.setDeadline(120000)
@@ -264,8 +286,8 @@ def main():
                 if key in {"CTREES_AGB_100M", "ESA_CCI_BIOMASS_V7_COG", "GEDI_L4D"}:
                     algorithms = list(dict.fromkeys([best] + [a for a in ("random_forest", "gradient_boosting") if scores[a]["r2"] > 0]))
                 deployed = [deploy(key, year, clean, sampled["feature_names"], a, candidates[a], scores[a], scores, sampled["scale"]) for a in algorithms]
-                report["datasets"][key] = {"status": "deployed_local", "n_samples": len(clean), "candidates": scores, "models": deployed}
-                print(key, len(clean), best, round(scores[best]["r2"], 3), "deployed", len(deployed), flush=True)
+                report["datasets"][key] = {"status": "deployed_local" if PUBLISH else "candidate_only", "n_samples": len(clean), "candidates": scores, "models": deployed}
+                print(key, len(clean), best, round(scores[best]["r2"], 3), "deployed" if PUBLISH else "candidate only", len(deployed), flush=True)
             except Exception as exc:
                 report["datasets"][key] = {"status": "failed", "error": str(exc)}
                 print(key, "FAILED", str(exc), flush=True)

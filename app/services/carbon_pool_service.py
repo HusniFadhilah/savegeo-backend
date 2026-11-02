@@ -155,7 +155,7 @@ def analyze_carbon_pool(db, data):
             image, extras = _random_forest(reference, calculation_roi, meta, model, analysis_year)
     scale = max(int(meta["resolution"]), int(data.get("scale") or meta["resolution"]))
     simple_baseline = bool(data.get("simple_mode") and not model)
-    if simple_baseline:
+    if data.get("simple_mode"):
         bounds_area = calculation_roi.bounds(maxError=100).area(maxError=100).getInfo()
         scale = summary_scale(scale, bounds_area, defaults["max_pixels"])
     vis = {"min": meta.get("vis_min", defaults["carbon_vis_min"]),
@@ -165,7 +165,18 @@ def analyze_carbon_pool(db, data):
     area_info = {"calculation_mode": "clipped_aoi" if clipped else "full_tiles", "total_carbon_tons": None,
                  "carbon_dioxide_equivalent_tons": None, "description": meta["description"]}
     coverage = None
-    if not data.get("load_only"):
+    annual_identity = None
+    saved_summary = None
+    if annual_model and method == "saved_reference_ensemble" and not data.get("load_only"):
+        from app.services.carbon_annual_store import estimate_identity, load_summary
+
+        annual_identity = estimate_identity(data, model, analysis_year, source_year, scale)
+        saved_summary = load_summary(db, annual_identity[0])
+    if saved_summary:
+        stats = saved_summary["statistics"]
+        area_info = saved_summary["area_info"]
+        coverage = saved_summary["coverage"]
+    elif not data.get("load_only"):
         display = image.clip(calculation_roi)
         pixel_ha = ee.Image.pixelArea().divide(10000).updateMask(display.mask()).rename("valid_area")
         bands = display.addBands(pixel_ha)
@@ -183,8 +194,8 @@ def analyze_carbon_pool(db, data):
         coverage = min(100, raw["valid_area_sum"] / raw["aoi_area"] * 100) if raw["aoi_area"] else None
         area_info.update(calculation_area_ha=raw["aoi_area"], area_ha=raw["aoi_area"], valid_area_ha=raw["valid_area_sum"],
                          total_carbon_tons=total, carbon_dioxide_equivalent_tons=total * defaults["carbon_co2_factor"] if total is not None else None)
-        if data.get("auto_vis") and stats["max"] > stats["min"]:
-            vis.update(min=stats["min"], max=stats["max"])
+    if data.get("auto_vis") and stats and stats["max"] > stats["min"]:
+        vis.update(min=stats["min"], max=stats["max"])
     display = image.clip(calculation_roi)
     tile = display.getMapId(vis)["tile_fetcher"].url_format
     if external:
@@ -226,4 +237,17 @@ def analyze_carbon_pool(db, data):
         result["carbon_uncertainty"] = {"tile_url": uncertainty.getMapId(uncertainty_vis)["tile_fetcher"].url_format,
                                         "unit": meta["unit"], "vis_params": uncertainty_vis, "uncertainty_type": "reference_standard_error",
                                         "description": "Standard error raster referensi NASA/ORNL; bukan interval kepercayaan model RF/IPCC."}
+    if annual_identity:
+        from app.services.carbon_annual_store import save_summary
+
+        persisted = bool(saved_summary)
+        if not saved_summary:
+            persisted = save_summary(db, annual_identity, data, model, analysis_year, source_year,
+                                     {"statistics": stats, "area_info": area_info, "coverage": coverage})
+        result["model_info"].update(
+            annual_summary_source="database" if saved_summary else "computed",
+            annual_summary_key=annual_identity[0],
+            annual_summary_persisted=persisted,
+            observed_through=annual_identity[2].isoformat(),
+        )
     return result

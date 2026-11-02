@@ -269,6 +269,10 @@ def _complete_cached_job(
     viewer: object,
 ) -> dict[str, Any]:
     """Materialize a normal, pollable job from a cached result."""
+    result = json.loads(json.dumps(result))
+    info = result.get("model_info", {})
+    if job_type == "carbon" and info.get("annual_summary_persisted"):
+        info["annual_summary_source"] = "database"
     job_id = str(uuid.uuid4())
     now = datetime.now(UTC)
     provenance_service.create_analysis_provenance(
