@@ -322,7 +322,7 @@ def _run_job(
         started_at=datetime.now(UTC),
     )
     try:
-        if job_type in {"vegetation", "landcover", "landcover_change"}:
+        if job_type in {"vegetation", "landcover", "landcover_change", "landcover_transition", "landcover_change_map", "landcover_hotspots", "landcover_fusion"}:
             payload = resolve_known_aoi(payload)
         if job_type == "carbon":
             result = run_carbon_with_retry(

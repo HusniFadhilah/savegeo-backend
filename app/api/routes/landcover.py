@@ -11,6 +11,7 @@ from app.core.security import get_current_app_viewer
 from app.core.viewer_features import require_feature
 from app.services import landcover_fusion_service, landcover_service
 from app.services.gee_common import AnalysisError, public_analysis_error
+from app.services.aoi_reference import resolve_known_aoi
 
 router = APIRouter(tags=["landcover"], dependencies=[Depends(get_current_app_viewer)])
 logger = logging.getLogger(__name__)
@@ -112,7 +113,7 @@ async def analyze_landcover_change_map(request: Request):
 async def identify_landcover(request: Request):
     data = await request.json()
     try:
-        return landcover_service.identify_landcover_point(data)
+        return landcover_service.identify_landcover_point(resolve_known_aoi(data))
     except AnalysisError as e:
         raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
     except ee.EEException:

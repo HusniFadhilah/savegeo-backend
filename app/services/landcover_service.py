@@ -847,6 +847,7 @@ def analyze_landcover_transition(data: dict) -> dict:
 
     aoi = create_geometry_from_payload(data["aoi"])
     years = sorted(set(int(year) for year in data.get("years", [start_year, end_year] if "from_year" in data else list(range(start_year, end_year + 1)))))
+    lc_scale = landcover_statistics_scale(float(aoi.area(maxError=100).getInfo()), lc_scale, int(settings.max_pixels))
     if not 2 <= len(years) <= 50:
         raise AnalysisError("Pilih 2–50 tahun berbeda untuk transisi.", 400)
     images = {}
@@ -859,6 +860,7 @@ def analyze_landcover_transition(data: dict) -> dict:
             dw_probability_threshold=data.get("confidence_threshold", dw_probability_threshold),
             start_date=data.get(f"{prefix}_start_date") if prefix else None,
             end_date=data.get(f"{prefix}_end_date") if prefix else None,
+            include_diagnostics=False,
         )
         images[year] = image
         metadata[year] = meta
@@ -1014,6 +1016,7 @@ def analyze_landcover_change_map(data: dict) -> dict:
     # "Mode Tanggal Analisis: Tanggal" - explicit day-level window (Dynamic
     # World only; other datasets ignore it and use the full from_year/to_year
     # regardless, same as get_landcover_image's month-range handling).
+    lc_scale = landcover_statistics_scale(float(aoi.area(maxError=100).getInfo()), lc_scale, int(settings.max_pixels))
     from_start = data.get("from_start_date")
     from_end = data.get("from_end_date")
     to_start = data.get("to_start_date")
@@ -1025,22 +1028,26 @@ def analyze_landcover_change_map(data: dict) -> dict:
             dataset, from_year, aoi,
             start_date=from_start, end_date=from_end,
             dw_probability_threshold=dw_probability_threshold,
+            include_diagnostics=False,
         )
         to_image, to_meta = get_landcover_image(
             dataset, to_year, aoi,
             start_date=to_start, end_date=to_end,
             dw_probability_threshold=dw_probability_threshold,
+            include_diagnostics=False,
         )
     elif explicit_start and explicit_end:
         from_image, from_meta = get_landcover_image(
             dataset, from_year, aoi,
             start_date=_reyear_date(explicit_start, from_year), end_date=_reyear_date(explicit_end, from_year),
             dw_probability_threshold=dw_probability_threshold,
+            include_diagnostics=False,
         )
         to_image, to_meta = get_landcover_image(
             dataset, to_year, aoi,
             start_date=_reyear_date(explicit_start, to_year), end_date=_reyear_date(explicit_end, to_year),
             dw_probability_threshold=dw_probability_threshold,
+            include_diagnostics=False,
         )
     else:
         from_image, from_meta = get_landcover_image(
@@ -1050,6 +1057,7 @@ def analyze_landcover_change_map(data: dict) -> dict:
             start_month,
             end_month,
             dw_probability_threshold=dw_probability_threshold,
+            include_diagnostics=False,
         )
         to_image, to_meta = get_landcover_image(
             dataset,
@@ -1058,6 +1066,7 @@ def analyze_landcover_change_map(data: dict) -> dict:
             start_month,
             end_month,
             dw_probability_threshold=dw_probability_threshold,
+            include_diagnostics=False,
         )
 
     from_image, to_image = _comparison_grid(from_image, to_image, from_meta, to_meta, lc_scale, bool(data.get("include_improbable_classes", False)))

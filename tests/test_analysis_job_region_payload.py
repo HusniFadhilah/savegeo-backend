@@ -6,7 +6,7 @@ from app.api.routes import analysis_jobs
 from app.services.aoi_reference import resolve_region_aoi
 
 
-@pytest.mark.parametrize("kind", ["vegetation", "landcover", "landcover_change"])
+@pytest.mark.parametrize("kind", ["vegetation", "landcover", "landcover_change", "landcover_transition", "landcover_change_map", "landcover_hotspots", "landcover_fusion"])
 def test_analysis_worker_resolves_exact_boundary_before_computing(monkeypatch, kind):
     geometry = {"type": "Polygon", "coordinates": [
         [[95, 3], [97, 3], [97, 5], [95, 3]],
@@ -25,6 +25,10 @@ def test_analysis_worker_resolves_exact_boundary_before_computing(monkeypatch, k
     service = MagicMock(return_value={"tile_url": "/test-tile", "statistics": {"mean": 0.5}})
     if kind == "vegetation":
         monkeypatch.setattr(analysis_jobs.vegetation_service, "analyze_vegetation", service)
+    elif kind == "landcover_fusion":
+        monkeypatch.setattr(analysis_jobs.landcover_fusion_service, "analyze_landcover_fusion", service)
+    elif kind in {"landcover_transition", "landcover_change_map", "landcover_hotspots"}:
+        monkeypatch.setattr(analysis_jobs.landcover_service, f"analyze_{kind}", service)
     else:
         monkeypatch.setattr(analysis_jobs.landcover_service, "analyze_landcover", service)
     analysis_jobs._run_job("test-region-job", kind, payload)
