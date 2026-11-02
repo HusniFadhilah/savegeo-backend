@@ -30,8 +30,10 @@ def mask_indonesia_snow_ice(label_image):
 
     # Clip-based masks keep these vector boundaries at the requested output
     # scale, even when a collection reduction has a coarse default projection.
-    indonesia_mask = ee.Image.constant(1).clip(indonesia).unmask(0)
-    puncak_mask = ee.Image.constant(1).clip(puncak_jaya).unmask(0)
+    # Boolean operands must also be valid outside their clipped footprints.
+    # Otherwise the Puncak Jaya exception masks every other Indonesian AOI.
+    indonesia_mask = ee.Image.constant(1).clip(indonesia).unmask(0, False)
+    puncak_mask = ee.Image.constant(1).clip(puncak_jaya).unmask(0, False)
     keep_pixel = (
         label_image.neq(SNOW_ICE_CLASS_ID)
         .Or(indonesia_mask.eq(0))
