@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from pydantic import BaseModel
+from app.schemas.profile import FullNameFields
 
 
 class LoginRequest(BaseModel):
@@ -15,7 +16,7 @@ class ChangePasswordRequest(BaseModel):
     new_password: str
 
 
-class AdminProfileUpdateRequest(BaseModel):
+class AdminProfileUpdateRequest(FullNameFields):
     username: str
     email: str | None = None
 
@@ -76,7 +77,7 @@ class ModelUpdateRequest(BaseModel):
     metadata_json: dict | None = None
 
 
-class AdminUserCreateRequest(BaseModel):
+class AdminUserCreateRequest(FullNameFields):
     username: str
     password: str
     email: str | None = None
@@ -84,7 +85,7 @@ class AdminUserCreateRequest(BaseModel):
     is_active: bool = True
 
 
-class AdminUserUpdateRequest(BaseModel):
+class AdminUserUpdateRequest(FullNameFields):
     email: str | None = None
     is_active: bool | None = None
     role_id: int | None = None

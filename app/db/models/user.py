@@ -22,6 +22,7 @@ class User(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     username: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    full_name: Mapped[str | None] = mapped_column(String(160))
     email: Mapped[str] = mapped_column(String(128), unique=True, nullable=False, index=True)
     password_hash: Mapped[str] = mapped_column(String(256), nullable=False)
     session_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
@@ -33,6 +34,7 @@ class User(Base):
         return {
             "id": self.id,
             "username": self.username,
+            "full_name": self.full_name,
             "email": self.email,
             "is_active": self.is_active,
             "created_at": self.created_at.isoformat() if self.created_at else None,

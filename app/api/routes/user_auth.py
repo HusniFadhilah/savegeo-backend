@@ -30,6 +30,7 @@ from app.core.security import (
 from app.db.models.user import User
 from app.db.session import get_db
 from app.schemas.user import PasswordForgotRequest, PasswordResetRequest, UserLoginRequest, UserRegisterRequest
+from app.schemas.profile import FullNameFields
 from app.services.email_service import EmailDeliveryError, send_password_reset_email
 
 router = APIRouter(prefix="/auth", tags=["user-auth"])
@@ -50,6 +51,7 @@ def register(payload: UserRegisterRequest, response: Response, db: Session = Dep
 
     user = User(
         username=payload.username,
+        full_name=payload.full_name,
         email=payload.email,
         password_hash=hash_password(payload.password),
     )
@@ -84,6 +86,15 @@ def logout(response: Response, user: User = Depends(get_current_user), db: Sessi
 @router.get("/me")
 def me(user: User = Depends(get_current_user)):
     return user.to_dict()
+
+
+@router.put("/profile")
+def update_profile(payload: FullNameFields, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if "full_name" in payload.model_fields_set:
+        user.full_name = payload.full_name
+    db.commit()
+    db.refresh(user)
+    return {"message": "Profil berhasil diperbarui", "user": user.to_dict()}
 
 
 @router.post("/forgot-password")

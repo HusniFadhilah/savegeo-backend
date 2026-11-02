@@ -7,9 +7,10 @@ min-length is checked in the route, same convention as `admin.py`'s
 from __future__ import annotations
 
 from pydantic import BaseModel
+from app.schemas.profile import FullNameFields
 
 
-class UserRegisterRequest(BaseModel):
+class UserRegisterRequest(FullNameFields):
     username: str
     email: str
     password: str

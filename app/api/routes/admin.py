@@ -56,6 +56,7 @@ from app.registries.satellite_provider_registry import SATELLITE_PROVIDERS
 from app.repositories.satellite_provider_repo import apply_override, get_overrides_by_key
 from app.repositories import imagery_provider_repo
 from app.repositories.uploaded_model_repo import ALLOWED_MODEL_EXTS, import_legacy_models
+from app.schemas.profile import FullNameFields
 from app.schemas.admin import (
     AdminProfileUpdateRequest,
     AdminUserCreateRequest,
@@ -159,6 +160,19 @@ def me(admin: AdminUser = Depends(get_current_admin)):
     return admin.to_dict()
 
 
+@router.put("/auth/name")
+def update_own_name(
+    payload: FullNameFields,
+    admin: AdminUser = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    if "full_name" in payload.model_fields_set:
+        admin.full_name = payload.full_name
+    db.commit()
+    db.refresh(admin)
+    return {"message": "Profil berhasil diperbarui", "user": admin.to_dict()}
+
+
 @router.put("/auth/profile")
 def update_admin_profile(
     payload: AdminProfileUpdateRequest,
@@ -181,6 +195,8 @@ def update_admin_profile(
 
     admin.username = username
     admin.email = email
+    if "full_name" in payload.model_fields_set:
+        admin.full_name = payload.full_name
     try:
         db.commit()
     except IntegrityError as exc:
@@ -759,7 +775,7 @@ def admin_users_list(request: Request, admin: AdminUser = Depends(require_permis
             request,
             query,
             row_mapper=lambda u: u.to_dict(),
-            searchable_columns=[AdminUser.username, AdminUser.email],
+            searchable_columns=[AdminUser.username, AdminUser.full_name, AdminUser.email],
         )
 
     users = query.all()
@@ -783,6 +799,7 @@ def admin_user_create(
 
     new_user = AdminUser(
         username=payload.username,
+        full_name=payload.full_name,
         email=payload.email,
         password_hash=hash_password(payload.password),
         is_active=payload.is_active,
@@ -818,6 +835,9 @@ def admin_user_update(
         raise HTTPException(status_code=400, detail="Cannot deactivate your own account")
 
     changes = {}
+    if "full_name" in payload.model_fields_set:
+        target.full_name = payload.full_name
+        changes["full_name"] = payload.full_name
     if payload.email is not None:
         target.email = payload.email
         changes["email"] = payload.email

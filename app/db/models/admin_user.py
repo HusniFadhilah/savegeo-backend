@@ -21,6 +21,7 @@ class AdminUser(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     username: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    full_name: Mapped[str | None] = mapped_column(String(160))
     email: Mapped[str | None] = mapped_column(String(128), unique=True)
     password_hash: Mapped[str] = mapped_column(String(256), nullable=False)
     session_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
@@ -40,6 +41,7 @@ class AdminUser(Base):
         return {
             "id": self.id,
             "username": self.username,
+            "full_name": self.full_name,
             "email": self.email,
             "is_active": self.is_active,
             "role": self.role.name if self.role else None,
