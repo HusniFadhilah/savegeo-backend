@@ -29,3 +29,24 @@ def test_both_periods_use_one_bounded_comparison_grid(monkeypatch, operation, ar
     assert [c.args[1] for c in load.call_args_list] == [2015, 2016]
     assert all(c.kwargs["include_diagnostics"] is False for c in load.call_args_list)
     assert all(c.kwargs["dw_probability_threshold"] == 0.5 for c in load.call_args_list)
+
+
+@pytest.mark.parametrize("force", [True, False])
+def test_statistics_force_the_grid_but_map_tiles_use_a_flexible_pyramid(monkeypatch, force):
+    before, after = MagicMock(), MagicMock()
+    for image in (before, after):
+        image.toInt32.return_value = image
+        image.reproject.return_value = image
+        image.setDefaultProjection.return_value = image
+        image.updateMask.return_value = image
+    ee = MagicMock()
+    monkeypatch.setattr(service, "ee", ee)
+    service._comparison_grid(before, after, {"year": 2015, "dataset": "Dynamic_World"},
+                             {"year": 2026, "dataset": "Dynamic_World"}, 310, force_grid=force)
+    for image in (before, after):
+        if force:
+            image.reproject.assert_called_once()
+            image.setDefaultProjection.assert_not_called()
+        else:
+            image.reproject.assert_not_called()
+            image.setDefaultProjection.assert_called_once()

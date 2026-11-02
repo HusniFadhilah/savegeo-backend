@@ -617,15 +617,25 @@ def get_landcover_image(
     return image.updateMask(valid).rename("landcover"), metadata
 
 
-def _comparison_grid(from_image, to_image, from_meta: dict, to_meta: dict, scale: int, include_improbable_classes: bool = False):
+def _comparison_grid(from_image, to_image, from_meta: dict, to_meta: dict, scale: int, include_improbable_classes: bool = False, *, force_grid: bool = True):
     if (from_meta.get("year"), from_meta.get("date_range")) == (to_meta.get("year"), to_meta.get("date_range")):
         raise AnalysisError("Dua periode memakai raster tahun efektif yang sama. Pilih dua tahun/periode yang tersedia dan berbeda.", 422)
     for field in ("class_schema", "model_version", "collection_version"):
         if from_meta.get(field) != to_meta.get(field):
             raise AnalysisError(f"Versi/schema model berbeda ({field}); gunakan satu versi model untuk kedua periode.", 422)
     projection = ee.Projection(LC_EQUAL_AREA_CRS).atScale(scale)
-    before = from_image.toInt32().reproject(projection)
-    after = to_image.toInt32().reproject(projection)
+    before = from_image.toInt32()
+    after = to_image.toInt32()
+    if force_grid:
+        before = before.reproject(projection)
+        after = after.reproject(projection)
+    else:
+        # A map tile at low zoom spans a very large area. Forcing all temporal
+        # inputs onto the statistics grid here exhausts EE's tile memory.
+        # Keep a common default grid while allowing the map pyramid to select
+        # an appropriate display scale. Statistics keep the forced grid.
+        before = before.setDefaultProjection(projection)
+        after = after.setDefaultProjection(projection)
     codes = [int(code) for code, value in LAND_COVER_LEGENDS[from_meta["dataset"]].items() if not should_skip_lulc_class(value["label"], include_improbable_classes)]
     before = before.updateMask(before.remap(codes, [1] * len(codes), 0))
     after = after.updateMask(after.remap(codes, [1] * len(codes), 0))
@@ -1069,10 +1079,10 @@ def analyze_landcover_change_map(data: dict) -> dict:
             include_diagnostics=False,
         )
 
+    source_from, source_to = from_image, to_image
     from_image, to_image = _comparison_grid(from_image, to_image, from_meta, to_meta, lc_scale, bool(data.get("include_improbable_classes", False)))
     changed = from_image.neq(to_image).rename("changed").selfMask().clip(aoi)
     stable = from_image.eq(to_image).rename("stable").selfMask().clip(aoi)
-    to_changed = to_image.updateMask(changed).clip(aoi)
 
     area_ha = ee.Image.pixelArea().divide(10000)
     changed_area = area_ha.updateMask(changed).reduceRegion(
@@ -1094,21 +1104,27 @@ def analyze_landcover_change_map(data: dict) -> dict:
         tileScale=4,
     ).getInfo()
 
+    display_from, display_to = _comparison_grid(
+        source_from, source_to, from_meta, to_meta, lc_scale,
+        bool(data.get("include_improbable_classes", False)), force_grid=False,
+    )
+    display_changed = display_from.neq(display_to).selfMask().clip(aoi)
+    display_destination = display_to.updateMask(display_changed).clip(aoi)
     change_tile = get_tile_url(
-        changed,
+        display_changed,
         {"min": 1, "max": 1, "palette": ["ff1744"]},
         "Changed area",
     )
     destination_tile = get_tile_url(
-        *landcover_visual_image(dataset, to_changed),
+        *landcover_visual_image(dataset, display_destination),
         "Changed pixels by destination class",
     )
     from_tile = get_tile_url(
-        *landcover_visual_image(dataset, from_image),
+        *landcover_visual_image(dataset, display_from.clip(aoi)),
         "Land cover from year",
     )
     to_tile = get_tile_url(
-        *landcover_visual_image(dataset, to_image),
+        *landcover_visual_image(dataset, display_to.clip(aoi)),
         "Land cover to year",
     )
 
