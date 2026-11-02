@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import itertools
 import logging
+import math
 from datetime import UTC, date, datetime, timedelta
 
 import ee
@@ -45,6 +46,17 @@ logger = logging.getLogger(__name__)
 # EE's projection database does not recognize EPSG:6933 by code. Its WKT
 # definition uses the identical global equal-area grid and parses in EE.
 LC_EQUAL_AREA_CRS = CRS.from_epsg(6933).to_wkt(version="WKT1_GDAL")
+
+
+def landcover_statistics_scale(area_m2: float, requested_scale: int, max_pixels: int) -> int:
+    """Bound broad-area reductions while keeping ordinary AOIs at requested scale."""
+    if not math.isfinite(area_m2) or area_m2 <= 0 or requested_scale <= 0 or max_pixels <= 0:
+        raise AnalysisError("Luas AOI atau skala statistik tidak valid.", 422)
+    if area_m2 / requested_scale**2 <= min(max_pixels, 50_000_000):
+        return requested_scale
+    budget = min(max_pixels, 5_000_000)
+    minimum = math.sqrt(area_m2 / budget)
+    return max(requested_scale, math.ceil(minimum / requested_scale) * requested_scale)
 
 # Legacy defaults (env-var backed in Flask; no DB-backed system_config override
 # ported yet, so these mirror `os.getenv("DEFAULT_YEAR_MIN", 2015)` /
@@ -288,6 +300,7 @@ def _load_landcover_image(
     start_date: str | None = None,
     end_date: str | None = None,
     include_diagnostics: bool = True,
+    statistics_scale: int | None = None,
 ):
     """Return a single class-label image and effective metadata for a LULC dataset.
 
@@ -349,7 +362,7 @@ def _load_landcover_image(
             "classification_backend": "Dynamic_World",
             "regional_class_rule": indonesia_snow_ice_note(),
             "dw_probability_threshold": dw_probability_threshold,
-            "confidence": _dw_confidence_stats(dw, aoi, LAND_COVER_NATIVE_SCALE.get(dataset, 30), dw_probability_threshold) if include_diagnostics else None,
+            "confidence": _dw_confidence_stats(dw, aoi, statistics_scale or LAND_COVER_NATIVE_SCALE.get(dataset, 30), dw_probability_threshold) if include_diagnostics else None,
             "coverage_note": _dw_coverage_note(dw_start_date, display_end_date or dw_end_date, _dw_size),
         }
 
@@ -561,6 +574,7 @@ def get_landcover_image(
     dataset: str, year: int, aoi, start_month: int = 1, end_month: int = 12,
     dw_probability_threshold: float | None = None, start_date: str | None = None,
     end_date: str | None = None, include_diagnostics: bool = True,
+    statistics_scale: int | None = None,
 ):
     """One categorical image contract for datasets, classifiers, and model assets."""
     from app.services.landcover_model_service import MODEL_KEYS, get_model_image, refresh_model_catalog
@@ -585,6 +599,7 @@ def get_landcover_image(
         image, metadata = _load_landcover_image(
             analysis_dataset, year, aoi, start_month, end_month,
             dw_probability_threshold, start_date, end_date, include_diagnostics,
+            **({"statistics_scale": statistics_scale} if statistics_scale is not None else {}),
         )
         metadata = {**metadata, "dataset": dataset}
         if analysis_dataset != dataset:
@@ -731,6 +746,7 @@ def analyze_landcover(data: dict) -> dict:
     if not isinstance(datasets, list) or not 1 <= len(datasets) <= 12:
         raise AnalysisError("Pilih 1–12 dataset land cover.", 400)
     aoi = create_geometry_from_payload(data["aoi"])
+    area_m2 = float(aoi.area(maxError=100).getInfo())
     start, end = data.get("start_date"), data.get("end_date")
     year = int(data.get("year", datetime.now(UTC).year))
     if start and end:
@@ -750,12 +766,18 @@ def analyze_landcover(data: dict) -> dict:
             if info.get("provider_type", "").startswith("arcgis") and not info.get("analysis_dataset"):
                 results[dataset] = compute_arcgis_landcover_summary(dataset, info, data["aoi"], year)
                 continue
+            native_scale = LAND_COVER_NATIVE_SCALE.get(dataset, 30)
+            requested_scale = max(int(data.get("scale", native_scale)), native_scale)
+            scale = landcover_statistics_scale(area_m2, requested_scale, int(get_settings().max_pixels))
             image, metadata = get_landcover_image(
                 dataset, year, aoi, start_month, end_month,
                 dw_probability_threshold=data.get("confidence_threshold", data.get("dw_probability_threshold")),
                 start_date=start, end_date=end,
+                statistics_scale=scale,
             )
-            scale = max(int(data.get("scale", LAND_COVER_NATIVE_SCALE.get(dataset, 30))), LAND_COVER_NATIVE_SCALE.get(dataset, 30))
+            if scale > requested_scale:
+                note = f"Statistik AOI besar dihitung pada grid {scale} m; peta tetap memakai resolusi sumber {native_scale} m."
+                metadata["quality_note"] = " ".join(filter(None, [metadata.get("quality_note"), note]))
             summary = summarize_landcover_image(dataset, image, aoi, scale, metadata, bool(data.get("include_improbable_classes", False)))
             if not summary:
                 raise AnalysisError("Tidak ada piksel kelas valid pada AOI/periode.", 404)
