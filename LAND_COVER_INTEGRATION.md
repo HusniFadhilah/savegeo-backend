@@ -78,14 +78,38 @@ tab **Fusi Optik-SAR**) computes per pixel and period:
 - `Q_s = V_s x S_s x A_s`: valid Sentinel-1 IW VV+VH observation exists,
   `1 - CV` of speckle-filtered linear VV in a 30 m window, and count / 2.
 
+A source passes only with at least one valid observation (`Q > 0`) and
+`Q >= q_min`, so `q_min = 0` never classifies a pixel without data.
+
 `routing` picks the joint, optical-only or SAR-only Random Forest per pixel
-from `q_min` (no-data when both fail); `weighted` blends optical and SAR class
-probabilities by `Q_o`/`Q_s`. The three classifiers share one MapBiomas 4.1
-sample table. Change uses the total-variation distance
-`D = 1/2 sum_k |P_t0,k - P_t1,k|`; a pixel changes only when `D >= tau_change`
-(default 0.2), the top classes differ and both periods pass `q_min`. Label flips
-below `tau_change` are reported as `suppressed_change_area_ha`. The scores are
-input-fitness indicators, not accuracy, and RF vote shares are not calibrated.
+from `q_min` (no-data when both fail) and builds each period's land-cover map;
+`weighted` blends optical and SAR class probabilities with the weights of the
+sources that pass `q_min`. The three classifiers share one MapBiomas 4.1
+sample table.
+
+Change is decided on a **common path** chosen from both periods at once: joint
+when optical and SAR both pass in t0 and t1, optical or SAR when only that one
+source passes in both periods, otherwise no data. The same classifier gives
+`P(t0)` and `P(t1)` (weighted mode uses `min` of the two periods' scores as
+weights), so a model switch between periods is never read as change. Change
+uses the total-variation distance `D = 1/2 sum_k |P_t0,k - P_t1,k|`; a pixel
+changes only when `D >= tau_change` (default 0.2), the top classes differ and
+the common path exists. Label flips below `tau_change` are reported as
+`suppressed_change_area_ha`; `route_switch_area_ha` and
+`per_period_changed_area_ha` show what per-period routing alone would have
+called change. Only pixels inside the MapBiomas Indonesia 4.1 coverage are
+classified.
+
+An optional `event` (`flood_sar` with `pre_date`/`post_date`, or `geometry`)
+restricts statistics to an event extent. The flood extent compares VV
+water masks of two 11-day windows from the **same pass direction and relative
+orbit** (404 when no shared orbit exists). It returns the valid change inside
+the extent and the class areas at t0 and t1 inside it. Event results are
+spatial indicators, not damage assessments.
+
+The scores are input-fitness indicators, not accuracy, and RF vote shares are
+not calibrated. `tests/test_landcover_fusion_rules.py` (set `RUN_GEE_LIVE=1`)
+checks the rule table on synthetic images.
 
 ## Admin and durable classifiers
 

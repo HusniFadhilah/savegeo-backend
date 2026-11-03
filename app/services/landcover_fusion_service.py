@@ -194,7 +194,7 @@ def period_inputs(aoi, start: str, end: str, *, optical_reference_count: int = 3
         primary=ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED").filterBounds(aoi).filterDate(start, end),
         secondary=ee.ImageCollection("COPERNICUS/S2_CLOUD_PROBABILITY").filterBounds(aoi).filterDate(start, end),
         condition=ee.Filter.equals(leftField="system:index", rightField="system:index"),
-    ))
+    )).filter(ee.Filter.notNull(["cloud_probability"]))
     s1 = (
         ee.ImageCollection("COPERNICUS/S1_GRD")
         .filterBounds(aoi).filterDate(start, end)
@@ -339,8 +339,13 @@ def get_classifiers(training_year: int = 2024, points_per_class: int = 40, trees
 # Fusion
 # --------------------------------------------------------------------------
 
+def passes(quality, q_min: float):
+    """A source passes only with at least one valid observation (Q > 0) and Q >= q_min."""
+    return quality.gt(0).And(quality.gte(q_min))
+
+
 def route_image(q_o, q_s, q_min: float):
-    optical_ok, sar_ok = q_o.gte(q_min), q_s.gte(q_min)
+    optical_ok, sar_ok = passes(q_o, q_min), passes(q_s, q_min)
     return (
         ee.Image(0)
         .where(optical_ok.And(sar_ok.Not()), 1)
@@ -365,10 +370,12 @@ def fuse_period(inputs: dict, classifiers: dict, class_codes: list[int], params:
             .where(route.eq(2), probabilities("sar"))
         )
     else:
+        w_o = q_o.multiply(passes(q_o, params["q_min"]))
+        w_s = q_s.multiply(passes(q_s, params["q_min"]))
         prob = (
-            probabilities("optical").multiply(q_o)
-            .add(probabilities("sar").multiply(q_s))
-            .divide(q_o.add(q_s).max(_EPS))
+            probabilities("optical").multiply(w_o)
+            .add(probabilities("sar").multiply(w_s))
+            .divide(w_o.add(w_s).max(_EPS))
         )
     footprint = ee.Image(MAPBIOMAS_41_ASSET).select("classification_2024").mask().gt(0)
     valid = route.gt(0).And(footprint)
@@ -391,8 +398,8 @@ def fuse_period(inputs: dict, classifiers: dict, class_codes: list[int], params:
 def common_basis(f0: dict, f1: dict, class_codes: list[int], params: dict, aoi) -> dict:
     """Probability vectors for t0 and t1 produced by the *same* model per pixel."""
     q = params["q_min"]
-    optical_both = f0["q_o"].gte(q).And(f1["q_o"].gte(q))
-    sar_both = f0["q_s"].gte(q).And(f1["q_s"].gte(q))
+    optical_both = passes(f0["q_o"], q).And(passes(f1["q_o"], q))
+    sar_both = passes(f0["q_s"], q).And(passes(f1["q_s"], q))
     path = route_image(f0["q_o"].min(f1["q_o"]), f0["q_s"].min(f1["q_s"]), q).rename("common_path")
     if params["fusion_mode"] == "routing":
         def pick(f):
@@ -429,9 +436,50 @@ def event_mask(event: dict | None, aoi):
     if event["type"] == "geometry":
         geometry = create_geometry_from_payload({"geojson": event["geojson"]})
         return ee.Image(0).paint(ee.FeatureCollection([ee.Feature(geometry)]), 1).clip(aoi).rename("event")
-    from app.services.disaster_analysis_service import flood_water_masks
-    pre_water, post_water = flood_water_masks(aoi, event["pre_date"], event["post_date"])
-    return post_water.And(pre_water.Not()).unmask(0).clip(aoi).rename("event")
+    pre_water, post_water, valid = sar_water_pair(aoi, event["pre_date"], event["post_date"])
+    return post_water.And(pre_water.Not()).And(valid).unmask(0).clip(aoi).rename("event")
+
+
+_EVENT_WINDOW_DAYS = 5
+_WATER_THRESHOLD_DB = -16.0
+
+
+def _event_collection(aoi, centre: date):
+    start = (centre - timedelta(days=_EVENT_WINDOW_DAYS)).isoformat()
+    end = (centre + timedelta(days=_EVENT_WINDOW_DAYS + 1)).isoformat()
+    return (
+        ee.ImageCollection("COPERNICUS/S1_GRD").filterBounds(aoi).filterDate(start, end)
+        .filter(ee.Filter.eq("instrumentMode", "IW"))
+        .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VV"))
+    )
+
+
+def sar_water_pair(aoi, pre_date: date, post_date: date):
+    """Water masks (VV below threshold) of two dates from the *same* pass direction and relative orbit.
+
+    A shared threshold is only meaningful when both windows come from one geometry, so the pair is
+    restricted to an orbit present in both windows; none present is an error, not a silent fallback.
+    """
+    pre, post = _event_collection(aoi, pre_date), _event_collection(aoi, post_date)
+    keys = ee.Dictionary({
+        "pre": pre.aggregate_array("orbitProperties_pass").zip(pre.aggregate_array("relativeOrbitNumber_start")),
+        "post": post.aggregate_array("orbitProperties_pass").zip(post.aggregate_array("relativeOrbitNumber_start")),
+    }).getInfo()
+    shared = sorted({tuple(k) for k in keys["pre"]} & {tuple(k) for k in keys["post"]})
+    if not shared:
+        raise AnalysisError("Tidak ada pasangan citra radar dengan arah lintasan dan orbit relatif yang sama pada tanggal sebelum dan sesudah kejadian", 404)
+    # the shared orbit with the most acquisitions in both windows
+    counts = {k: sum(1 for x in keys["pre"] if tuple(x) == k) + sum(1 for x in keys["post"] if tuple(x) == k) for k in shared}
+    direction, orbit = max(counts, key=counts.get)
+
+    def water(col):
+        one = col.filter(ee.Filter.eq("orbitProperties_pass", direction)).filter(ee.Filter.eq("relativeOrbitNumber_start", orbit)).select("VV")
+        vv = one.median().focal_median(30, "circle", "meters")
+        return vv.lt(_WATER_THRESHOLD_DB), vv.mask()
+
+    pre_water, pre_valid = water(pre)
+    post_water, post_valid = water(post)
+    return pre_water, post_water, pre_valid.And(post_valid)
 
 
 def change_score(prob_t0, prob_t1):
@@ -688,5 +736,6 @@ def analyze_landcover_fusion(data: dict) -> dict:
             "Q_o dan Q_s adalah indikator kelayakan input, bukan akurasi klasifikasi.",
             "Classifier dilatih dari label referensi MapBiomas 4.1 (30 m); akurasi independen belum tersedia.",
             "Probabilitas kelas adalah proporsi suara Random Forest, bukan probabilitas terkalibrasi.",
+            "Hanya piksel di dalam cakupan peta MapBiomas Indonesia 4.1 yang diklasifikasi; di luar cakupan tersebut piksel berstatus tanpa data.",
         ],
     }
