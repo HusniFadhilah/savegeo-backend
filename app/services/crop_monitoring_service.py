@@ -48,6 +48,9 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import math
+import time
+from contextvars import ContextVar
 
 import ee
 from sqlalchemy.orm import Session
@@ -56,7 +59,7 @@ from app.registries import crop_registry
 from app.registries.satellite_provider_registry import resolve_satellite
 from app.registries.weather_provider_registry import resolve_weather_provider
 from app.repositories import field_repo
-from app.services import config_service, disaster_analysis_service, vegetation_service, weather_service
+from app.services import config_service, disaster_analysis_service, vegetation_service, weather_service, crop_result_cache, landcover_service
 from app.services.gee_common import (
     AnalysisError,
     _event_area_ha,
@@ -70,12 +73,45 @@ from app.services.geo_utils import bbox_and_centroid
 logger = logging.getLogger(__name__)
 
 _DEFAULT_SUB_ANALYSES = (
-    "health", "timeseries", "anomaly", "growth_stage",
+    "landcover", "health", "timeseries", "anomaly", "growth_stage",
     "water_moisture", "weather", "productivity_zones", "risk_score",
 )
 
 _MOISTURE_STRESS_NDMI_THRESHOLD = 0.0
 _ANOMALY_NDVI_DROP_THRESHOLD = -0.15
+
+_COMPOSITES: ContextVar[dict | None] = ContextVar("crop_composites", default=None)
+
+
+def _composite_for_period(db, aoi, year, start_month, end_month, cloud_threshold, satellite, cloud_mask_technique):
+    """Reuse an EE composite within one analysis, isolated across fields/threads."""
+    cache = _COMPOSITES.get()
+    key = (year, start_month, end_month, cloud_threshold, satellite, cloud_mask_technique)
+    if cache is not None and key in cache:
+        return cache[key]
+    result = vegetation_service._composite_for_period(db, aoi, year, start_month, end_month,
+                                                     cloud_threshold, satellite, cloud_mask_technique)
+    if cache is not None:
+        cache[key] = result
+    return result
+
+
+def crop_summary_scale(area_ha, requested_scale):
+    if not math.isfinite(area_ha) or area_ha <= 0 or requested_scale <= 0:
+        raise AnalysisError("Luas lahan dan resolusi analisis harus positif.", 422)
+    return max(requested_scale, math.ceil(math.sqrt(area_ha * 10000 / 250_000) / 10) * 10)
+
+
+def _landcover(aoi, year, start_month, end_month, scale):
+    image, metadata = landcover_service.get_landcover_image(
+        "Dynamic_World", year, aoi, start_month, end_month, include_diagnostics=False,
+    )
+    result = landcover_service.summarize_landcover_image("Dynamic_World", image, aoi, max(10, scale), metadata)
+    if not result:
+        return {"available": False, "reason": "Tidak ada piksel tutupan lahan yang valid."}
+    crops = result["classes"].get("Crops", {})
+    return {"available": True, **result, "dataset": "Dynamic_World", "native_scale": 10,
+            "cropland_area_ha": crops.get("area", 0), "cropland_percentage": crops.get("percentage", 0)}
 
 
 # ─────────────────────────────────────────────
@@ -118,7 +154,7 @@ def _period_to_year_months(start_date: str, end_date: str) -> tuple[int, int, in
 # ─────────────────────────────────────────────
 
 def _crop_health(db, aoi, year, start_month, end_month, cloud_threshold, veg_scale, satellite, cloud_mask_technique) -> dict:
-    composite, _, _, _, size, valid_pct = vegetation_service._composite_for_period(
+    composite, _, _, _, size, valid_pct = _composite_for_period(
         db, aoi, year, start_month, end_month, cloud_threshold, satellite, cloud_mask_technique
     )
     if composite is None:
@@ -149,7 +185,7 @@ def _crop_health(db, aoi, year, start_month, end_month, cloud_threshold, veg_sca
     # `_period_to_year_months`'s docstring for why.
     change_pct = None
     prev_month, prev_year = (start_month - 1, year) if start_month > 1 else (12, year - 1)
-    prev_composite, *_ = vegetation_service._composite_for_period(
+    prev_composite, *_ = _composite_for_period(
         db, aoi, prev_year, prev_month, prev_month, cloud_threshold, satellite, cloud_mask_technique
     )
     if prev_composite is not None and mean is not None:
@@ -159,6 +195,8 @@ def _crop_health(db, aoi, year, start_month, end_month, cloud_threshold, veg_sca
 
     return {
         "available": True,
+        "tile_url": vegetation_service.vegetation_classification_tile(ndvi_img, "NDVI", "Crop health"),
+        "native_scale": 10 if satellite == "sentinel2" else 30,
         "health_label": label,
         "ndvi_mean": round(mean, 4) if mean is not None else None,
         "ndvi_stats": stats,
@@ -240,7 +278,7 @@ def _anomaly_category(diff_pct: float | None) -> str:
 
 
 def _crop_anomaly(db, aoi, year, start_month, end_month, cloud_threshold, veg_scale, satellite, cloud_mask_technique, historical_years: int) -> dict:
-    composite, *_ = vegetation_service._composite_for_period(db, aoi, year, start_month, end_month, cloud_threshold, satellite, cloud_mask_technique)
+    composite, *_ = _composite_for_period(db, aoi, year, start_month, end_month, cloud_threshold, satellite, cloud_mask_technique)
     if composite is None:
         return {"available": False, "reason": "Tidak ada citra untuk periode saat ini"}
 
@@ -252,7 +290,7 @@ def _crop_anomaly(db, aoi, year, start_month, end_month, cloud_threshold, veg_sc
 
     hist_means, hist_images = [], []
     for y in range(1, historical_years + 1):
-        h_composite, *_ = vegetation_service._composite_for_period(db, aoi, year - y, start_month, end_month, cloud_threshold, satellite, cloud_mask_technique)
+        h_composite, *_ = _composite_for_period(db, aoi, year - y, start_month, end_month, cloud_threshold, satellite, cloud_mask_technique)
         if h_composite is None:
             continue
         h_ndvi = calculate_index(h_composite, "NDVI")
@@ -322,7 +360,7 @@ def _water_stress_label(weather_stats: dict | None) -> str:
 
 
 def _water_moisture(db, aoi, year, start_month, end_month, cloud_threshold, veg_scale, satellite, cloud_mask_technique, weather_stats: dict) -> dict:
-    composite, *_ = vegetation_service._composite_for_period(db, aoi, year, start_month, end_month, cloud_threshold, satellite, cloud_mask_technique)
+    composite, *_ = _composite_for_period(db, aoi, year, start_month, end_month, cloud_threshold, satellite, cloud_mask_technique)
     if composite is None:
         return {"available": False, "reason": "Tidak ada citra untuk periode ini"}
 
@@ -408,7 +446,7 @@ def _productivity_zones(db, aoi, period_list: list[tuple[int, int, int]], cloud_
     ndvi_images, ndmi_images = [], []
     date_ranges = []
     for (y, sm, em) in period_list:
-        composite, _, s_date, e_date, _size, _ = vegetation_service._composite_for_period(db, aoi, y, sm, em, cloud_threshold, satellite, cloud_mask_technique)
+        composite, _, s_date, e_date, _size, _ = _composite_for_period(db, aoi, y, sm, em, cloud_threshold, satellite, cloud_mask_technique)
         if composite is None:
             continue
         ndvi_images.append(calculate_index(composite, "NDVI"))
@@ -487,7 +525,7 @@ def _historical_comparison(db, aoi, year, start_month, end_month, cloud_threshol
     years = compare_years or [year, year - 1, year - 2]
     rows = []
     for y in years:
-        composite, *_ = vegetation_service._composite_for_period(db, aoi, y, start_month, end_month, cloud_threshold, satellite, cloud_mask_technique)
+        composite, *_ = _composite_for_period(db, aoi, y, start_month, end_month, cloud_threshold, satellite, cloud_mask_technique)
         if composite is None:
             rows.append({"year": y, "ndvi_mean": None, "available": False})
             continue
@@ -568,79 +606,102 @@ def _risk_score(db: Session, sub_results: dict) -> dict:
 # ─────────────────────────────────────────────
 
 def run_crop_monitoring(db: Session, data: dict) -> dict:
+    token = _COMPOSITES.set({})
+    try:
+        return _run_crop_monitoring(db, data)
+    finally:
+        _COMPOSITES.reset(token)
+
+
+def _run_crop_monitoring(db: Session, data: dict) -> dict:
     field_id = data.get("field_id")
     if not field_id:
         raise AnalysisError("field_id is required", 400)
     field = field_repo.get_field(db, int(field_id))
     if field is None:
         raise AnalysisError("Field tidak ditemukan", 404)
-
     aoi = create_geometry_from_payload({"geojson": field.geojson})
     defaults = config_service.get_analysis_defaults(db)
     cloud_threshold = int(data.get("cloud_threshold", defaults["cloud_threshold"]))
-    veg_scale = int(data.get("scale", defaults["veg_scale"]))
+    requested_scale = int(data.get("scale", defaults["veg_scale"]))
+    veg_scale = crop_summary_scale(field.area_ha, requested_scale)
     satellite = resolve_satellite(data.get("satellite"))
     cloud_mask_technique = resolve_cloud_mask_technique(data.get("cloud_mask_technique"))
     weather_source = resolve_weather_provider(data.get("weather_source"))
-
     start_date, end_date, period_mode = _resolve_period(field, data.get("period") or {})
     year, start_month, end_month = _period_to_year_months(start_date, end_date)
+    requested = data.get("sub_analyses")
+    if requested is None:
+        requested = list(_DEFAULT_SUB_ANALYSES)
+    if not isinstance(requested, list) or not requested or any(not isinstance(k, str) or k not in {*_DEFAULT_SUB_ANALYSES, "flood", "historical_comparison"} for k in requested):
+        raise AnalysisError("Pilih bagian analisis tanaman yang valid.", 422)
+    parameters = {k: v for k, v in data.items() if k not in {"sub_analyses", "field_id"}}
+    parameters.update(start_date=start_date, end_date=end_date, scale=veg_scale, satellite=satellite,
+                      cloud_threshold=cloud_threshold, cloud_mask_technique=cloud_mask_technique,
+                      weather_source=weather_source, timeseries_index=data.get("timeseries_index", "NDVI"),
+                      historical_years=int(data.get("historical_years", 3)), data_sources=data.get("data_sources") or {"sentinel1": True})
+    results, skipped, timings, cache_hits = {}, [], {}, []
+    weather_value = None
 
-    requested = data.get("sub_analyses") or list(_DEFAULT_SUB_ANALYSES)
-    results: dict = {}
-    skipped: list = []
+    def weather_inputs():
+        nonlocal weather_value
+        if weather_value is not None:
+            return weather_value
+        key = crop_result_cache.section_key(field, parameters, "weather_inputs")
+        weather_value = crop_result_cache.load(db, key)
+        if weather_value is None:
+            _, centroid = bbox_and_centroid(field.geojson)
+            if centroid is None:
+                raise AnalysisError("Tidak bisa menghitung centroid field", 422)
+            weather_value = weather_service.get_weather_stats(
+                aoi, (centroid["lat"], centroid["lng"]), start_date, end_date, source=weather_source)
+            crop_result_cache.save(db, key, field.id, "weather_inputs", weather_value)
+        return weather_value
 
-    weather_stats = None
-    if any(k in requested for k in ("water_moisture", "weather", "risk_score")):
-        _, centroid = bbox_and_centroid(field.geojson)
-        if centroid is None:
-            skipped.append({"sub_analysis": "weather", "reason": "Tidak bisa menghitung centroid field"})
+    args = (db, aoi, year, start_month, end_month, cloud_threshold, veg_scale, satellite, cloud_mask_technique)
+    seasons = data.get("productivity_zone_periods")
+    periods = [(p["year"], p["start_month"], p["end_month"]) for p in seasons] if seasons else [(year, start_month, end_month)]
+    operations = {
+        "landcover": lambda: _landcover(aoi, year, start_month, end_month, veg_scale),
+        "health": lambda: _crop_health(*args),
+        "timeseries": lambda: _vegetation_timeseries(db, field, year, start_month, end_month,
+            data.get("timeseries_index", "NDVI"), cloud_threshold, veg_scale, satellite, cloud_mask_technique),
+        "anomaly": lambda: _crop_anomaly(*args, int(data.get("historical_years", 3))),
+        "growth_stage": lambda: _growth_stage(field),
+        "water_moisture": lambda: _water_moisture(*args, weather_inputs()),
+        "weather": lambda: _weather_monitoring(weather_inputs()),
+        "flood": lambda: _flood_impact(aoi, field, data.get("flood")),
+        "productivity_zones": lambda: _productivity_zones(db, aoi, periods, cloud_threshold, veg_scale,
+            satellite, cloud_mask_technique, bool((data.get("data_sources") or {}).get("sentinel1", True))),
+        "historical_comparison": lambda: _historical_comparison(*args, data.get("compare_years")),
+        "risk_score": lambda: _risk_score(db, results),
+    }
+    for section in [k for k in requested if k != "risk_score"] + (["risk_score"] if "risk_score" in requested else []):
+        started = time.monotonic()
+        # Risk depends on this response's selected sections; it is cheap and must
+        # not reuse a score generated from a different selection.
+        key = crop_result_cache.section_key(field, parameters, section)
+        cached = crop_result_cache.load(db, key) if section != "risk_score" else None
+        if cached is not None:
+            results[section] = cached
+            cache_hits.append(section)
         else:
             try:
-                weather_stats = weather_service.get_weather_stats(
-                    aoi, (centroid["lat"], centroid["lng"]), start_date, end_date, source=weather_source
-                )
-            except AnalysisError as exc:
-                skipped.append({"sub_analysis": "weather", "reason": str(exc)})
-
-    if "health" in requested:
-        results["health"] = _crop_health(db, aoi, year, start_month, end_month, cloud_threshold, veg_scale, satellite, cloud_mask_technique)
-    if "timeseries" in requested:
-        index_name = data.get("timeseries_index", "NDVI")
-        results["timeseries"] = _vegetation_timeseries(db, field, year, start_month, end_month, index_name, cloud_threshold, veg_scale, satellite, cloud_mask_technique)
-    if "anomaly" in requested:
-        historical_years = int(data.get("historical_years", 3))
-        results["anomaly"] = _crop_anomaly(db, aoi, year, start_month, end_month, cloud_threshold, veg_scale, satellite, cloud_mask_technique, historical_years)
-    if "growth_stage" in requested:
-        results["growth_stage"] = _growth_stage(field)
-    if "water_moisture" in requested:
-        results["water_moisture"] = (
-            _water_moisture(db, aoi, year, start_month, end_month, cloud_threshold, veg_scale, satellite, cloud_mask_technique, weather_stats)
-            if weather_stats else {"available": False, "reason": "Data cuaca tidak tersedia"}
-        )
-    if "weather" in requested:
-        results["weather"] = _weather_monitoring(weather_stats) if weather_stats else {"available": False, "reason": "Data cuaca tidak tersedia"}
-    if "flood" in requested:
-        results["flood"] = _flood_impact(aoi, field, data.get("flood"))
-    if "productivity_zones" in requested:
-        seasons = data.get("productivity_zone_periods")
-        period_list = [(p["year"], p["start_month"], p["end_month"]) for p in seasons] if seasons else [(year, start_month, end_month)]
-        include_s1 = bool((data.get("data_sources") or {}).get("sentinel1", True))
-        results["productivity_zones"] = _productivity_zones(db, aoi, period_list, cloud_threshold, veg_scale, satellite, cloud_mask_technique, include_s1)
-    if "historical_comparison" in requested:
-        results["historical_comparison"] = _historical_comparison(
-            db, aoi, year, start_month, end_month, cloud_threshold, veg_scale, satellite, cloud_mask_technique, data.get("compare_years")
-        )
-    if "risk_score" in requested:
-        results["risk_score"] = _risk_score(db, results)
-
+                results[section] = operations[section]()
+                if section != "risk_score":
+                    crop_result_cache.save(db, key, field.id, section, results[section])
+            except Exception as exc:  # noqa: BLE001 - one unavailable section must not discard other results
+                logger.warning("Crop section %s failed (%s)", section, type(exc).__name__, exc_info=True)
+                reason = str(exc) if isinstance(exc, AnalysisError) else "Bagian ini belum berhasil diproses; coba ulang atau gunakan area/periode lebih kecil."
+                results[section] = {"available": False, "reason": reason}
+                skipped.append({"sub_analysis": section, "reason": reason})
+        timings[section] = round(time.monotonic() - started, 3)
     return {
         "field": field.to_dict(include_geojson=True),
-        "period": {"start": start_date, "end": end_date, "mode": period_mode, "resolved_year_month_range": {"year": year, "start_month": start_month, "end_month": end_month}},
-        "cloud_threshold": cloud_threshold,
-        "scale": veg_scale,
-        "satellite": satellite,
-        "weather_source": weather_source,
-        "sub_analyses": results,
-        "skipped": skipped,
+        "period": {"start": start_date, "end": end_date, "mode": period_mode,
+                   "resolved_year_month_range": {"year": year, "start_month": start_month, "end_month": end_month}},
+        "cloud_threshold": cloud_threshold, "scale": veg_scale, "requested_scale": requested_scale,
+        "satellite": satellite, "weather_source": weather_source,
+        "sub_analyses": results, "skipped": skipped,
+        "performance": {"cache_hits": cache_hits, "section_seconds": timings, "cache_ttl_seconds": crop_result_cache.TTL_SECONDS},
     }
