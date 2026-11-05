@@ -75,3 +75,11 @@ def test_yearly_summaries_roundtrip_in_separate_database_sessions():
         assert load_summary(db, identity(2025)[0])['statistics']['mean'] == 67.7
         assert load_summary(db, identity(2026)[0])['statistics']['mean'] == 62.98
     engine.dispose()
+
+
+def test_algorithm_version_change_cannot_reuse_old_summary(monkeypatch):
+    from app.services import carbon_annual_store as store
+
+    first = identity()[0]
+    monkeypatch.setattr(store, "ANNUAL_ALGORITHM_VERSION", "landsat-annual-median-v2", raising=False)
+    assert identity()[0] != first

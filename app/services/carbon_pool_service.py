@@ -23,6 +23,8 @@ def _geometry(aoi):
 
 
 def _landsat_predictors(region, year):
+    # Changing mask bits, collection choice or compositing here requires bumping
+    # carbon_annual_store.ANNUAL_ALGORITHM_VERSION.
     older = year < 2013
     if older:
         collection = ee.ImageCollection("LANDSAT/LT05/C02/T1_L2")

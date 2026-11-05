@@ -9,6 +9,10 @@ from app.db.models.carbon_annual_estimate import CarbonAnnualEstimate
 
 logger = logging.getLogger(__name__)
 
+# Bump when carbon_pool_service._landsat_predictors changes (QA mask bits, collection
+# choice, compositing); otherwise summaries from the old algorithm would be reused.
+ANNUAL_ALGORITHM_VERSION = "landsat-annual-median-v1"
+
 
 def estimate_identity(data, model, analysis_year, reference_year, scale, today=None):
     today = today or datetime.now(UTC).date()
@@ -22,6 +26,7 @@ def estimate_identity(data, model, analysis_year, reference_year, scale, today=N
         "dataset": data["reference_dataset"], "model": model["name"],
         "version": model.get("version"), "metadata": model["metadata_json"],
         "scale": scale, "clipped": bool(data.get("clip_to_aoi", True)),
+        "algorithm": ANNUAL_ALGORITHM_VERSION,
     }
     key = hashlib.sha256(json.dumps(identity, sort_keys=True, default=str).encode()).hexdigest()
     return key, aoi_checksum, observed_through
