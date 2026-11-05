@@ -29,6 +29,9 @@ from app.db.models.system_config import SystemConfig
 from app.db.models.uploaded_model import UploadedModel
 from app.db.models.user import User
 from app.db.models.workflow import Workflow, WorkflowRun
+from app.db.models.dmrv_project import DmrvProject, ProjectMember
+from app.db.models.dmrv_boundary import BoundaryVersion
+from app.db.models.dmrv_audit import DmrvAuditEvent, DmrvIdempotencyKey
 from app.db.models.carbon_calibration import (
     CarbonCalibrationDataset,
     CarbonCalibrationFile,
@@ -75,4 +78,9 @@ __all__ = [
     "CarbonCalibrationRun",
     "FieldPlot",
     "FieldTree",
+    "DmrvProject",
+    "ProjectMember",
+    "BoundaryVersion",
+    "DmrvAuditEvent",
+    "DmrvIdempotencyKey",
 ]
