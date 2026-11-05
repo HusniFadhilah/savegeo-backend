@@ -14,7 +14,7 @@ import uuid
 from dataclasses import asdict
 from typing import Any, Literal
 
-from sqlalchemy import exists, func, select
+from sqlalchemy import exists, func, insert, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -147,6 +147,7 @@ def commit_import(
                 ).scalars()
             } if accepted else {}
             visits: dict[tuple[str, Any], SurveyVisit] = {}
+            tree_rows: list[dict[str, Any]] = []
             warned_plots: set[str] = set()
             for tree in accepted:
                 plot = plots.get(tree.plot_code)
@@ -184,13 +185,16 @@ def commit_import(
                         db.add(visit)
                         visits_created += 1
                     visits[key] = visit
-                db.add(TreeMeasurement(
-                    visit_id=visit.id, tree_code=tree.tree_code, species=tree.species,
-                    circumference_cm=tree.circumference_cm, dbh_cm=tree.dbh_cm, height_m=tree.height_m,
-                    biomass_kg=tree.biomass_kg, status=tree.status,
-                    biomass_source="reported" if tree.biomass_kg is not None else None, qa_flags=list(tree.flags),
-                ))
+                tree_rows.append({
+                    "visit_id": visit.id, "tree_code": tree.tree_code, "species": tree.species,
+                    "circumference_cm": tree.circumference_cm, "dbh_cm": tree.dbh_cm, "height_m": tree.height_m,
+                    "biomass_kg": tree.biomass_kg, "status": tree.status,
+                    "biomass_source": "reported" if tree.biomass_kg is not None else None, "qa_flags": list(tree.flags),
+                })
                 imported += 1
+            if tree_rows:
+                db.flush()  # plots and visits first (foreign keys), then one bulk insert for the trees
+                db.execute(insert(TreeMeasurement), tree_rows)
         rows_rejected = len(rejected)
         status = "committed" if not rejected else ("partial" if imported else "rejected")
         summary = {
