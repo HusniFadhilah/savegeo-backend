@@ -143,6 +143,7 @@ jobs:
           output: trivy-results.json
           severity: HIGH,CRITICAL
           exit-code: "1"
+          timeout: 15m
           ignore-unfixed: true
           trivyignores: backend/.trivyignore
 
