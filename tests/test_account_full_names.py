@@ -55,7 +55,7 @@ def test_user_can_edit_own_name_and_read_it_back_without_changing_login(accounts
     assert "password_hash" not in result.json()["user"]
 
 
-def test_admin_can_set_and_clear_a_managed_users_full_name(accounts):
+def test_admin_can_set_but_not_clear_a_managed_users_full_name(accounts):
     client, db, _, target, _, _ = accounts
     result = client.put(f"/api/admin/users/{target.id}", json={"full_name": "Budi Santoso"})
     assert result.status_code == 200
@@ -65,7 +65,9 @@ def test_admin_can_set_and_clear_a_managed_users_full_name(accounts):
     client.put(f"/api/admin/users/{target.id}", json={"email": "budi@example.test"})
     assert target.full_name == "Budi Santoso"  # Older clients omit full_name.
     result = client.put(f"/api/admin/users/{target.id}", json={"full_name": "  "})
-    assert result.json()["user"]["full_name"] is None
+    assert result.status_code == 422
+    db.expire_all()
+    assert target.full_name == "Budi Santoso"
 
 
 def test_admin_profile_and_viewer_self_service_include_full_name(accounts):
