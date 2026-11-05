@@ -56,8 +56,8 @@ from app.registries.satellite_provider_registry import SATELLITE_PROVIDERS
 from app.repositories.satellite_provider_repo import apply_override, get_overrides_by_key
 from app.repositories import imagery_provider_repo
 from app.repositories.uploaded_model_repo import ALLOWED_MODEL_EXTS, import_legacy_models
-from app.schemas.profile import FullNameFields
 from app.schemas.admin import (
+    AdminNameUpdateRequest,
     AdminProfileUpdateRequest,
     AdminUserCreateRequest,
     AdminUserUpdateRequest,
@@ -162,12 +162,11 @@ def me(admin: AdminUser = Depends(get_current_admin)):
 
 @router.put("/auth/name")
 def update_own_name(
-    payload: FullNameFields,
+    payload: AdminNameUpdateRequest,
     admin: AdminUser = Depends(get_current_admin),
     db: Session = Depends(get_db),
 ):
-    if "full_name" in payload.model_fields_set:
-        admin.full_name = payload.full_name
+    admin.full_name = payload.full_name
     db.commit()
     db.refresh(admin)
     return {"message": "Profil berhasil diperbarui", "user": admin.to_dict()}
@@ -195,8 +194,7 @@ def update_admin_profile(
 
     admin.username = username
     admin.email = email
-    if "full_name" in payload.model_fields_set:
-        admin.full_name = payload.full_name
+    admin.full_name = payload.full_name
     try:
         db.commit()
     except IntegrityError as exc:

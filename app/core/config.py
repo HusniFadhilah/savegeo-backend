@@ -72,6 +72,17 @@ class Settings(BaseSettings):
     # --- CORS ---
     allowed_origins: str = "http://localhost:5500,http://localhost:3000,http://localhost:5501,https://savegeo.len.co.id,https://begeo.len.co.id"
 
+    # --- Apple MapKit JS (Apple satellite basemap) ---
+    # Credentials of a MapKit JS key from the Apple Developer portal. The .p8
+    # private key stays on the server; browsers only receive short-lived,
+    # origin-bound tokens from /api/maps/apple-mapkit/token.
+    apple_mapkit_team_id: str = ""
+    apple_mapkit_key_id: str = ""
+    # PEM text (literal "\n" sequences are accepted) or a path to the .p8 file.
+    apple_mapkit_private_key: str = ""
+    apple_mapkit_private_key_file: str = ""
+    apple_mapkit_token_ttl_seconds: int = 1800
+
     # --- GEE fallback (used only if no active DB credential row exists) ---
     gee_service_account: str = ""
     gee_key_file: str = ""
