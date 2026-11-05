@@ -76,3 +76,5 @@ class TreeMeasurement(Base):
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="live")  # live|dead|recruit|missing
     biomass_source: Mapped[str | None] = mapped_column(String(16))  # reported
     qa_flags: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    # The import batch that brought this tree in (a visit can receive trees from several batches).
+    batch_id: Mapped[str | None] = mapped_column(ForeignKey("dmrv_import_batches.id", ondelete="SET NULL"))

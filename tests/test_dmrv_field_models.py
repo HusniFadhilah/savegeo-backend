@@ -67,7 +67,7 @@ def test_tree_unique_per_visit_and_defaults(engine):
         db.add(TreeMeasurement(visit_id="v1", tree_code="1"))
         db.commit()
         tree = db.query(TreeMeasurement).one()
-        assert tree.status == "live" and tree.qa_flags == []
+        assert tree.status == "live" and tree.qa_flags == [] and tree.batch_id is None
         db.add(TreeMeasurement(visit_id="v1", tree_code="1"))
         with pytest.raises(IntegrityError):
             db.commit()
@@ -87,6 +87,7 @@ def test_migration_creates_and_drops_tables():
         with Operations.context(MigrationContext.configure(conn)):
             module.upgrade()
         assert FIELD_TABLES <= set(inspect(conn).get_table_names())
+        assert "batch_id" in {c["name"] for c in inspect(conn).get_columns("dmrv_tree_measurements")}
         with Operations.context(MigrationContext.configure(conn)):
             module.downgrade()
         assert not FIELD_TABLES & set(inspect(conn).get_table_names())

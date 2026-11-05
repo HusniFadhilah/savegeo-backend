@@ -1,6 +1,7 @@
 """Plot-level biomass and carbon density from reported tree biomass.
 
-Densities are returned only together with their area basis. A plot whose area
+Densities are returned only together with their area basis, and only when every
+tree counted has a biomass value. A plot whose area
 is unknown yields a blocker, never an estimate. The carbon fraction is a
 placeholder default (IPCC 2006 tropical woody biomass); an approved
 methodology profile must supply the value used for any claim.
@@ -47,6 +48,9 @@ def plot_density(
         blockers.append("plot_area_unknown")
     if not values:
         blockers.append("no_biomass_values")
+    elif missing:
+        # A sum over only some of the trees would silently understate the plot.
+        blockers.append("biomass_incomplete")
 
     biomass_density = carbon_density = None
     if not blockers:

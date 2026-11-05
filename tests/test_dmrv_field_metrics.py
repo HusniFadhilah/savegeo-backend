@@ -32,9 +32,16 @@ def test_no_biomass_values_is_a_blocker():
 
 
 def test_zero_kg_tree_counts_as_a_value():
-    result = plot_density([0.0, None], 100.0, "measured")
+    result = plot_density([0.0, 0.0], 100.0, "measured")
     assert result.carbon_mg_c_per_ha == Decimal(0)
-    assert result.trees_without_biomass == 1 and result.blockers == ()
+    assert result.trees_without_biomass == 0 and result.blockers == ()
+
+
+def test_partial_biomass_blocks_the_density_instead_of_understating_it():
+    result = plot_density([100.0, None, 50.0], 100.0, "measured")
+    assert result.biomass_dry_mg_per_ha is None and result.carbon_mg_c_per_ha is None
+    assert result.blockers == ("biomass_incomplete",)
+    assert (result.tree_count, result.trees_without_biomass) == (3, 1)
 
 
 @pytest.mark.parametrize("area", [0.0, -5.0])

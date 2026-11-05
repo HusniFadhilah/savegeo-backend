@@ -105,12 +105,22 @@ def test_second_visit_to_same_plot_keeps_first_visit(db):
     ]
 
 
-def test_same_visit_twice_is_visit_exists_error_and_changes_nothing(db):
+def test_same_trees_twice_are_tree_exists_errors_and_change_nothing(db):
     commit(db, csv_bytes(*GOOD))
     again = commit(db, csv_bytes(*GOOD))
     assert again["status"] == "rejected" and again["rows_imported"] == 0
-    assert {i["code"] for i in again["issues"] if i["level"] == "error"} == {"visit_exists"}
+    assert {i["code"] for i in again["issues"] if i["level"] == "error"} == {"tree_exists"}
     assert (count(db, SurveyVisit), count(db, TreeMeasurement)) == (1, 2)
+
+
+def test_corrected_rows_can_be_added_to_a_visit_after_a_partial_import(db):
+    first = commit(db, csv_bytes(*GOOD, BAD))
+    assert (first["status"], first["rows_imported"]) == ("partial", 2)
+    fixed = commit(db, csv_bytes("1,2024,3,Johar,89,28.33,1248,382.8,-7.0527,110.4396"), mode="atomic")
+    assert (fixed["status"], fixed["visits_created"], fixed["rows_imported"]) == ("committed", 0, 1)
+    assert (count(db, SurveyVisit), count(db, TreeMeasurement)) == (1, 3)
+    batches = dict(db.execute(select(TreeMeasurement.tree_code, TreeMeasurement.batch_id)).all())
+    assert batches["1"] == first["batch_id"] and batches["3"] == fixed["batch_id"]
 
 
 def test_same_plot_code_in_two_projects_is_independent(db):
@@ -191,3 +201,42 @@ def test_concurrent_duplicate_visit_becomes_409_not_500(db, monkeypatch):
         commit(db, csv_bytes(*GOOD))
     assert (info.value.status, info.value.code, info.value.retryable) == (409, "conflict", True)
     assert count(db, TreeMeasurement) == 2
+
+
+STATUS_HEADER = "plot_code,survey_year,tree_code,status,circumference_cm,dbh_cm,height,biomass_kg"
+
+
+def status_csv(*rows):
+    return "\n".join([STATUS_HEADER, *rows, ""]).encode()
+
+
+def test_dead_and_missing_trees_do_not_count_toward_living_carbon(db):
+    commit(db, status_csv(
+        "1,2024,1,live,70,22.28,892,100",
+        "1,2024,2,dead,70,22.28,892,500",
+        "1,2024,3,missing,70,22.28,892,50",
+        "1,2024,4,recruit,70,22.28,892,10",
+    ))
+    visit = field_data.list_visits(db, OWNER_1, "p-1", "1")[0]
+    density = visit["density"]
+    assert visit["tree_count"] == 4 and density["trees_excluded"] == 2
+    assert density["biomass_dry_mg_per_ha"] == pytest.approx((100 + 10) / 1000 / 0.04, rel=1e-9)
+
+
+def test_visit_with_live_trees_missing_biomass_is_blocked_not_understated(db):
+    commit(db, status_csv("1,2024,1,live,70,22.28,892,100", "1,2024,2,live,70,22.28,892,-", "1,2024,3,dead,70,22.28,892,-"))
+    density = field_data.list_visits(db, OWNER_1, "p-1", "1")[0]["density"]
+    assert density["carbon_mg_c_per_ha"] is None
+    assert density["blockers"] == ["biomass_incomplete"] and density["trees_without_biomass"] == 1
+
+
+def test_errors_are_listed_before_warnings_even_after_hundreds_of_rows(db):
+    rows = ["1,2024,,live,70,22.28,892,10"] * 1 + [f"{n},2024,,live,70,22.28,892,10" for n in range(2, 260)]
+    rows.append("9,2024,,live,abc,22.28,892,10")
+    result = field_data.preview_import(
+        db, OWNER_1, "p-1", "trees.csv", status_csv(*rows), None, ImportOptions(height_unit="cm", plot_area_m2=400.0)
+    )
+    issues = result["report"]["issues"]
+    assert result["report"]["errors"] == 1 and result["report"]["warnings"] >= 259
+    assert issues[0]["level"] == "error" and issues[0]["code"] == "bad_number"
+    assert len(issues) == 200

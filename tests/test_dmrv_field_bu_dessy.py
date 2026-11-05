@@ -65,7 +65,7 @@ def test_survey_imports_then_revisit_keeps_history_and_reports_assumed_area(env)
     assert density_2024["area_basis"] == "assumed" and density_2024["source_type"] == "field_measurement"
 
     again = post(client, pid, "imports", SAMPLE, key="bd-again", mode="atomic", **ASSUMED_PARAMS).json()
-    assert again["status"] == "rejected" and {i["code"] for i in again["issues"] if i["level"] == "error"} == {"visit_exists"}
+    assert again["status"] == "rejected" and {i["code"] for i in again["issues"] if i["level"] == "error"} == {"tree_exists"}
 
 
 def test_wrong_height_unit_is_flagged_instead_of_silently_accepted(env):  # noqa: F811

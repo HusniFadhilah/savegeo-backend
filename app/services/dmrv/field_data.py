@@ -1,7 +1,9 @@
 """dMRV field data: import preview/commit and read models.
 
-An import never overwrites: a visit (plot + date) that already has tree
-measurements rejects the incoming rows with ``visit_exists``. Atomic mode saves
+An import never overwrites: a tree (plot + visit date + tree code) that already
+exists rejects the incoming row with ``tree_exists``. Trees with new codes are
+appended to an existing visit, so corrected rows can be re-imported after a
+partial import; each tree records the batch that brought it. Atomic mode saves
 nothing but the batch record when any row is invalid; partial mode saves the
 valid rows and reports the rest. The audit event is written in the same
 transaction as the data.
@@ -14,7 +16,7 @@ import uuid
 from dataclasses import asdict
 from typing import Any, Literal
 
-from sqlalchemy import exists, func, insert, select
+from sqlalchemy import func, insert, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -35,6 +37,8 @@ from app.services.dmrv.field_import import (
 from app.services.dmrv.field_metrics import plot_density
 
 MAX_ISSUES = 200
+_IN_CHUNK = 5000  # keeps IN (...) lists far below database bind-parameter limits
+LIVE_STATUSES = frozenset({"live", "recruit"})  # dead and missing trees are not living biomass
 
 
 def _assess(
@@ -49,30 +53,39 @@ def _assess(
 
     extra: list[RowIssue] = []
     rejected = set(report.error_rows)
-    codes = {tree.plot_code for tree in report.trees}
-    existing = set(
-        db.execute(
-            select(SurveyPlot.plot_code, SurveyVisit.visit_date)
-            .join(SurveyVisit, SurveyVisit.plot_id == SurveyPlot.id)
-            .where(
-                SurveyPlot.project_id == project_id,
-                SurveyPlot.plot_code.in_(codes),
-                exists().where(TreeMeasurement.visit_id == SurveyVisit.id),
-            )
-        ).all()
-    ) if codes else set()
+    dates = {tree.visit_date for tree in report.trees}
+    existing: set[tuple[Any, ...]] = set()
+    for chunk in _chunks(sorted({tree.plot_code for tree in report.trees})):
+        existing.update(
+            tuple(row) for row in db.execute(
+                select(SurveyPlot.plot_code, SurveyVisit.visit_date, TreeMeasurement.tree_code)
+                .join(SurveyVisit, SurveyVisit.plot_id == SurveyPlot.id)
+                .join(TreeMeasurement, TreeMeasurement.visit_id == SurveyVisit.id)
+                .where(
+                    SurveyPlot.project_id == project_id,
+                    SurveyPlot.plot_code.in_(chunk),
+                    SurveyVisit.visit_date.in_(dates),
+                )
+            ).all()
+        )
     for tree in report.trees:
-        if (tree.plot_code, tree.visit_date) in existing:
+        if (tree.plot_code, tree.visit_date, tree.tree_code) in existing:
             rejected.add(tree.row)
             extra.append(RowIssue(
-                tree.row, "error", "visit_exists",
-                f"Plot {tree.plot_code} sudah memiliki pengukuran pada {tree.visit_date}; impor tidak menimpa data lama.",
+                tree.row, "error", "tree_exists",
+                f"Pohon {tree.tree_code} pada plot {tree.plot_code} tanggal {tree.visit_date} sudah tercatat; impor tidak menimpa data lama.",
             ))
     return headers, rows, mapping, report, extra, rejected
 
 
+def _chunks(values: list[str], size: int = _IN_CHUNK) -> list[list[str]]:
+    return [values[index:index + size] for index in range(0, len(values), size)]
+
+
 def _issues_out(issues: list[RowIssue]) -> list[dict[str, Any]]:
-    return [asdict(issue) for issue in sorted(issues, key=lambda i: (i.row, i.level))[:MAX_ISSUES]]
+    """Errors first (a real error must never be cut off by hundreds of warnings), then by row."""
+    ordered = sorted(issues, key=lambda i: (i.level != "error", i.row, i.code))
+    return [asdict(issue) for issue in ordered[:MAX_ISSUES]]
 
 
 def preview_import(
@@ -139,13 +152,11 @@ def commit_import(
             accepted = [tree for tree in report.trees if tree.row not in rejected]
             plots = {
                 plot.plot_code: plot
+                for chunk in _chunks(sorted({tree.plot_code for tree in accepted}))
                 for plot in db.execute(
-                    select(SurveyPlot).where(
-                        SurveyPlot.project_id == project_id,
-                        SurveyPlot.plot_code.in_({tree.plot_code for tree in accepted}),
-                    )
+                    select(SurveyPlot).where(SurveyPlot.project_id == project_id, SurveyPlot.plot_code.in_(chunk))
                 ).scalars()
-            } if accepted else {}
+            }
             visits: dict[tuple[str, Any], SurveyVisit] = {}
             tree_rows: list[dict[str, Any]] = []
             warned_plots: set[str] = set()
@@ -190,6 +201,7 @@ def commit_import(
                     "circumference_cm": tree.circumference_cm, "dbh_cm": tree.dbh_cm, "height_m": tree.height_m,
                     "biomass_kg": tree.biomass_kg, "status": tree.status,
                     "biomass_source": "reported" if tree.biomass_kg is not None else None, "qa_flags": list(tree.flags),
+                    "batch_id": batch.id,
                 })
                 imported += 1
             if tree_rows:
@@ -254,19 +266,26 @@ def list_visits(db: Session, principal: Principal, project_id: str, plot_code: s
     ).scalar_one_or_none()
     if plot is None:
         raise DmrvError(404, "not_found", "Plot tidak ditemukan.")
+    trees_by_visit: dict[str, list[tuple[str, float | None]]] = {}
+    for visit_id, status, biomass in db.execute(  # one query for every visit of the plot
+        select(TreeMeasurement.visit_id, TreeMeasurement.status, TreeMeasurement.biomass_kg)
+        .join(SurveyVisit, SurveyVisit.id == TreeMeasurement.visit_id)
+        .where(SurveyVisit.plot_id == plot.id)
+    ).all():
+        trees_by_visit.setdefault(visit_id, []).append((status, biomass))
     out = []
     for visit in db.execute(
         select(SurveyVisit).where(SurveyVisit.plot_id == plot.id).order_by(SurveyVisit.visit_date)
     ).scalars():
-        biomass = list(db.execute(
-            select(TreeMeasurement.biomass_kg).where(TreeMeasurement.visit_id == visit.id)
-        ).scalars())
-        density = plot_density(biomass, plot.area_m2, plot.area_basis)
+        trees = trees_by_visit.get(visit.id, [])
+        living = [biomass for status, biomass in trees if status in LIVE_STATUSES]
+        density = plot_density(living, plot.area_m2, plot.area_basis)
         out.append({
             "visit_date": visit.visit_date.isoformat(),
             "date_precision": visit.date_precision,
-            "tree_count": density.tree_count,
+            "tree_count": len(trees),
             "density": {
+                "trees_excluded": len(trees) - len(living),  # dead / missing: not living biomass
                 "source_type": density.source_type,
                 "biomass_dry_mg_per_ha": float(density.biomass_dry_mg_per_ha) if density.biomass_dry_mg_per_ha is not None else None,
                 "carbon_mg_c_per_ha": float(density.carbon_mg_c_per_ha) if density.carbon_mg_c_per_ha is not None else None,

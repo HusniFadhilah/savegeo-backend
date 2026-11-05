@@ -1167,23 +1167,26 @@ def _apply_s2_single_scene_mask(img: ee.Image, technique: str) -> ee.Image:
 
 
 def _aoi_exceeds_scene_footprint(aoi: ee.Geometry, scene: ee.Image) -> bool:
-    """Return whether the requested AOI is larger than one scene footprint.
+    """Return whether any meaningful part of the AOI lies outside one scene.
 
-    Keep this check server-side and bundle both area requests into one
-    ``getInfo`` call. If Earth Engine cannot evaluate the footprint for an
-    unusual image, retain the safe single-scene behavior.
+    Compare the uncovered AOI geometry rather than just its total area: an AOI
+    can have less area than a scene and still extend outside its footprint.
+    Bundle the area evaluations into one Earth Engine request. If the image
+    lacks a usable footprint, retain the safe single-scene behavior.
     """
     try:
+        scene_footprint = ee.Geometry(scene.get("system:footprint"))
+        uncovered_area = aoi.difference(scene_footprint, maxError=1).area(maxError=1)
         areas = ee.Dictionary({
             "aoi": aoi.area(maxError=1),
-            # The Python Earth Engine Image wrapper does not expose the
-            # JavaScript ``image.geometry()`` helper. Use the published
-            # system:footprint property instead.
-            "scene": ee.Geometry(scene.get("system:footprint")).area(maxError=1),
+            "uncovered": uncovered_area,
         }).getInfo()
         aoi_area = float((areas or {}).get("aoi") or 0)
-        scene_area = float((areas or {}).get("scene") or 0)
-        return aoi_area > 0 and scene_area > 0 and aoi_area > scene_area
+        uncovered = float((areas or {}).get("uncovered") or 0)
+        # Ignore sub-square-metre slivers and tiny numerical differences in
+        # large geometries while still detecting AOIs that extend past a tile.
+        tolerance = max(1.0, aoi_area * 1e-6)
+        return aoi_area > 0 and uncovered > tolerance
     except Exception:  # noqa: BLE001
         logger.warning("Could not compare AOI and scene footprint; using single scene")
         return False
