@@ -3,7 +3,7 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision = "0038_backfill_ilham_nugraha_full_name"
+revision = "0038_ilham_full_name"
 down_revision = "0037_crop_monitoring_cache"
 branch_labels = None
 depends_on = None
