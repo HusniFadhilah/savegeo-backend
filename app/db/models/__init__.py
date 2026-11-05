@@ -33,6 +33,7 @@ from app.db.models.dmrv_project import DmrvProject, ProjectMember
 from app.db.models.dmrv_boundary import BoundaryVersion
 from app.db.models.dmrv_audit import DmrvAuditEvent, DmrvIdempotencyKey
 from app.db.models.dmrv_field import ImportBatch, SurveyPlot, SurveyVisit, TreeMeasurement
+from app.db.models.dmrv_job import DmrvJob, DmrvSnapshot
 from app.db.models.carbon_calibration import (
     CarbonCalibrationDataset,
     CarbonCalibrationFile,
@@ -88,4 +89,6 @@ __all__ = [
     "SurveyPlot",
     "SurveyVisit",
     "TreeMeasurement",
+    "DmrvJob",
+    "DmrvSnapshot",
 ]
