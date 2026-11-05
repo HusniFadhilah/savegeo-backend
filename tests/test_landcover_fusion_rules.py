@@ -34,8 +34,12 @@ def ee_session():
 
 
 def _frame(ee, qo, qs):
-    const = lambda v: ee.Image.constant(v).toFloat()
-    vec = lambda v: ee.Image.constant(v).rename(NAMES).toFloat()
+    def const(v):
+        return ee.Image.constant(v).toFloat()
+
+    def vec(v):
+        return ee.Image.constant(v).rename(NAMES).toFloat()
+
     return {"q_o": const(qo), "q_s": const(qs), "footprint": const(1).gt(0),
             "paths": {"joint": vec(JOINT), "optical": vec(OPT), "sar": vec(SAR)}}
 
@@ -44,7 +48,9 @@ def _run(ee, mode, q, qo0, qs0, qo1, qs1):
     aoi = ee.Geometry.Rectangle([104.70, -2.95, 104.701, -2.949])
     params = {"q_min": q, "fusion_mode": mode, "confidence_threshold": None}
     b = fusion.common_basis(_frame(ee, qo0, qs0), _frame(ee, qo1, qs1), [10, 20, 30], params, aoi)
-    first = lambda image, band=None: image.reduceRegion(ee.Reducer.first(), aoi, 10)
+    def first(image, band=None):
+        return image.reduceRegion(ee.Reducer.first(), aoi, 10)
+
     return ee.Dictionary({"path": first(b["path"]), "p0": first(b["p0"]), "p1": first(b["p1"])}).getInfo()
 
 
@@ -85,7 +91,9 @@ def test_weighted_mode_uses_minimum_weights_zeroed_below_threshold(ee_session):
 def test_change_score_is_total_variation_distance(ee_session):
     ee = ee_session
     aoi = ee.Geometry.Rectangle([104.70, -2.95, 104.701, -2.949])
-    vec = lambda v: ee.Image.constant(v).rename(NAMES).toFloat()
+    def vec(v):
+        return ee.Image.constant(v).rename(NAMES).toFloat()
+
     score = fusion.change_score(vec([0.6, 0.4, 0.0]), vec([0.4, 0.6, 0.0]))
     assert score.reduceRegion(ee.Reducer.first(), aoi, 10).getInfo()["D"] == pytest.approx(0.2, abs=1e-4)
 
