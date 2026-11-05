@@ -22,6 +22,7 @@ from app.api.routes import (
     disaster_events,
     wildfire_events,
     download,
+    dmrv,
     fields,
     health,
     imagery,
@@ -46,6 +47,7 @@ from app.api.routes import (
 api_router = APIRouter()
 
 api_router.include_router(health.router)
+api_router.include_router(dmrv.router)
 api_router.include_router(viewer_features.router)
 api_router.include_router(actions.router)
 api_router.include_router(datasets.router)

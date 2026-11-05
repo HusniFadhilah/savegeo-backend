@@ -39,6 +39,7 @@ PERMISSIONS = [
     ("geospatial.write", "Register/delete/export/query geospatial datasets"),
     ("satellite.read", "View satellite provider configuration"),
     ("satellite.write", "Update satellite provider configuration"),
+    ("dmrv.project.create", "Create dMRV projects"),
     ("disaster.read", "View disaster management records"),
     ("disaster.create", "Create disaster events"),
     ("disaster.update", "Edit disaster event metadata"),

@@ -25,6 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.router import api_router
+from app.services.dmrv.errors import register_dmrv_error_handler
 from app.core.config import get_settings
 from app.core.version import get_product_version
 from app.core.cors import setup_cors
@@ -77,6 +78,7 @@ app.mount(
     name="disaster-thumbnails",
 )
 app.include_router(api_router, prefix=settings.api_prefix)
+register_dmrv_error_handler(app)
 
 
 @app.get("/", tags=["system"])

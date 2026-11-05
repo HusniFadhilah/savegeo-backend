@@ -27,7 +27,7 @@ _READ = frozenset({"project.read", "boundary.read", "field.read", "accounting.re
 
 # Separation of duties: no role may both create a submission and decide a review.
 ROLE_ACTIONS: dict[str, frozenset[str]] = {
-    "project_owner": _READ | {"members.manage", "boundary.write", "field.write", "submission.create"},
+    "project_owner": _READ | {"project.write", "members.manage", "boundary.write", "field.write", "submission.create"},
     "analyst": _READ | {"boundary.write", "submission.create"},
     "field_operator": frozenset({"project.read", "boundary.read", "field.read", "field.write"}),
     "reviewer": _READ | {"review.decide"},
