@@ -4,7 +4,7 @@ from __future__ import annotations
 import datetime as dt
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class _Strict(BaseModel):
@@ -30,6 +30,12 @@ class ProjectUpdate(_Strict):
     methodology_version: str | None = Field(default=None, max_length=32)
     start_date: dt.date | None = None
     crediting_period_years: int | None = Field(default=None, ge=1, le=100)
+
+    @model_validator(mode="after")
+    def _name_cannot_be_cleared(self):
+        if "name" in self.model_fields_set and self.name is None:
+            raise ValueError("name tidak boleh dikosongkan")
+        return self
 
 
 class ProjectOut(BaseModel):

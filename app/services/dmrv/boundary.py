@@ -20,6 +20,7 @@ from shapely.geometry import Polygon, mapping, shape
 
 # Pilot guard against accidental country-sized polygons; adjust with the carbon expert.
 MAX_BOUNDARY_AREA_HA = 500_000.0
+MAX_VERTICES = 100_000  # rejects oversized payloads before any geometry work
 AREA_METHOD = "geodesic_wgs84_pyproj"
 _OVERLAP_MIN_M2 = 1.0  # ignore float-precision slivers along shared edges
 
@@ -89,7 +90,21 @@ def _clean_rings(rings: Any) -> list[list[list[float]]]:
     return cleaned
 
 
+def _count_positions(node: Any) -> int:
+    if isinstance(node, (list, tuple)):
+        if node and all(isinstance(value, (int, float)) for value in node):
+            return 1
+        return sum(_count_positions(child) for child in node)
+    return 0
+
+
 def _normalised(geometry: dict) -> dict:
+    try:
+        vertices = _count_positions(geometry["coordinates"])
+    except RecursionError:
+        raise BoundaryError("bad_coordinates", "Struktur koordinat terlalu dalam.") from None
+    if vertices > MAX_VERTICES:
+        raise BoundaryError("too_complex", f"Jumlah titik {vertices:,} melebihi batas {MAX_VERTICES:,}; sederhanakan geometri.")
     if geometry["type"] == "Polygon":
         return {"type": "Polygon", "coordinates": _clean_rings(geometry["coordinates"])}
     return {"type": "MultiPolygon", "coordinates": [_clean_rings(polygon) for polygon in geometry["coordinates"]]}

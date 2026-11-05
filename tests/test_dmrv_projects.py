@@ -222,3 +222,12 @@ def test_dmrv_project_create_permission_is_seeded_for_admin_not_viewer():
 
     assert "dmrv.project.create" in ADMIN_PERMISSIONS
     assert "dmrv.project.create" not in VIEWER_PERMISSIONS
+
+
+def test_patch_with_null_name_is_422_not_500(env):
+    client, factory = env
+    project_id = create(client).json()["id"]
+    response = call(client, "PATCH", f"/dmrv/projects/{project_id}", if_match='"1"', json={"name": None})
+    assert response.status_code == 422
+    with factory() as db:
+        assert db.get(DmrvProject, project_id).revision == 1

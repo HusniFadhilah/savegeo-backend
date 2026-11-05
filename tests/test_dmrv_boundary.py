@@ -98,3 +98,12 @@ def test_overlap_summary_counts_positive_area_only():
     assert overlap_ha == pytest.approx(base.area_ha / 2, rel=0.02)
     assert overlap_summary(base.validated_geojson, [square(111.0, -7.0)]) == (0, 0.0)
     assert overlap_summary(base.validated_geojson, [square(110.01, -7.0)]) == (0, 0.0)
+
+
+def test_polygon_with_too_many_vertices_is_rejected_before_geometry_work():
+    import math
+
+    n = 100_001
+    ring = [[110.0 + 0.001 * math.cos(2 * math.pi * i / n), -7.0 + 0.001 * math.sin(2 * math.pi * i / n)] for i in range(n)]
+    ring.append(ring[0])
+    assert code_of({"type": "Polygon", "coordinates": [ring]}) == "too_complex"
