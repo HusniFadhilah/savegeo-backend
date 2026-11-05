@@ -1,3 +1,5 @@
+import os
+
 import pytest
 from fastapi import Depends, FastAPI, Request
 from fastapi.testclient import TestClient
@@ -43,7 +45,14 @@ SQUARE_2 = {
 
 @pytest.fixture()
 def env():
-    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    # Set DMRV_TEST_DATABASE_URL to a THROWAWAY PostgreSQL database to run these
+    # tests on PostgreSQL; the tables are dropped afterwards. Default: SQLite.
+    url = os.environ.get("DMRV_TEST_DATABASE_URL")
+    if url:
+        engine = create_engine(url)
+        Base.metadata.drop_all(engine, tables=TABLES)
+    else:
+        engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     Base.metadata.create_all(engine, tables=TABLES)
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     with factory() as seed:
@@ -72,6 +81,8 @@ def env():
     app.dependency_overrides[get_current_app_viewer] = test_viewer
     client = TestClient(app, raise_server_exceptions=False)
     yield client, factory
+    if url:
+        Base.metadata.drop_all(engine, tables=TABLES)
     engine.dispose()
 
 
