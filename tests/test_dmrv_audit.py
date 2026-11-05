@@ -1,10 +1,17 @@
 import pytest
 from sqlalchemy import create_engine, func, select
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import Session
 
 from app.db.models.dmrv_audit import DmrvAuditEvent
 from app.services.dmrv.audit import record_audit
 from app.services.dmrv.authz import Principal
+
+
+@compiles(JSONB, "sqlite")
+def _jsonb_sqlite(type_, compiler, **kwargs):
+    return "JSON"
 
 
 @pytest.fixture()
