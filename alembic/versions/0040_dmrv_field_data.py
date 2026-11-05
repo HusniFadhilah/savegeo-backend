@@ -62,6 +62,7 @@ def upgrade() -> None:
         sa.Column("status", sa.String(16), nullable=False),
         sa.Column("biomass_source", sa.String(16)),
         sa.Column("qa_flags", postgresql.JSONB(), nullable=False),
+        sa.Column("batch_id", sa.String(36), sa.ForeignKey("dmrv_import_batches.id", ondelete="SET NULL")),
         sa.UniqueConstraint("visit_id", "tree_code", name="uq_dmrv_tree_visit_code"),
     )
     op.create_index("ix_dmrv_tree_measurements_visit_id", "dmrv_tree_measurements", ["visit_id"])
