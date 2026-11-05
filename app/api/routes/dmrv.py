@@ -1,7 +1,10 @@
 """dMRV API: /api/dmrv/projects. Thin routes; authorization lives in services/dmrv."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Header, Request, Response
+import json
+from typing import Literal
+
+from fastapi import APIRouter, Depends, File, Form, Header, Request, Response, UploadFile
 from sqlalchemy.orm import Session
 
 from app.core.security import admin_has_permission, get_current_app_viewer
@@ -17,9 +20,10 @@ from app.schemas.dmrv import (
     ProjectOut,
     ProjectUpdate,
 )
-from app.services.dmrv import projects
-from app.services.dmrv.authz import Principal
+from app.services.dmrv import field_data, projects
+from app.services.dmrv.authz import Principal, authorize
 from app.services.dmrv.errors import DmrvError
+from app.services.dmrv.field_import import CANONICAL_FIELDS, ImportOptions
 
 router = APIRouter(prefix="/dmrv", tags=["dmrv"])
 
@@ -131,3 +135,108 @@ def list_boundaries(
     db: Session = Depends(get_db),
 ):
     return projects.list_boundaries(db, _principal(viewer), project_id)
+
+
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+
+
+def _read_upload(file: UploadFile) -> bytes:
+    data = file.file.read(MAX_UPLOAD_BYTES + 1)
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise DmrvError(413, "file_too_large", "Ukuran berkas maksimal 10 MB.")
+    return data
+
+
+def _parse_mapping(text: str | None) -> dict[str, str] | None:
+    if not text:
+        return None
+    try:
+        mapping = json.loads(text)
+    except json.JSONDecodeError:
+        raise DmrvError(422, "bad_mapping", "Mapping kolom bukan JSON yang valid.") from None
+    if (
+        not isinstance(mapping, dict)
+        or not all(isinstance(k, str) and isinstance(v, str) for k, v in mapping.items())
+        or set(mapping) - set(CANONICAL_FIELDS)
+    ):
+        raise DmrvError(
+            422, "bad_mapping",
+            "Mapping harus objek {field: nama_kolom}; field dikenal: " + ", ".join(CANONICAL_FIELDS) + ".",
+        )
+    return mapping
+
+
+def _options(height_unit: str, plot_area_m2: str | None, area_basis: str | None, default_visit_year: str | None) -> ImportOptions:
+    try:
+        area = float(plot_area_m2) if plot_area_m2 else None
+        year = int(default_visit_year) if default_visit_year else None
+    except ValueError:
+        raise DmrvError(422, "bad_options", "plot_area_m2 dan default_visit_year harus berupa angka.") from None
+    if height_unit not in ("m", "cm") or area_basis not in (None, "", "measured", "assumed") or (area is not None and area <= 0):
+        raise DmrvError(422, "bad_options", "height_unit: m|cm; area_basis: measured|assumed; plot_area_m2 > 0.")
+    return ImportOptions(
+        height_unit=height_unit, plot_area_m2=area, area_basis=area_basis or None, default_visit_year=year,  # type: ignore[arg-type]
+    )
+
+
+@router.post("/projects/{project_id}/field-data/imports/preview")
+def preview_field_import(
+    project_id: str,
+    file: UploadFile = File(...),
+    mapping: str | None = Form(default=None),
+    height_unit: str = Form(default="m"),
+    plot_area_m2: str | None = Form(default=None),
+    area_basis: str | None = Form(default=None),
+    default_visit_year: str | None = Form(default=None),
+    viewer: User | AdminUser = Depends(get_current_app_viewer),
+    db: Session = Depends(get_db),
+):
+    principal = _principal(viewer)
+    authorize(db, project_id, principal, "field.write")
+    return field_data.preview_import(
+        db, principal, project_id, file.filename or "upload", _read_upload(file), _parse_mapping(mapping),
+        _options(height_unit, plot_area_m2, area_basis, default_visit_year),
+    )
+
+
+@router.post("/projects/{project_id}/field-data/imports")
+def commit_field_import(
+    project_id: str,
+    request: Request,
+    response: Response,
+    file: UploadFile = File(...),
+    mapping: str | None = Form(default=None),
+    mode: Literal["atomic", "partial"] = Form(default="atomic"),
+    height_unit: str = Form(default="m"),
+    plot_area_m2: str | None = Form(default=None),
+    area_basis: str | None = Form(default=None),
+    default_visit_year: str | None = Form(default=None),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    viewer: User | AdminUser = Depends(get_current_app_viewer),
+    db: Session = Depends(get_db),
+):
+    principal = _principal(viewer)
+    authorize(db, project_id, principal, "field.write")
+    if not idempotency_key or len(idempotency_key) > 64:
+        raise DmrvError(400, "idempotency_key_required", "Header Idempotency-Key (maks. 64 karakter) wajib diisi.")
+    result = field_data.commit_import(
+        db, principal, project_id, file.filename or "upload", _read_upload(file), _parse_mapping(mapping),
+        _options(height_unit, plot_area_m2, area_basis, default_visit_year), mode, _request_id(request), idempotency_key,
+    )
+    response.status_code = 200 if result.pop("replayed", False) else 201
+    return result
+
+
+@router.get("/projects/{project_id}/field-data/plots")
+def list_field_plots(
+    project_id: str, viewer: User | AdminUser = Depends(get_current_app_viewer), db: Session = Depends(get_db)
+):
+    return field_data.list_plots(db, _principal(viewer), project_id)
+
+
+@router.get("/projects/{project_id}/field-data/plots/{plot_code}/visits")
+def list_field_visits(
+    project_id: str, plot_code: str, viewer: User | AdminUser = Depends(get_current_app_viewer),
+    db: Session = Depends(get_db),
+):
+    return field_data.list_visits(db, _principal(viewer), project_id, plot_code)

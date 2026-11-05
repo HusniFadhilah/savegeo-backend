@@ -15,6 +15,7 @@ from app.db.base import Base
 from app.db.models.admin_user import AdminUser
 from app.db.models.dmrv_audit import DmrvAuditEvent, DmrvIdempotencyKey
 from app.db.models.dmrv_boundary import BoundaryVersion
+from app.db.models.dmrv_field import ImportBatch, SurveyPlot, SurveyVisit, TreeMeasurement
 from app.db.models.dmrv_project import DmrvProject, ProjectMember
 from app.db.models.role import Permission, Role, role_permissions
 from app.db.models.user import User
@@ -31,6 +32,7 @@ TABLES = [
     User.__table__, AdminUser.__table__, Role.__table__, Permission.__table__, role_permissions,
     DmrvProject.__table__, ProjectMember.__table__, BoundaryVersion.__table__,
     DmrvAuditEvent.__table__, DmrvIdempotencyKey.__table__,
+    ImportBatch.__table__, SurveyPlot.__table__, SurveyVisit.__table__, TreeMeasurement.__table__,
 ]
 PROJECT = {"name": "Pilot ARR", "organization": "UNDIP", "methodology_id": "VM0047", "methodology_version": "1.1"}
 SQUARE = {

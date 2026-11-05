@@ -9,13 +9,16 @@ transaction as the data.
 from __future__ import annotations
 
 import hashlib
+import json
 import uuid
 from dataclasses import asdict
 from typing import Any, Literal
 
 from sqlalchemy import exists, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.db.models.dmrv_audit import DmrvIdempotencyKey
 from app.db.models.dmrv_field import ImportBatch, SurveyPlot, SurveyVisit, TreeMeasurement
 from app.services.dmrv.audit import record_audit
 from app.services.dmrv.authz import Principal, authorize
@@ -93,12 +96,34 @@ def preview_import(
     }
 
 
+def _replay(db: Session, principal: Principal, storage_key: str, request_hash: str) -> dict[str, Any] | None:
+    row = db.execute(
+        select(DmrvIdempotencyKey).where(
+            DmrvIdempotencyKey.principal_key == principal.key, DmrvIdempotencyKey.key == storage_key
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        return None
+    if row.request_hash != request_hash:
+        raise DmrvError(422, "idempotency_key_reused", "Idempotency-Key sudah dipakai dengan isi permintaan berbeda.")
+    return {**row.response_body, "replayed": True}
+
+
 def commit_import(
     db: Session, principal: Principal, project_id: str, filename: str, data: bytes,
     mapping: dict[str, str] | None, options: ImportOptions, mode: Literal["atomic", "partial"],
-    request_id: str | None,
+    request_id: str | None, idempotency_key: str | None = None,
 ) -> dict[str, Any]:
     authorize(db, project_id, principal, "field.write")
+    storage_key = request_hash = None
+    if idempotency_key:
+        storage_key = f"field-import:{project_id}:{idempotency_key}"
+        request_hash = hashlib.sha256(json.dumps(
+            {"file": hashlib.sha256(data).hexdigest(), "name": filename, "mapping": mapping,
+             "options": asdict(options), "mode": mode}, sort_keys=True).encode()).hexdigest()
+        replayed = _replay(db, principal, storage_key, request_hash)
+        if replayed is not None:
+            return replayed
     _, _, _, report, extra, rejected = _assess(db, project_id, filename, data, mapping, options)
     issues = report.issues + extra
     sha256 = hashlib.sha256(data).hexdigest()
@@ -173,16 +198,28 @@ def commit_import(
             "plots_created": plots_created, "visits_created": visits_created, "issues": _issues_out(issues),
         }
         batch.status, batch.summary = status, summary
+        result = {"batch_id": batch.id, "status": status, "mode": mode, **summary}
+        if storage_key:
+            db.add(DmrvIdempotencyKey(
+                principal_key=principal.key, key=storage_key, request_hash=request_hash,
+                response_status=201, response_body=result,
+            ))
         record_audit(
             db, principal=principal, action="field_import.commit", resource_type="import_batch",
             resource_id=batch.id, project_id=project_id, request_id=request_id, snapshot_hash=sha256,
             after={"status": status, "mode": mode, **{k: v for k, v in summary.items() if k != "issues"}},
         )
         db.commit()
+    except IntegrityError:
+        db.rollback()
+        concurrent = _replay(db, principal, storage_key, request_hash) if storage_key else None
+        if concurrent is None:
+            raise
+        return concurrent
     except Exception:
         db.rollback()
         raise
-    return {"batch_id": batch.id, "status": status, "mode": mode, **summary}
+    return result
 
 
 def list_plots(db: Session, principal: Principal, project_id: str) -> list[dict[str, Any]]:
