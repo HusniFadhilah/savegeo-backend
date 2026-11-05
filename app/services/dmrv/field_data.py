@@ -266,6 +266,11 @@ def list_visits(db: Session, principal: Principal, project_id: str, plot_code: s
     ).scalar_one_or_none()
     if plot is None:
         raise DmrvError(404, "not_found", "Plot tidak ditemukan.")
+    return plot_visits(db, plot)
+
+
+def plot_visits(db: Session, plot: SurveyPlot) -> list[dict[str, Any]]:
+    """Visits of one plot with their living-biomass density (no authorization: callers check it)."""
     trees_by_visit: dict[str, list[tuple[str, float | None]]] = {}
     for visit_id, status, biomass in db.execute(  # one query for every visit of the plot
         select(TreeMeasurement.visit_id, TreeMeasurement.status, TreeMeasurement.biomass_kg)
