@@ -15,6 +15,11 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 MAX_ROWS = 50_000
+MAX_COLUMNS = 200
+# Column widths of the target tables (dmrv_survey_plots / dmrv_tree_measurements / dmrv_survey_visits).
+MAX_LENGTHS = {"plot_code": 64, "tree_code": 64, "species": 255, "operator": 128}
+_AMBIGUOUS_NUMBER = re.compile(r"^[1-9]\d{0,2}[.,]\d{3}$")
+_AMBIGUITY_CHECKED = frozenset({"circumference_cm", "dbh_cm", "height", "biomass_kg", "plot_area_m2"})
 ALLOWED_STATUS = frozenset({"live", "dead", "recruit", "missing"})
 _MISSING_TOKENS = frozenset({"", "-", "na", "n/a", "nan", "null"})
 _INTEGRAL_FLOAT = re.compile(r"^(\d+)\.0+$")
@@ -136,18 +141,34 @@ def _read_csv(data: bytes) -> list[list[str]]:
     delimiter = max((",", ";", "\t"), key=lambda candidate: first_line.count(candidate))
     if first_line.count(delimiter) == 0:
         delimiter = ","
-    return [[cell.strip() for cell in row] for row in csv.reader(io.StringIO(text), delimiter=delimiter)]
+    table: list[list[str]] = []
+    try:
+        for row in csv.reader(io.StringIO(text), delimiter=delimiter):
+            table.append([cell.strip() for cell in row[: MAX_COLUMNS + 1]])
+            if len(table) > MAX_ROWS + 2:  # stop early; read_table reports too_many_rows
+                break
+    except csv.Error as exc:
+        raise FieldImportError("bad_csv", f"Berkas CSV tidak valid: {exc}") from exc
+    return table
 
 
 def _read_xlsx(data: bytes) -> list[list[str]]:
     from openpyxl import load_workbook
 
+    table: list[list[str]] = []
     try:
         workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
         sheet = workbook.worksheets[0]
-        return [[_cell_text(cell) for cell in row] for row in sheet.iter_rows(values_only=True)]
+        for row in sheet.iter_rows(values_only=True, max_col=MAX_COLUMNS + 1):
+            cells = [_cell_text(cell) for cell in row]
+            while cells and not cells[-1]:  # max_col pads every row with empty cells
+                cells.pop()
+            table.append(cells)
+            if len(table) > MAX_ROWS + 2:  # a decompression bomb never gets fully materialised
+                break
     except Exception as exc:  # noqa: BLE001 - openpyxl raises many types for corrupt files
         raise FieldImportError("unreadable_file", "Berkas XLSX tidak dapat dibaca.") from exc
+    return table
 
 
 def read_table(filename: str, data: bytes) -> tuple[list[str], list[dict[str, str]]]:
@@ -164,6 +185,8 @@ def read_table(filename: str, data: bytes) -> tuple[list[str], list[dict[str, st
     if len(table) - 1 > MAX_ROWS:
         raise FieldImportError("too_many_rows", f"Maksimal {MAX_ROWS:,} baris data per berkas.")
     header_row = table[0]
+    if len(header_row) > MAX_COLUMNS:
+        raise FieldImportError("too_many_columns", f"Maksimal {MAX_COLUMNS} kolom per berkas.")
     columns = [(index, name) for index, name in enumerate(header_row) if name]
     headers = [name for _, name in columns]
     rows = [{name: (row[index] if index < len(row) else "") for index, name in columns} for row in table[1:]]
@@ -209,6 +232,7 @@ def validate_rows(rows: list[dict[str, str]], mapping: dict[str, str], options: 
 
     for index, row in enumerate(rows, start=2):
         row_issues: list[RowIssue] = []
+        flags: list[str] = []
 
         def error(code: str, message: str, row_number: int = index, bucket: list[RowIssue] = row_issues) -> None:
             bucket.append(RowIssue(row_number, "error", code, message))
@@ -219,12 +243,19 @@ def validate_rows(rows: list[dict[str, str]], mapping: dict[str, str], options: 
         def raw(name: str, source: dict[str, str] = row) -> str:
             return source.get(mapping[name], "").strip() if name in mapping else ""
 
-        def number(name: str, *, allow_negative: bool = False) -> float | None:
+        def number(name: str, *, allow_negative: bool = False, flag_bucket: list[str] = flags) -> float | None:
             try:
                 value = _parse_number(raw(name))
             except ValueError:
                 error("bad_number", f"Kolom {name} bukan angka: {raw(name)!r}.")
                 return None
+            if name in _AMBIGUITY_CHECKED and _AMBIGUOUS_NUMBER.match(raw(name).replace(" ", "")):
+                warning(
+                    "ambiguous_number_format",
+                    f"Kolom {name}: {raw(name)!r} bisa berarti ribuan (Indonesia) atau desimal; dibaca sebagai desimal ({value:g}). "
+                    "Tulis ulang tanpa pemisah jika maksudnya ribuan.",
+                )
+                flag_bucket.append("ambiguous_number_format")
             if value is not None and value < 0 and not allow_negative:
                 error("negative_value", f"Kolom {name} tidak boleh negatif.")
                 return None
@@ -246,8 +277,11 @@ def validate_rows(rows: list[dict[str, str]], mapping: dict[str, str], options: 
             year: int | None = None
             if year_text:
                 try:
-                    year = int(float(year_text))
-                except ValueError:
+                    parsed_year = _parse_number(year_text)
+                    if parsed_year is None or not parsed_year.is_integer():
+                        raise ValueError(year_text)
+                    year = int(parsed_year)
+                except (ValueError, OverflowError):
                     error("bad_date", f"Tahun survei tidak valid: {year_text!r}.")
             elif options.default_visit_year is not None:
                 year = options.default_visit_year
@@ -260,11 +294,16 @@ def validate_rows(rows: list[dict[str, str]], mapping: dict[str, str], options: 
                     error("bad_date", f"Tahun survei di luar rentang: {year}.")
 
         tree_code = _clean_code(raw("tree_code"))
-        flags: list[str] = []
         if not tree_code:
             tree_code = f"row-{index}"
             warning("tree_code_generated", f"Kode pohon dibuat otomatis: {tree_code}.")
             flags.append("tree_code_generated")
+
+        if any("\x00" in raw(name) for name in CANONICAL_FIELDS):
+            error("bad_text", "Berkas mengandung karakter NUL (\x00) yang tidak dapat disimpan.")
+        for name, value in (("plot_code", plot_code), ("tree_code", tree_code), ("species", raw("species")), ("operator", raw("operator"))):
+            if len(value) > MAX_LENGTHS[name]:
+                error("value_too_long", f"Kolom {name} melebihi {MAX_LENGTHS[name]} karakter.")
 
         circumference = number("circumference_cm")
         dbh = number("dbh_cm")

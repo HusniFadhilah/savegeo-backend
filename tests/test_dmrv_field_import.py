@@ -188,3 +188,78 @@ def test_plot_area_basis_row_value_is_measured_option_is_assumed():
     assert (assumed.trees[0].area_m2, assumed.trees[0].area_basis) == (400.0, "assumed")
     none = run({})
     assert (none.trees[0].area_m2, none.trees[0].area_basis) == (None, None)
+
+
+# --- hardening found in the branch review ---------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("plot_code", "p" * 65), ("tree_code", "t" * 65), ("species", "s" * 256), ("operator", "o" * 129)],
+)
+def test_values_longer_than_the_columns_are_row_errors(field, value):
+    report = run({field: value})
+    assert codes(report, "error") == [(2, "value_too_long")]
+    assert report.trees == []
+
+
+def test_nul_character_is_a_row_error_not_a_database_error():
+    report = run({"species": "Asem\x00Jawa"})
+    assert codes(report, "error") == [(2, "bad_text")]
+
+
+@pytest.mark.parametrize("year", ["inf", "Infinity", "1e999", "nan", "2024.7", "twenty"])
+def test_survey_year_must_be_a_finite_whole_year(year):
+    report = run({"survey_year": year})
+    assert codes(report, "error") == [(2, "bad_date")]
+
+
+def test_year_written_as_float_from_a_spreadsheet_is_accepted():
+    report = run({"survey_year": "2024.0"})
+    assert report.issues == [] and report.trees[0].visit_date == dt.date(2024, 1, 1)
+
+
+@pytest.mark.parametrize("text", ["1.500", "1,234", "12.500"])
+def test_ambiguous_thousands_or_decimal_format_is_warned(text):
+    report = run({"biomass_kg": text})
+    assert [i.code for i in report.issues] == ["ambiguous_number_format"]
+    assert report.issues[0].level == "warning" and "ambiguous_number_format" in report.trees[0].flags
+
+
+@pytest.mark.parametrize("text", ["0.125", "22.28", "205.4233029", "1.234,5", "1500", "1,5"])
+def test_unambiguous_numbers_have_no_warning(text):
+    assert run({"biomass_kg": text}).issues == []
+
+
+def test_coordinates_with_three_decimals_are_not_flagged_as_ambiguous():
+    report = run({"latitude": "-7.052", "longitude": "110.439"})
+    assert report.issues == []
+
+
+def test_xlsx_row_limit_is_enforced_while_reading(monkeypatch):
+    from app.services.dmrv import field_import
+
+    monkeypatch.setattr(field_import, "MAX_ROWS", 5)
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["plot_code"])
+    for index in range(10):
+        sheet.append([index])
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    with pytest.raises(FieldImportError) as info:
+        read_table("big.xlsx", buffer.getvalue())
+    assert info.value.code == "too_many_rows"
+
+
+def test_csv_with_an_enormous_cell_is_a_clean_error():
+    with pytest.raises(FieldImportError) as info:
+        read_table("trees.csv", b"a\n" + b"x" * 300_000 + b"\n")
+    assert info.value.code == "bad_csv"
+
+
+def test_too_many_columns_is_rejected():
+    header = ",".join(f"c{i}" for i in range(300))
+    with pytest.raises(FieldImportError) as info:
+        read_table("trees.csv", (header + "\n" + ",".join("1" for _ in range(300)) + "\n").encode())
+    assert info.value.code == "too_many_columns"
