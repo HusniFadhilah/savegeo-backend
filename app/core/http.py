@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import JSONResponse, Response
 
 from app.core.config import Settings
 
@@ -130,7 +130,13 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         elif self._csrf_rejected(request):
             response = self._problem(request, 403, "Origin is not allowed for cookie-authenticated requests")
         elif self._upload_too_large(request):
-            response = self._problem(request, 413, "Upload exceeds the 10 MB limit")
+            response = JSONResponse(  # same body as every other dMRV error (see services/dmrv/errors.py)
+                status_code=413,
+                content={
+                    "code": "file_too_large", "message": "Ukuran berkas maksimal 10 MB.",
+                    "request_id": request_id, "retryable": False, "details": [],
+                },
+            )
         else:
             response = await call_next(request)
         if request.url.path.startswith(self.settings.api_prefix + "/"):

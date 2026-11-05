@@ -32,7 +32,9 @@ def test_oversized_dmrv_upload_is_rejected_before_the_body_is_parsed(client):
     headers = {"Content-Type": "multipart/form-data; boundary=x"}
     too_big = client.post(path, content=b"x" * (12 * 1024 * 1024), headers=headers)
     assert too_big.status_code == 413
-    assert too_big.headers["content-type"].startswith("application/problem+json")
+    body = too_big.json()
+    assert body["code"] == "file_too_large" and body["retryable"] is False and body["request_id"]
+    assert set(body) == {"code", "message", "request_id", "retryable", "details"}
     assert client.post(path + "/preview", content=b"x" * (12 * 1024 * 1024), headers=headers).status_code == 413
     # ordinary-sized requests are not touched by the size guard (this one fails later, as a malformed form)
     assert client.post(path, content=b"x", headers=headers).status_code != 413
