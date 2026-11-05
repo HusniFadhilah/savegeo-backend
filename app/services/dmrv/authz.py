@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from app.db.models.admin_user import AdminUser
 from app.db.models.dmrv_project import ProjectMember
 from app.db.models.user import User
+from app.services.dmrv.errors import DmrvError, project_not_found
 
 PrincipalType = Literal["user", "admin"]
 
@@ -74,3 +75,13 @@ def require_project_action(db: Session, project_id: str, principal: Principal, a
     if action not in ROLE_ACTIONS.get(role, frozenset()):
         raise ProjectForbidden(action)
     return role
+
+
+def authorize(db: Session, project_id: str, principal: Principal, action: str) -> str:
+    """API-facing wrapper: uniform 404 for non-members, 403 for a wrong role."""
+    try:
+        return require_project_action(db, project_id, principal, action)
+    except ProjectNotFound:
+        raise project_not_found() from None
+    except ProjectForbidden:
+        raise DmrvError(403, "forbidden", "Peran Anda tidak memiliki izin untuk aksi ini.") from None

@@ -32,21 +32,14 @@ from app.services.dmrv.audit import record_audit
 from app.services.dmrv.authz import (
     PROJECT_ROLES,
     Principal,
-    ProjectForbidden,
-    ProjectNotFound,
-    require_project_action,
+    authorize,
 )
 from app.services.dmrv.boundary import BoundaryError, overlap_summary, validate_boundary
-from app.services.dmrv.errors import DmrvError, project_not_found
+from app.services.dmrv.errors import DmrvError
 
 
 def _authorize(db: Session, project_id: str, principal: Principal, action: str) -> str:
-    try:
-        return require_project_action(db, project_id, principal, action)
-    except ProjectNotFound:
-        raise project_not_found() from None
-    except ProjectForbidden:
-        raise DmrvError(403, "forbidden", "Peran Anda tidak memiliki izin untuk aksi ini.") from None
+    return authorize(db, project_id, principal, action)
 
 
 def _project_out(project: DmrvProject, role: str | None) -> ProjectOut:
