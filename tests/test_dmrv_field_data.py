@@ -176,3 +176,18 @@ def test_unknown_plot_in_known_project_is_not_found(db):
     with pytest.raises(DmrvError) as info:
         field_data.list_visits(db, OWNER_1, "p-1", "nope")
     assert info.value.status == 404
+
+
+def test_concurrent_duplicate_visit_becomes_409_not_500(db, monkeypatch):
+    commit(db, csv_bytes(*GOOD))
+    original = field_data._assess
+
+    def blind(db_, project_id, filename, data, mapping, options):
+        headers, rows, mapping_, report, _extra, _rejected = original(db_, project_id, filename, data, mapping, options)
+        return headers, rows, mapping_, report, [], set()  # simulates losing a race: no visit_exists seen
+
+    monkeypatch.setattr(field_data, "_assess", blind)
+    with pytest.raises(DmrvError) as info:
+        commit(db, csv_bytes(*GOOD))
+    assert (info.value.status, info.value.code, info.value.retryable) == (409, "conflict", True)
+    assert count(db, TreeMeasurement) == 2

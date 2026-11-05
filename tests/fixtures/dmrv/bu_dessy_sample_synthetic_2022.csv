@@ -1,0 +1,4 @@
+Data ID,Point ID,File,Sheet,Transek,Baris Sumber,No.,Jenis Pohon,Keliling (cm),Diameter (cm),Tinggi(cm),Biomassa (kg),No,Tinggi (cm),SUMBER,Sumber,Reference Rumus alometrik lamtoro,Tinggi (m),100,Tahun,Latitude,Longitude
+1,1,Data Survei Carbon,Tembalang,T1,6,1.0,Tamarindus indica / Asem Jawa,63.0,20.05,892.0,164.3386,,,,,,,,2022,-7.052722222222222,110.4396388888889
+2,1,Data Survei Carbon,Tembalang,T1,7,2.0,Terminalia catappa / Ketapang,53.4,17.19,825.0,110.2678,,,,,,,,2022,-7.052722222222222,110.4396388888889
+3,1,Data Survei Carbon,Tembalang,T1,8,3.0,Senna Siamea / Johar,80.1,25.50,1248.0,306.2403,,,,,,,,2022,-7.052722222222222,110.4396388888889

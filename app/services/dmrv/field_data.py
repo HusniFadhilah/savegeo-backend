@@ -214,7 +214,10 @@ def commit_import(
         db.rollback()
         concurrent = _replay(db, principal, storage_key, request_hash) if storage_key else None
         if concurrent is None:
-            raise
+            raise DmrvError(
+                409, "conflict", "Data bentrok dengan impor lain yang berjalan bersamaan; periksa hasilnya lalu coba lagi.",
+                retryable=True,
+            ) from None
         return concurrent
     except Exception:
         db.rollback()
