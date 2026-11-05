@@ -25,3 +25,14 @@ def test_http_errors_use_problem_details_and_do_not_leak_exception(client):
     assert body["status"] == 404
     assert body["request_id"]
     assert body["error"] == body["detail"]
+
+
+def test_oversized_dmrv_upload_is_rejected_before_the_body_is_parsed(client):
+    path = "/api/dmrv/projects/p-1/field-data/imports"
+    headers = {"Content-Type": "multipart/form-data; boundary=x"}
+    too_big = client.post(path, content=b"x" * (12 * 1024 * 1024), headers=headers)
+    assert too_big.status_code == 413
+    assert too_big.headers["content-type"].startswith("application/problem+json")
+    assert client.post(path + "/preview", content=b"x" * (12 * 1024 * 1024), headers=headers).status_code == 413
+    # ordinary-sized requests are not touched by the size guard (this one fails later, as a malformed form)
+    assert client.post(path, content=b"x", headers=headers).status_code != 413

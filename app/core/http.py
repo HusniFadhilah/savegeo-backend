@@ -21,6 +21,10 @@ from starlette.responses import Response
 from app.core.config import Settings
 
 _REQUEST_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+# dMRV field-data uploads: 10 MB file + multipart overhead. The route re-checks the file itself; this
+# rejects an oversized body on Content-Length before the multipart parser spools it to disk.
+_DMRV_UPLOAD_PATH = re.compile(r"^/dmrv/projects/[^/]+/field-data/imports(?:/preview)?$")
+DMRV_UPLOAD_LIMIT_BYTES = 11 * 1024 * 1024
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -84,6 +88,16 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         window.append(now)
         return False
 
+    def _upload_too_large(self, request: Request) -> bool:
+        prefix = self.settings.api_prefix
+        path = request.url.path
+        if request.method != "POST" or not path.startswith(prefix + "/") or not _DMRV_UPLOAD_PATH.match(path[len(prefix):]):
+            return False
+        try:
+            return int(request.headers.get("content-length", "0")) > DMRV_UPLOAD_LIMIT_BYTES
+        except ValueError:
+            return True
+
     def _csrf_rejected(self, request: Request) -> bool:
         if not self.settings.csrf_protection_enabled or request.method in {"GET", "HEAD", "OPTIONS"}:
             return False
@@ -115,6 +129,8 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             response = self._problem(request, 429, "Rate limit exceeded", {"Retry-After": "60"})
         elif self._csrf_rejected(request):
             response = self._problem(request, 403, "Origin is not allowed for cookie-authenticated requests")
+        elif self._upload_too_large(request):
+            response = self._problem(request, 413, "Upload exceeds the 10 MB limit")
         else:
             response = await call_next(request)
         if request.url.path.startswith(self.settings.api_prefix + "/"):
