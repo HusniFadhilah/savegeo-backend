@@ -119,6 +119,27 @@ carbon = visits[1]["density"]["carbon_mg_c_per_ha"]
 check("2024 carbon density plausible (Mg C/ha)", carbon and 100 < carbon < 400, str(carbon))
 check("analyst-less owner reads accounting? n/a; stranger cannot list plots", stranger.get(f"{BASE}/dmrv/projects/{pid}/field-data/plots").status_code == 404)
 
+# --- monitoring period + durable summary job
+period_payload = {"name": "Monitoring 2024 " + RUN, "start_date": "2024-01-01", "end_date": "2024-12-31", "boundary_version": 1}
+period_headers = {"Idempotency-Key": "period-2024-" + RUN}
+r = owner_a.post(f"{BASE}/dmrv/projects/{pid}/monitoring-periods", json=period_payload, headers=period_headers)
+check("monitoring period created and tied to boundary v1", r.status_code == 201 and r.json()["boundary_checksum"] == owner_a.get(f"{BASE}/dmrv/projects/{pid}/boundaries").json()[0]["checksum"])
+period_id = r.json()["id"]
+replay = owner_a.post(f"{BASE}/dmrv/projects/{pid}/monitoring-periods", json=period_payload, headers=period_headers)
+check("monitoring period idempotent replay", replay.status_code == 200 and replay.json()["id"] == period_id)
+check("field operator reads monitoring period", field_user.get(f"{BASE}/dmrv/projects/{pid}/monitoring-periods").status_code == 200)
+check("non-member cannot read monitoring period", owner_b.get(f"{BASE}/dmrv/projects/{pid}/monitoring-periods").status_code == 404)
+r = owner_a.patch(f"{BASE}/dmrv/projects/{pid}/monitoring-periods/{period_id}", json={"status": "in_progress"}, headers={"If-Match": '"1"'})
+check("monitoring period starts with revision control", r.status_code == 200 and r.json()["status"] == "in_progress" and r.headers.get("ETag") == '"2"')
+job_payload = {"kind": "field_summary", "monitoring_period_id": period_id}
+job_headers = {"Idempotency-Key": "period-summary-" + RUN}
+r = owner_a.post(f"{BASE}/dmrv/projects/{pid}/jobs", json=job_payload, headers=job_headers)
+check("period-scoped durable field summary queued", r.status_code == 202 and r.json()["status"] == "queued")
+job_id = r.json()["id"]
+replay = owner_a.post(f"{BASE}/dmrv/projects/{pid}/jobs", json=job_payload, headers=job_headers)
+check("field summary job idempotent replay", replay.status_code == 200 and replay.json()["id"] == job_id)
+check("non-member cannot read job", owner_b.get(f"{BASE}/dmrv/projects/{pid}/jobs/{job_id}").status_code == 404)
+
 # --- limits
 big = b"a,b\n" + b"1,2\n" * (3 * 1024 * 1024)
 r = field_user.post(f"{BASE}/dmrv/projects/{pid}/field-data/imports/preview", files={"file": ("big.csv", big, "text/csv")}, data=form)

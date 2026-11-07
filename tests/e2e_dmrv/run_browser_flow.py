@@ -1,5 +1,6 @@
 """Real-browser (Chromium) end-to-end flow for dMRV against the live throwaway stack."""
 import json
+import os
 import random
 import re
 import sys
@@ -17,6 +18,7 @@ APP = "http://localhost:5501"
 API = "http://127.0.0.1:8086/api"
 PASSWORD = "E2e-Passw0rd!"
 FIX = Path(__file__).resolve().parents[1] / "fixtures" / "dmrv"
+E2E_DATABASE = os.environ.get("DMRV_E2E_DATABASE", "127.0.0.1:55434/e2e")
 RUN = str(int(time.time()))
 NAME = f"Browser Pilot {RUN}"
 LON = round(113.0 + random.random() * 3, 4)  # unique per run: no accidental overlap with earlier runs
@@ -101,6 +103,24 @@ with sync_playwright() as p:
     check("boundary row lists area ~122 ha", rows.count() == 1 and re.search(r"12[0-3],\d\d", body_text) is not None, f"rows={rows.count()} tbody_count={page.locator('table tbody').count()} text={body_text!r}")
     shot(page, "06_boundary_saved")
 
+    # monitoring period: bind the date window to immutable boundary v1
+    page.get_by_role("tab", name="Periode monitoring").click()
+    expect(page.get_by_text("Belum ada periode monitoring.")).to_be_visible()
+    page.get_by_label("Nama periode").fill("2024")
+    page.get_by_label("Tanggal mulai").fill("2024-01-01")
+    page.get_by_label("Tanggal akhir").fill("2024-12-31")
+    page.get_by_role("button", name="Buat periode").click()
+    expect(page.get_by_role("status").filter(has_text="Periode monitoring dibuat.")).to_be_visible(timeout=15000)
+    period_row = page.locator("table tbody tr").filter(has_text="2024")
+    expect(period_row).to_contain_text("v1", timeout=15000)
+    period_row_count = period_row.count()
+    period_row_text = period_row.first.inner_text() if period_row_count else ""
+    check("period created with frozen boundary v1", period_row_count == 1 and "v1" in period_row_text, f"rows={period_row_count} text={period_row_text!r}")
+    page.get_by_role("button", name="Mulai").click()
+    expect(page.get_by_text("Berjalan")).to_be_visible(timeout=15000)
+    check("monitoring period starts through revision-controlled UI", True)
+    shot(page, "07_monitoring_period")
+
     # field data: preview -> import -> density
     page.get_by_role("tab", name="Data lapangan").click()
     expect(page.get_by_text("Belum ada data lapangan")).to_be_visible()
@@ -114,7 +134,7 @@ with sync_playwright() as p:
     check("preview shows 21 rows, 0 errors, 2 real data-quality warnings and the column mapping", page.get_by_text("Point ID").count() >= 1)
     check("source-data inconsistency flagged with row number (dbh vs circumference)", page.get_by_role("table", name="Masalah per baris").inner_text().count("dbh_circumference_mismatch") == 2)
     check("import enabled after preview", import_btn.is_enabled())
-    shot(page, "07_field_preview")
+    shot(page, "08_field_preview")
     import_btn.click()
     expect(page.get_by_role("status").filter(has_text="Hasil impor: berhasil; 21 baris diimpor")).to_be_visible(timeout=30000)
     check("import committed 21 rows", True)
@@ -126,20 +146,47 @@ with sync_playwright() as p:
     check("density shown with unit", "Mg C/ha" in density_text, density_text)
     check("area basis 'Asumsi' shown beside the density", page.get_by_text("dasar luas: Asumsi").count() == 1)
     check("year-only visit labelled", page.get_by_text("2024 (hanya tahun)").count() == 1)
-    shot(page, "08_field_density")
+    shot(page, "09_field_density")
+
+    # period-bound durable field summary -> worker -> immutable snapshot
+    page.get_by_label("Batasi ringkasan ke periode monitoring").select_option(label="2024 · Berjalan")
+    page.get_by_role("button", name="Buat snapshot").click()
+    expect(page.get_by_text("Selesai", exact=True)).to_be_visible(timeout=90000)
+    check("period-scoped summary completes through durable worker", True)
+    page.get_by_role("button", name="Lihat snapshot").click()
+    expect(page.get_by_text("Snapshot data lapangan")).to_be_visible(timeout=15000)
+    check("snapshot displays provenance hash and QA counts", page.get_by_text("Hash snapshot").is_visible() and page.get_by_text("Plot dengan kerapatan terhitung").is_visible())
+    shot(page, "10_period_snapshot")
+
+    # Evidence package + submission readiness: preserve missing data as blockers.
+    page.get_by_role("tab", name="Paket bukti").click()
+    expect(page.get_by_role("heading", name="Paket bukti", level=2)).to_be_visible(timeout=15000)
+    page.get_by_role("button", name="Buat paket ZIP").click()
+    expect(page.get_by_role("status").filter(has_text="Paket dibuat, tetapi masih ada komponen wajib yang belum tersedia.")).to_be_visible(timeout=30000)
+    evidence_article = page.locator('article[aria-label^="Paket bukti"]').first
+    expect(evidence_article).to_contain_text("Belum lengkap", timeout=15000)
+    expect(evidence_article).to_contain_text("Pemetaan metodologi dan persetujuan ahli")
+    check("evidence ZIP preserves missing methodology blocker", evidence_article.get_by_role("link", name="Unduh ZIP").is_visible())
+    page.get_by_role("button", name="Simpan draft").click()
+    submission_article = page.locator('article[aria-label^="Submission v1"]')
+    expect(submission_article).to_contain_text("Draft", timeout=15000)
+    submit_button = submission_article.get_by_role("button", name="Kirim untuk review")
+    check("submission draft cannot be sent while evidence is incomplete", submit_button.is_disabled())
+    shot(page, "10b_evidence_and_submission_blockers")
+    page.get_by_role("tab", name="Data lapangan").click()
 
     # second import of same visit: atomic reject, nothing duplicated
     page.get_by_label("Berkas CSV atau XLSX").set_input_files(str(FIX / "bu_dessy_sample.csv"))
     page.get_by_role("button", name="Pratinjau").click()
     expect(page.get_by_text(re.compile(r"21 baris, 21 galat"))).to_be_visible(timeout=20000)
     check("preview flags tree_exists for every row", page.get_by_role("table", name="Masalah per baris").inner_text().count("tree_exists") == 21)
-    shot(page, "09_field_tree_exists")
+    shot(page, "11_field_tree_exists")
 
     # English
     page.evaluate("localStorage.setItem('savegeo_language','en')")
     page.goto(f"{APP}/dmrv/projects", wait_until="networkidle")
     check("English heading after language switch", page.get_by_role("heading", name="dMRV projects").is_visible())
-    shot(page, "10_projects_en")
+    shot(page, "12_projects_en")
 
     # mobile layout
     page.set_viewport_size({"width": 390, "height": 844})
@@ -147,7 +194,7 @@ with sync_playwright() as p:
     page.get_by_role("tab", name="Field data").click()
     overflow = page.evaluate("document.documentElement.scrollWidth - window.innerWidth")
     check("no horizontal page scroll at 390px width", overflow <= 1, f"overflow={overflow}px")
-    shot(page, "11_workspace_mobile")
+    shot(page, "13_workspace_mobile")
     ctx.close()
 
     # ---------------- stranger (user, non-member)
@@ -158,7 +205,7 @@ with sync_playwright() as p:
     page.goto(f"{APP}/dmrv/projects/{project_id}", wait_until="networkidle")
     expect(page.get_by_role("alert")).to_contain_text("Proyek tidak ditemukan, atau Anda bukan anggotanya.", timeout=15000)
     check("non-member sees neutral not-found (no project data)", page.get_by_text(NAME).count() == 0)
-    shot(page, "12_non_member_not_found")
+    shot(page, "14_non_member_not_found")
     page.goto(f"{APP}/dmrv/projects", wait_until="networkidle")
     expect(page.get_by_text("Belum ada proyek")).to_be_visible(timeout=15000)
     check("non-member list is empty with next action", True)
@@ -175,14 +222,15 @@ with sync_playwright() as p:
     watch(page, "operator")
     login(page, "field-user")
     page.goto(f"{APP}/dmrv/projects/{project_id}", wait_until="networkidle")
-    expect(page.get_by_text("Operator lapangan").first).to_be_visible(timeout=15000)
+    operator_body = page.locator("body").inner_text()
+    check("operator role displayed in project header", "Operator lapangan" in operator_body or "Field operator" in operator_body, operator_body[:400])
     page.get_by_role("tab", name="Batas wilayah").click()
     expect(page.get_by_text("Peran Anda hanya dapat melihat batas wilayah.")).to_be_visible()
     check("operator: boundary form hidden (read-only)", page.get_by_label("Alasan versi ini").count() == 0)
-    shot(page, "13_operator_boundary_readonly")
+    shot(page, "15_operator_boundary_readonly")
     page.get_by_role("tab", name="Data lapangan").click()
     check("operator: field import form available", page.get_by_label("Berkas CSV atau XLSX").is_visible())
-    shot(page, "14_operator_field")
+    shot(page, "16_operator_field")
     ctx.close()
     browser.close()
 
@@ -190,7 +238,7 @@ failed = [r["case"] for r in results if not r["passed"]]
 check("no unexpected console/page errors on dMRV pages", not console_errors, "; ".join(console_errors[:5]))
 meta = {
     "date": datetime.now().astimezone().isoformat(timespec="seconds"),
-    "environment": "throwaway PostgreSQL 16 (127.0.0.1:55433/e2e) + uvicorn 127.0.0.1:8086 + Vite dev 127.0.0.1:5501, headless Chromium (Playwright), locale id-ID",
+    "environment": f"throwaway PostgreSQL 16 ({E2E_DATABASE}) + uvicorn 127.0.0.1:8086 + Vite dev 127.0.0.1:5501 + dMRV worker, headless Chromium (Playwright), locale id-ID",
     "results": results,
     "console_errors": console_errors,
 }

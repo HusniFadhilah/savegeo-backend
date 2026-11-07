@@ -66,6 +66,27 @@ def test_member_without_row_is_not_found_even_for_full_access_admin(db):
         require_project_action(db, "p-1", Principal("admin", 42), "members.manage")
 
 
+def test_project_owner_and_analyst_can_run_field_summary_but_field_operator_cannot(db):
+    _member(db, "admin", 1, "project_owner")
+    _member(db, "admin", 2, "analyst")
+    _member(db, "user", 4, "field_operator")
+    assert require_project_action(db, "p-1", Principal("admin", 1), "field.summary.run") == "project_owner"
+    assert require_project_action(db, "p-1", Principal("admin", 2), "field.summary.run") == "analyst"
+    with pytest.raises(ProjectForbidden):
+        require_project_action(db, "p-1", Principal("user", 4), "field.summary.run")
+
+
+def test_monitoring_period_permissions_are_explicit(db):
+    _member(db, "admin", 1, "project_owner")
+    _member(db, "admin", 2, "analyst")
+    _member(db, "user", 4, "field_operator")
+    assert require_project_action(db, "p-1", Principal("admin", 1), "monitoring.write") == "project_owner"
+    assert require_project_action(db, "p-1", Principal("admin", 2), "monitoring.write") == "analyst"
+    assert require_project_action(db, "p-1", Principal("user", 4), "monitoring.read") == "field_operator"
+    with pytest.raises(ProjectForbidden):
+        require_project_action(db, "p-1", Principal("user", 4), "monitoring.write")
+
+
 def test_field_operator_can_write_field_data_but_not_read_accounting(db):
     _member(db, "user", 4, "field_operator")
     principal = Principal("user", 4)

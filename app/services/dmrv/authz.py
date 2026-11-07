@@ -24,13 +24,13 @@ PROJECT_ROLES: frozenset[str] = frozenset(
     {"project_owner", "analyst", "field_operator", "reviewer", "verifier"}
 )
 
-_READ = frozenset({"project.read", "boundary.read", "field.read", "accounting.read"})
+_READ = frozenset({"project.read", "boundary.read", "field.read", "accounting.read", "monitoring.read", "evidence.read"})
 
 # Separation of duties: no role may both create a submission and decide a review.
 ROLE_ACTIONS: dict[str, frozenset[str]] = {
-    "project_owner": _READ | {"project.write", "members.manage", "boundary.write", "field.write", "submission.create"},
-    "analyst": _READ | {"boundary.write", "submission.create"},
-    "field_operator": frozenset({"project.read", "boundary.read", "field.read", "field.write"}),
+    "project_owner": _READ | {"project.write", "members.manage", "boundary.write", "field.write", "field.summary.run", "monitoring.write", "evidence.write", "submission.create"},
+    "analyst": _READ | {"boundary.write", "field.summary.run", "monitoring.write", "evidence.write", "submission.create"},
+    "field_operator": frozenset({"project.read", "boundary.read", "field.read", "field.write", "monitoring.read"}),
     "reviewer": _READ | {"review.decide"},
     "verifier": _READ | {"review.decide"},
 }

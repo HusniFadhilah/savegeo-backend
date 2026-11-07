@@ -17,14 +17,13 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
-
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.models.dmrv_boundary import BoundaryVersion
 from app.db.models.dmrv_field import ImportBatch, SurveyPlot, SurveyVisit, TreeMeasurement
 from app.db.models.dmrv_job import DmrvSnapshot
+from app.db.models.dmrv_monitoring import DmrvMonitoringPeriod
 from app.services.dmrv import jobs
 from app.services.dmrv.audit import record_audit
 from app.services.dmrv.authz import Principal
@@ -92,10 +91,13 @@ class Handler:
     run: Callable[[JobContext], dict]
 
 
-def _validate_empty(payload: dict) -> dict:
-    if payload:
-        raise ValueError("payload field_summary harus kosong")
-    return {}
+def _validate_field_summary(payload: dict) -> dict:
+    if set(payload) - {"monitoring_period_id"}:
+        raise ValueError("payload field_summary memuat field yang tidak dikenal")
+    period_id = payload.get("monitoring_period_id")
+    if period_id is not None and (not isinstance(period_id, str) or not period_id or len(period_id) > 36):
+        raise ValueError("monitoring_period_id harus berupa id periode yang valid")
+    return {"monitoring_period_id": period_id} if period_id else {}
 
 
 def _canonical_hash(kind: str, inputs: dict, outputs: dict) -> str:
@@ -106,13 +108,27 @@ def _canonical_hash(kind: str, inputs: dict, outputs: dict) -> str:
 def run_field_summary(ctx: JobContext) -> dict:
     db = ctx.db
     ctx.stage("collect")
+    period_id = ctx.payload.get("monitoring_period_id")
+    period = None
+    if period_id:
+        period = db.execute(select(DmrvMonitoringPeriod).where(
+            DmrvMonitoringPeriod.id == period_id,
+            DmrvMonitoringPeriod.project_id == ctx.project_id,
+        )).scalar_one_or_none()
+        if period is None:
+            raise JobFailed("monitoring_period_not_found", "Periode monitoring tidak tersedia pada proyek ini.")
+        if period.status == "planned":
+            raise JobFailed("monitoring_period_not_started", "Mulai periode monitoring sebelum membuat snapshot terikat periode.")
     plots = db.execute(
         select(SurveyPlot).where(SurveyPlot.project_id == ctx.project_id).order_by(SurveyPlot.plot_code)
     ).scalars().all()
     if not plots:
         raise JobFailed("no_field_data", "Proyek belum memiliki data lapangan untuk diringkas.")
+    boundary_query = select(BoundaryVersion).where(BoundaryVersion.project_id == ctx.project_id)
+    if period:
+        boundary_query = boundary_query.where(BoundaryVersion.id == period.boundary_version_id)
     boundary = db.execute(
-        select(BoundaryVersion).where(BoundaryVersion.project_id == ctx.project_id).order_by(BoundaryVersion.version.desc()).limit(1)
+        boundary_query.order_by(BoundaryVersion.version.desc()).limit(1)
     ).scalar_one_or_none()
     batch_ids = {
         batch_id for (batch_id,) in db.execute(
@@ -129,15 +145,27 @@ def run_field_summary(ctx: JobContext) -> dict:
     ctx.checkpoint()
 
     ctx.stage("compute")
-    out_plots = [
-        {"plot_code": p.plot_code, "area_m2": p.area_m2, "area_basis": p.area_basis, "visits": plot_visits(db, p)}
-        for p in plots
-    ]
-    with_density = sum(1 for p in out_plots if any(v["density"]["carbon_mg_c_per_ha"] is not None for v in p["visits"]))
-    counts = {"plots_total": len(out_plots), "plots_with_density": with_density, "plots_blocked": len(out_plots) - with_density}
+    out_plots = []
+    for plot in plots:
+        visits = plot_visits(db, plot)
+        if period:
+            visits = [v for v in visits if period.start_date.isoformat() <= v["visit_date"] <= period.end_date.isoformat()]
+        out_plots.append({"plot_code": plot.plot_code, "area_m2": plot.area_m2, "area_basis": plot.area_basis, "visits": visits})
+    with_density = sum(1 for plot in out_plots if any(v["density"]["carbon_mg_c_per_ha"] is not None for v in plot["visits"]))
+    no_period_visits = sum(1 for plot in out_plots if period and not plot["visits"])
+    blocked = len(out_plots) - with_density - no_period_visits
+    counts = {
+        "plots_total": len(out_plots), "plots_with_density": with_density, "plots_blocked": blocked,
+        "plots_without_period_measurements": no_period_visits,
+    }
     inputs = {
         "algorithm": FIELD_SUMMARY_ALGORITHM,
         "boundary": {"version": boundary.version, "checksum": boundary.checksum} if boundary else None,
+        "monitoring_period": ({
+            "id": period.id, "name": period.name, "start_date": period.start_date.isoformat(),
+            "end_date": period.end_date.isoformat(),
+            "boundary_version": boundary.version if boundary else None,
+        } if period else None),
         "import_batches": batches,
         "carbon_fraction": float(DEFAULT_CARBON_FRACTION),
     }
@@ -178,7 +206,7 @@ def _test_fail(ctx: JobContext) -> dict:
 
 
 def get_handlers() -> dict[str, Handler]:
-    handlers = {"field_summary": Handler(validate=_validate_empty, run=run_field_summary)}
+    handlers = {"field_summary": Handler(validate=_validate_field_summary, run=run_field_summary)}
     if os.environ.get("DMRV_TEST_HANDLERS") == "1":
         handlers["_test_sleep"] = Handler(validate=lambda p: p, run=_test_sleep)
         handlers["_test_fail"] = Handler(validate=lambda p: p, run=_test_fail)

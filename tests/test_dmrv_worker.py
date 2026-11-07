@@ -96,7 +96,10 @@ def test_field_summary_creates_an_audited_snapshot_with_locked_inputs(factory):
     plot = snap.outputs["plots"][0]
     assert (plot["plot_code"], plot["area_basis"], plot["area_m2"]) == ("1", "assumed", 400.0)
     assert plot["visits"][0]["density"]["carbon_mg_c_per_ha"] == pytest.approx((205.4 + 137.8) / 1000 / 0.04 * 0.47, rel=1e-6)
-    assert snap.outputs["counts"] == {"plots_total": 1, "plots_with_density": 1, "plots_blocked": 0}
+    assert snap.outputs["counts"] == {
+        "plots_total": 1, "plots_with_density": 1, "plots_blocked": 0,
+        "plots_without_period_measurements": 0,
+    }
     assert (audit.actor_type, audit.actor_id, audit.snapshot_hash, audit.project_id) == ("admin", 1, snap.snapshot_hash, "p-1")
 
 

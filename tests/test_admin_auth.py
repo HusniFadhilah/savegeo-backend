@@ -62,11 +62,12 @@ def test_admin_can_update_own_profile(client, temp_admin):
     updated_email = f"{username}@example.test"
     response = client.put(
         "/api/admin/auth/profile",
-        json={"username": updated_username, "email": updated_email},
+        json={"username": updated_username, "email": updated_email, "full_name": "Nama Admin Uji"},
     )
     assert response.status_code == 200
     assert response.json()["user"]["username"] == updated_username
     assert response.json()["user"]["email"] == updated_email
+    assert response.json()["user"]["full_name"] == "Nama Admin Uji"
 
     me = client.get("/api/admin/auth/me")
     assert me.status_code == 200

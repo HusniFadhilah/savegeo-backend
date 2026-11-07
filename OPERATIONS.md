@@ -182,9 +182,11 @@ journalctl -u savegeo-backend.service -n 150 --no-pager
 4. Restart `savegeo-backend.service`.
 5. Verify `/api/health`, authentication, and the affected feature.
 
-## dMRV foundation (migration 0039)
+## dMRV foundation, evidence and review (migrations 0039–0044)
 
-1. `alembic upgrade head` creates `dmrv_projects`, `dmrv_project_members`, `dmrv_boundary_versions`, `dmrv_audit_events`, `dmrv_idempotency_keys`.
-2. `python -m scripts.seed_rbac` adds permission `dmrv.project.create` (granted to the built-in `admin` role; admins with `role_id IS NULL` already pass).
-3. Project data is reachable only through explicit project membership; there is no platform-wide admin override yet.
-4. Rollback: `alembic downgrade 0038_ilham_full_name` drops the five tables (all dMRV project data is lost; take a PostgreSQL dump first).
+1. `alembic upgrade head` creates the project, membership, boundary, field-data, monitoring-period, durable-job, evidence-package, submission, and review-finding tables.
+2. `python -m scripts.seed_rbac` grants the project-creation permission to the built-in `admin` role. Project reads and mutations still require explicit project membership and role checks.
+3. The API stores ZIP packages under `DMRV_EVIDENCE_DIR` (`/app/var/dmrv/evidence` in production). This path is on the persistent `./var:/app/var` mount. Back up the database and this directory as a consistent set; package rows alone cannot recover the ZIP contents.
+4. ZIP manifests and entry checksums are checked on verify and download. This is not object-lock/WORM storage and does not replace a retention policy or restore drill. No production restore drill has been completed for this feature.
+5. Evidence packages built from the current field-summary snapshot are intentionally incomplete. Submission is blocked until every required component is provided and reviewed. `approved` means internal reviewer approval only; external verification and issuance require separately documented authorized records.
+6. A rollback below migration `0043_dmrv_evidence_packages` removes submission/review tables; a rollback below `0042_dmrv_monitoring_periods` also removes evidence package metadata. Restore the database and evidence files from the same verified backup rather than downgrading production data in place.

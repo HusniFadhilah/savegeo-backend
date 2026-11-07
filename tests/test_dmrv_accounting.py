@@ -4,6 +4,7 @@ import pytest
 
 from app.services.dmrv.accounting import (
     ArrIllustrativeInputs,
+    calculate_arr_illustrative_fixture,
     calculate_arr_illustrative_ledger,
 )
 
@@ -21,7 +22,7 @@ def fixture_inputs(**overrides):
 
 
 def test_arr_golden_fixture_is_labeled_and_preserves_missing_components():
-    result = calculate_arr_illustrative_ledger(fixture_inputs())
+    result = calculate_arr_illustrative_fixture()
 
     assert result.line("project_stock_change").value == Decimal("2000")
     assert result.line("baseline_stock_change").value == Decimal("500")
@@ -35,6 +36,18 @@ def test_arr_golden_fixture_is_labeled_and_preserves_missing_components():
     assert result.methodology_profile is None
     assert result.verification_status == "not_verified"
     assert result.issuance_status == "not_issued"
+
+
+def test_fixed_fixture_does_not_include_emissions_or_leakage_inputs():
+    result = calculate_arr_illustrative_fixture()
+    inputs = dict(result.normalized_inputs)
+    assert inputs["area_ha"] == Decimal("100")
+    assert inputs["project_stock_start_mg_c_per_ha"] == Decimal("100")
+    assert inputs["project_stock_end_mg_c_per_ha"] == Decimal("120")
+    assert inputs["baseline_stock_start_mg_c_per_ha"] == Decimal("100")
+    assert inputs["baseline_stock_end_mg_c_per_ha"] == Decimal("105")
+    assert inputs["project_emissions_tco2e"] is None
+    assert inputs["leakage_tco2e"] is None
 
 
 def test_known_zero_emissions_are_not_treated_as_missing():

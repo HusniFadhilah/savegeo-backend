@@ -208,3 +208,16 @@ def calculate_arr_illustrative_ledger(inputs: ArrIllustrativeInputs) -> ArrIllus
         lines=lines,
         blockers=blockers,
     )
+
+
+def calculate_arr_illustrative_fixture() -> ArrIllustrativeLedger:
+    """Return the fixed pedagogical ARR example without implying project data."""
+    return calculate_arr_illustrative_ledger(
+        ArrIllustrativeInputs(
+            area_ha=Decimal("100"),
+            project_stock_start_mg_c_per_ha=Decimal("100"),
+            project_stock_end_mg_c_per_ha=Decimal("120"),
+            baseline_stock_start_mg_c_per_ha=Decimal("100"),
+            baseline_stock_end_mg_c_per_ha=Decimal("105"),
+        )
+    )

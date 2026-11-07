@@ -1,9 +1,20 @@
 """Seed the THROWAWAY e2e database only (refuses any other DATABASE_URL)."""
 import os
 import sys
+from urllib.parse import urlsplit
 
 url = os.environ.get("DATABASE_URL", "")
-if "127.0.0.1:55433/e2e" not in url:
+try:
+    parsed_url = urlsplit(url)
+    safe_target = (
+        parsed_url.scheme in {"postgres", "postgresql", "postgresql+psycopg"}
+        and parsed_url.hostname == "127.0.0.1"
+        and parsed_url.path == "/e2e"
+        and parsed_url.port in {55433, 55434}
+    )
+except ValueError:
+    safe_target = False
+if not safe_target:
     sys.exit(f"refusing to seed: DATABASE_URL is not the throwaway e2e database ({url!r})")
 
 from app.core.security import hash_password  # noqa: E402

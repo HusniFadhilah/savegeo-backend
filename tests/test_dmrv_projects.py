@@ -16,6 +16,10 @@ from app.db.models.admin_user import AdminUser
 from app.db.models.dmrv_audit import DmrvAuditEvent, DmrvIdempotencyKey
 from app.db.models.dmrv_boundary import BoundaryVersion
 from app.db.models.dmrv_field import ImportBatch, SurveyPlot, SurveyVisit, TreeMeasurement
+from app.db.models.dmrv_job import DmrvJob, DmrvSnapshot
+from app.db.models.dmrv_evidence import DmrvEvidencePackage
+from app.db.models.dmrv_submission import DmrvSubmission, DmrvReviewFinding
+from app.db.models.dmrv_monitoring import DmrvMonitoringPeriod
 from app.db.models.dmrv_project import DmrvProject, ProjectMember
 from app.db.models.role import Permission, Role, role_permissions
 from app.db.models.user import User
@@ -31,6 +35,9 @@ def _jsonb_sqlite(type_, compiler, **kwargs):
 TABLES = [
     User.__table__, AdminUser.__table__, Role.__table__, Permission.__table__, role_permissions,
     DmrvProject.__table__, ProjectMember.__table__, BoundaryVersion.__table__,
+    DmrvJob.__table__, DmrvSnapshot.__table__, DmrvEvidencePackage.__table__,
+    DmrvSubmission.__table__, DmrvReviewFinding.__table__,
+    DmrvMonitoringPeriod.__table__,
     DmrvAuditEvent.__table__, DmrvIdempotencyKey.__table__,
     ImportBatch.__table__, SurveyPlot.__table__, SurveyVisit.__table__, TreeMeasurement.__table__,
 ]
@@ -244,3 +251,266 @@ def test_patch_with_null_name_is_422_not_500(env):
     assert response.status_code == 422
     with factory() as db:
         assert db.get(DmrvProject, project_id).revision == 1
+
+
+def _seed_snapshot(factory, project_id, snapshot_id="snap-evidence-1", outputs=None):
+    with factory() as db:
+        db.add(DmrvSnapshot(
+            id=snapshot_id,
+            project_id=project_id,
+            job_id=None,
+            kind="field_summary",
+            inputs={"monitoring_period_id": "period-1"},
+            outputs=outputs if outputs is not None else {"plot_count": 2, "visit_count": 3},
+            snapshot_hash=(snapshot_id.encode().hex() * 32)[:64],
+            created_by="admin:1",
+        ))
+        db.commit()
+
+
+def test_evidence_package_is_reproducible_and_explicitly_incomplete(env, monkeypatch, tmp_path):
+    client, factory = env
+    monkeypatch.setenv("DMRV_EVIDENCE_DIR", str(tmp_path))
+    project_id = create(client).json()["id"]
+    _seed_snapshot(factory, project_id)
+    url = f"/dmrv/projects/{project_id}/evidence-packages"
+
+    first = call(client, "POST", url, key="evidence-1", json={"snapshot_id": "snap-evidence-1"})
+    replay = call(client, "POST", url, key="evidence-1", json={"snapshot_id": "snap-evidence-1"})
+    assert (first.status_code, replay.status_code) == (201, 200)
+    body = first.json()
+    assert body["id"] == replay.json()["id"]
+    assert body["readiness"] == "incomplete"
+    assert len(body["missing_components"]) == 8
+    assert body["manifest"]["verification_status"] == "not_verified"
+    assert body["manifest"]["issuance_status"] == "not_issued"
+
+    verify = call(client, "GET", f"{url}/{body['id']}/verify")
+    assert verify.status_code == 200
+    assert verify.json()["valid"] is True
+    assert verify.json()["checked_entries"] == len(body["manifest"]["entries"])
+    download = call(client, "GET", f"{url}/{body['id']}/download")
+    assert download.status_code == 200
+    assert download.headers["content-type"] == "application/zip"
+    assert download.content[:2] == b"PK"
+    assert count(factory, DmrvEvidencePackage) == 1
+    with factory() as db:
+        event = db.execute(
+            select(DmrvAuditEvent).where(DmrvAuditEvent.action == "evidence.package.create")
+        ).scalar_one()
+        assert event.snapshot_hash == db.get(DmrvEvidencePackage, body["id"]).manifest["snapshot"]["sha256"]
+
+
+def test_evidence_package_integrity_failure_blocks_download(env, monkeypatch, tmp_path):
+    client, factory = env
+    monkeypatch.setenv("DMRV_EVIDENCE_DIR", str(tmp_path))
+    project_id = create(client).json()["id"]
+    _seed_snapshot(factory, project_id)
+    created = call(
+        client, "POST", f"/dmrv/projects/{project_id}/evidence-packages", key="evidence-2",
+        json={"snapshot_id": "snap-evidence-1"},
+    ).json()
+    with factory() as db:
+        row = db.get(DmrvEvidencePackage, created["id"])
+        package_path = tmp_path / row.storage_key
+    package_path.write_bytes(package_path.read_bytes() + b"tampered")
+
+    verify = call(client, "GET", f"/dmrv/projects/{project_id}/evidence-packages/{created['id']}/verify")
+    download = call(client, "GET", f"/dmrv/projects/{project_id}/evidence-packages/{created['id']}/download")
+    assert verify.json()["valid"] is False
+    assert verify.json()["code"] == "package_hash_mismatch"
+    assert download.status_code == 409
+
+
+def test_evidence_package_access_is_project_scoped(env, monkeypatch, tmp_path):
+    client, factory = env
+    monkeypatch.setenv("DMRV_EVIDENCE_DIR", str(tmp_path))
+    project_id = create(client).json()["id"]
+    _seed_snapshot(factory, project_id)
+    created = call(
+        client, "POST", f"/dmrv/projects/{project_id}/evidence-packages", key="evidence-3",
+        json={"snapshot_id": "snap-evidence-1"},
+    ).json()
+    foreign = call(
+        client, "GET", f"/dmrv/projects/{project_id}/evidence-packages/{created['id']}/download",
+        viewer="admin:2",
+    )
+    assert foreign.status_code == 404
+
+
+def test_evidence_audit_failure_rolls_back_package_and_file(env, monkeypatch, tmp_path):
+    from app.services.dmrv import evidence as evidence_service
+
+    client, factory = env
+    monkeypatch.setenv("DMRV_EVIDENCE_DIR", str(tmp_path))
+    project_id = create(client).json()["id"]
+    _seed_snapshot(factory, project_id)
+
+    def fail_audit(*args, **kwargs):
+        raise RuntimeError("audit unavailable")
+
+    monkeypatch.setattr(evidence_service, "record_audit", fail_audit)
+    response = call(
+        client, "POST", f"/dmrv/projects/{project_id}/evidence-packages", key="evidence-fail",
+        json={"snapshot_id": "snap-evidence-1"},
+    )
+    assert response.status_code == 500
+    assert count(factory, DmrvEvidencePackage) == 0
+    assert list(tmp_path.iterdir()) == []
+
+
+def _seed_complete_evidence(client, factory, project_id, tmp_path, monkeypatch):
+    required = (
+        "methodology_mapping_and_approval",
+        "monitoring_run_scene_and_model_provenance",
+        "baseline_or_documented_not_applicable_decision",
+        "accounting_ledger_and_input_snapshot",
+        "uncertainty_and_leakage_assessment",
+        "field_qa_qc_and_data_chain_of_custody",
+        "spatial_artifacts_and_quality_report",
+        "reproducible_report_and_distribution_licences",
+    )
+    outputs = {"evidence_components": {
+        name: {"status": "provided", "artifact": {"fixture": "review-test"}}
+        for name in required
+    }}
+    _seed_snapshot(factory, project_id, "snap-ready-1", outputs)
+    monkeypatch.setenv("DMRV_EVIDENCE_DIR", str(tmp_path))
+    response = call(
+        client,
+        method="POST",
+        url=f"/dmrv/projects/{project_id}/evidence-packages",
+        key="ready-evidence-key",
+        json={"snapshot_id": "snap-ready-1"},
+    )
+    assert response.status_code == 201
+    assert response.json()["readiness"] == "ready"
+    return response.json()
+
+
+def test_submission_stays_blocked_until_evidence_package_is_complete(env, monkeypatch, tmp_path):
+    client, factory = env
+    project_id = create(client).json()["id"]
+    _seed_snapshot(factory, project_id)
+    monkeypatch.setenv("DMRV_EVIDENCE_DIR", str(tmp_path))
+    package = call(
+        client, "POST", f"/dmrv/projects/{project_id}/evidence-packages", key="draft-evidence-key",
+        json={"snapshot_id": "snap-evidence-1"},
+    ).json()
+    url = f"/dmrv/projects/{project_id}/submissions"
+    draft = call(
+        client, "POST", url, key="submission-key", json={"evidence_package_id": package["id"]},
+    )
+    replay = call(
+        client, "POST", url, key="submission-key", json={"evidence_package_id": package["id"]},
+    )
+    assert draft.status_code == 201
+    assert draft.json()["status"] == "draft"
+    assert replay.status_code == 200
+    assert replay.json()["id"] == draft.json()["id"]
+    response = call(
+        client, "POST", f"{url}/{draft.json()['id']}/submit",
+    )
+    assert response.status_code == 409
+    assert response.json()["code"] == "evidence_incomplete"
+    assert count(factory, DmrvSubmission) == 1
+    with factory() as db:
+        assert db.get(DmrvSubmission, draft.json()["id"]).status == "draft"
+
+
+def test_submission_review_enforces_independence_and_audits_state_changes(env, monkeypatch, tmp_path):
+    client, factory = env
+    project_id = create(client).json()["id"]
+    package = _seed_complete_evidence(client, factory, project_id, tmp_path, monkeypatch)
+    added = call(
+        client, "POST", f"/dmrv/projects/{project_id}/members",
+        json={"principal_type": "user", "username": "field-user", "role": "reviewer"},
+    )
+    assert added.status_code == 201
+    submissions_url = f"/dmrv/projects/{project_id}/submissions"
+    draft = call(
+        client, "POST", submissions_url, key="submission-ready-key",
+        json={"evidence_package_id": package["id"]},
+    ).json()
+    submission_id = draft["id"]
+    submitted = call(client, "POST", f"{submissions_url}/{submission_id}/submit")
+    assert submitted.status_code == 200 and submitted.json()["status"] == "submitted"
+
+    review_url = f"{submissions_url}/{submission_id}/review/start"
+    author_start = call(client, "POST", review_url, viewer="admin:1")
+    assert author_start.status_code == 403
+    started = call(client, "POST", review_url, viewer="user:1")
+    assert started.status_code == 200 and started.json()["status"] == "under_review"
+    replayed_start = call(client, "POST", review_url, viewer="user:1")
+    assert replayed_start.status_code == 200
+
+    findings_url = f"{submissions_url}/{submission_id}/findings"
+    finding = call(
+        client, "POST", findings_url, viewer="user:1", key="finding-idempotency-key",
+        json={"code": "DATA_NOTE", "message": "Tambahkan catatan provenance untuk fixture."},
+    )
+    assert finding.status_code == 201 and finding.json()["status"] == "open"
+    duplicate_finding = call(
+        client, "POST", findings_url, viewer="user:1", key="finding-idempotency-key",
+        json={"code": "DATA_NOTE", "message": "Tambahkan catatan provenance untuk fixture."},
+    )
+    assert duplicate_finding.status_code == 200
+    assert duplicate_finding.json()["id"] == finding.json()["id"]
+    finding_id = finding.json()["id"]
+    respond_url = f"{findings_url}/{finding_id}/respond"
+    response = call(
+        client, "POST", respond_url, viewer="admin:1",
+        json={"response": "Catatan provenance dilampirkan.", "evidence_references": [package["id"]]},
+    )
+    assert response.status_code == 200 and response.json()["status"] == "responded"
+    resolve_url = f"{findings_url}/{finding_id}/resolve"
+    author_resolve = call(client, "POST", resolve_url, viewer="admin:1")
+    assert author_resolve.status_code == 403
+    resolved = call(client, "POST", resolve_url, viewer="user:1")
+    assert resolved.status_code == 200 and resolved.json()["status"] == "resolved"
+
+    decision = call(
+        client, "POST", f"{submissions_url}/{submission_id}/decision", viewer="user:1",
+        json={"decision": "approved", "reason": "Fixture test review completed."},
+    )
+    assert decision.status_code == 200 and decision.json()["status"] == "approved"
+    with factory() as db:
+        actions = db.execute(select(DmrvAuditEvent.action).where(
+            DmrvAuditEvent.project_id == project_id,
+        ).order_by(DmrvAuditEvent.id)).scalars().all()
+    assert actions.count("submission.review.start") == 1
+    assert "review.finding.create" in actions
+    assert "review.finding.respond" in actions
+    assert "review.finding.resolve" in actions
+    assert "submission.approved" in actions
+
+
+def test_submission_review_audit_failure_rolls_back_transition(env, monkeypatch, tmp_path):
+    from app.services.dmrv import submissions as submission_service
+
+    client, factory = env
+    project_id = create(client).json()["id"]
+    package = _seed_complete_evidence(client, factory, project_id, tmp_path, monkeypatch)
+    member = call(
+        client, "POST", f"/dmrv/projects/{project_id}/members",
+        json={"principal_type": "user", "username": "field-user", "role": "reviewer"},
+    )
+    assert member.status_code == 201
+    draft = call(
+        client, "POST", f"/dmrv/projects/{project_id}/submissions", key="audit-draft-key",
+        json={"evidence_package_id": package["id"]},
+    ).json()
+    submission_id = draft["id"]
+    assert call(client, "POST", f"/dmrv/projects/{project_id}/submissions/{submission_id}/submit").status_code == 200
+
+    def fail_audit(*args, **kwargs):
+        raise RuntimeError("audit unavailable")
+
+    monkeypatch.setattr(submission_service, "record_audit", fail_audit)
+    response = call(
+        client, "POST", f"/dmrv/projects/{project_id}/submissions/{submission_id}/review/start", viewer="user:1",
+    )
+    assert response.status_code == 500
+    with factory() as db:
+        assert db.get(DmrvSubmission, submission_id).status == "submitted"
+        assert db.get(DmrvSubmission, submission_id).reviewer_key is None
