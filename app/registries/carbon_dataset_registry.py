@@ -713,6 +713,20 @@ CARBON_EXTERNAL_REGISTRY: dict[str, dict] = {
 # fmt: on
 
 # Choices for new training. Legacy metadata and loaders remain resolvable.
+for _pool in ("litter", "deadwood"):
+    _key = f"TROPICAL_{_pool.upper()}_REFERENCE"
+    CARBON_DATASET_REGISTRY[_key] = {
+        "key": _key, "name": f"{_pool.title()} carbon · tropical forest proxy",
+        "full_name": f"NASA/ORNL AGB 2010 × UNFCCC climate/elevation {_pool} factors",
+        "gee_id": "NASA/ORNL/biomass_carbon_density/v1", "gee_type": "ImageCollection",
+        "band": "agb", "output_band": "agb", "unit": "Mg C/ha", "target_pool": f"{_pool}_carbon",
+        "resolution": 300, "year": 2010, "year_range": [2010, 2010],
+        "pool_analysis": True, "transform": "tropical_detritus_proxy", "training_capable": True,
+        "source_url": "https://cdm.unfccc.int/methodologies/ARmethodologies/tools/ar-am-tool-12-v3.0.pdf",
+        "description": "Derived tropical forest reference for regression training, not measured litter/deadwood. Climate/elevation-specific UNFCCC factors applied to 2010 living biomass; mangroves excluded. Annual estimates transfer fitted relationships to annual Landsat covariates and require field validation.",
+        "notes": "Proxy training labels; no claim of independent field accuracy. Non-mangrove tropical forest domain only.",
+    }
+
 TRAINING_DATASET_KEYS: list[str] = [
     "WCMC", "GEDI", "GEDI_L4A_MONTHLY", "GEDI_L4D", "SPAWN",
     "ORNL_AGB_BGB", "OPENLANDMAP_SOC_G_KG", "UNEP_WCMC_Biomass_SOC",
@@ -1140,6 +1154,10 @@ def soilgrids_stock_image(depth_cm, ee):
 
 
 def _loader_pool_reference(entry, dataset_year, roi, unmask, ee):
+    if entry.get("transform") == "tropical_detritus_proxy":
+        from app.services.detritus_reference import reference_image
+
+        return reference_image("litter" if "LITTER" in entry["key"] else "deadwood", ee)
     if entry["key"] == "ORNL_BGB":
         return ee.Image(ee.ImageCollection(entry["gee_id"]).first()).select("bgb").rename("agb")
     if entry.get("periods"):

@@ -21,7 +21,8 @@ def estimate_identity(data, model, analysis_year, reference_year, scale, today=N
     aoi_json = json.dumps(data["aoi"], sort_keys=True, separators=(",", ":"))
     aoi_checksum = hashlib.sha256(aoi_json.encode()).hexdigest()
     identity = {
-        "schema": 1, "year": analysis_year, "reference_year": reference_year,
+        # Distribution/quantiles are part of the stored response since schema 2.
+        "schema": 2, "year": analysis_year, "reference_year": reference_year,
         "observed_through": observed_through.isoformat(), "aoi": aoi_checksum,
         "dataset": data["reference_dataset"], "model": model["name"],
         "version": model.get("version"), "metadata": model["metadata_json"],

@@ -1,5 +1,6 @@
 """Reference maps and executable BGB/SOC models with explicit pool/unit semantics."""
 import math
+import logging
 from datetime import UTC, datetime
 
 import ee
@@ -8,6 +9,46 @@ from app.registries.carbon_dataset_registry import get_dataset_meta, load_carbon
 from app.registries.carbon_pool_models import get_builtin_carbon_model
 from app.services import config_service
 from app.services.gee_common import AnalysisError, geojson_to_ee_geometry
+
+logger = logging.getLogger(__name__)
+
+
+def _pool_density_statistics(raw, scale, native_scale):
+    """Normalize the observed raster distribution to the chart response contract."""
+    stats = {"mean": raw["agb_mean"], "std_dev": raw.get("agb_stdDev"),
+             "min": raw["agb_min"], "max": raw["agb_max"],
+             "percentiles": {"p25": raw.get("agb_p25"), "median": raw.get("agb_p50"), "p75": raw.get("agb_p75")}}
+    histogram = raw.get("agb_histogram") or {}
+    centers = histogram.get("bucketMeans", []) if isinstance(histogram, dict) else []
+    counts = histogram.get("histogram", []) if isinstance(histogram, dict) else []
+    if centers and len(centers) == len(counts):
+        pairs = [(float(center), float(count)) for center, count in zip(centers, counts, strict=True)
+                 if isinstance(center, (int, float)) and isinstance(count, (int, float))
+                 and math.isfinite(center) and math.isfinite(count) and count >= 0]
+        pairs.sort()
+        if pairs and sum(count for _, count in pairs) > 0:
+            stats["histogram"] = {"bucket_means": [center for center, _ in pairs],
+                                  "counts": [count for _, count in pairs],
+                                  "pixel_count": round(sum(count for _, count in pairs)),
+                                  "sampled": scale > native_scale, "scale_m": scale}
+    return stats
+
+
+def _sample_pool_distribution(image, roi, scale):
+    """Bounded fallback from real pixels, never from a synthetic density curve."""
+    import numpy as np
+
+    sampled = image.select(["agb"]).sample(region=roi, scale=scale, numPixels=3000,
+                                            seed=42, geometries=False, tileScale=8).getInfo() or {}
+    values = [feature.get("properties", {}).get("agb") for feature in sampled.get("features", [])]
+    values = [float(value) for value in values if isinstance(value, (int, float)) and math.isfinite(value)]
+    if not values:
+        return {}
+    counts, edges = np.histogram(values, bins=24)
+    quartiles = np.percentile(values, [25, 50, 75])
+    return {"histogram": {"bucket_means": ((edges[:-1] + edges[1:]) / 2).tolist(),
+                          "counts": counts.tolist(), "pixel_count": len(values), "sampled": True, "scale_m": scale},
+            "percentiles": dict(zip(("p25", "median", "p75"), quartiles.tolist(), strict=True))}
 
 
 def _geometry(aoi):
@@ -115,6 +156,31 @@ def summary_scale(native_scale, bounds_area_m2, max_pixels):
     return max(int(native_scale), math.ceil(math.sqrt(bounds_area_m2 / budget)))
 
 
+def build_pool_export_image(db, data, roi):
+    """Use the same pool model and reference semantics as the analysis map."""
+    key = data["reference_dataset"]
+    year = int(data.get("dataset_year") or data.get("year", 2020))
+    meta = get_dataset_meta(key, year)
+    reference = load_carbon_reference_ee(key, year)
+    model = None if data.get("reference_only") else get_builtin_carbon_model(data.get("model_name"), db=db)
+    if not model:
+        return reference
+    if key not in model["metadata_json"]["compatible_reference_datasets"]:
+        raise AnalysisError("Model ekspor tidak kompatibel dengan dataset pool.", 422)
+    method = model["metadata_json"].get("method")
+    if method == "saved_reference_ensemble":
+        from app.services.carbon_saved_models import saved_model_image
+
+        image, _ = saved_model_image(roi, model, meta, analysis_year=int(data["year"]))
+        return image.updateMask(reference.mask())
+    if method == "soil_stock_integration":
+        return soilgrids_stock_image(meta["depth_cm"], ee)
+    if method == "ipcc_root_to_shoot":
+        return _ipcc_image(meta, model, roi)
+    image, _ = _random_forest(reference, roi, meta, model, int(data["year"]))
+    return image
+
+
 def analyze_carbon_pool(db, data):
     key = data["reference_dataset"]
     year = int(data.get("dataset_year", 2020))
@@ -185,13 +251,23 @@ def analyze_carbon_pool(db, data):
         stock = meta["unit"] == "Mg C/ha"
         if stock:
             bands = bands.addBands(display.multiply(pixel_ha).rename("carbon_total"))
-        reducer = ee.Reducer.mean().combine(ee.Reducer.stdDev(), sharedInputs=True).combine(ee.Reducer.minMax(), sharedInputs=True).combine(ee.Reducer.sum(), sharedInputs=True)
+        reducer = (ee.Reducer.mean().combine(ee.Reducer.stdDev(), sharedInputs=True)
+                   .combine(ee.Reducer.minMax(), sharedInputs=True).combine(ee.Reducer.sum(), sharedInputs=True)
+                   .combine(ee.Reducer.percentile([25, 50, 75]), sharedInputs=True)
+                   .combine(ee.Reducer.histogram(32, None, 10000), sharedInputs=True))
         reduced = bands.reduceRegion(reducer=reducer, geometry=calculation_roi, scale=scale,
                                      maxPixels=defaults["max_pixels"], tileScale=4)
         raw = reduced.set("aoi_area", calculation_roi.area(maxError=1).divide(10000)).getInfo()
         if raw.get("agb_mean") is None or not raw.get("valid_area_sum"):
             raise AnalysisError("AOI tidak memiliki piksel valid untuk dataset/model BGB atau SOC yang dipilih.", 422)
-        stats = {"mean": raw["agb_mean"], "std_dev": raw.get("agb_stdDev"), "min": raw["agb_min"], "max": raw["agb_max"]}
+        stats = _pool_density_statistics(raw, scale, int(meta["resolution"]))
+        if not stats.get("histogram"):
+            try:
+                distribution = _sample_pool_distribution(display, calculation_roi, scale)
+                if distribution:
+                    stats.update(distribution)
+            except Exception:  # noqa: BLE001 - preserve valid totals if optional distribution sampling fails
+                logger.warning("Pool distribution sample failed for %s", key, exc_info=True)
         total = raw.get("carbon_total_sum") if stock else None
         coverage = min(100, raw["valid_area_sum"] / raw["aoi_area"] * 100) if raw["aoi_area"] else None
         area_info.update(calculation_area_ha=raw["aoi_area"], area_ha=raw["aoi_area"], valid_area_ha=raw["valid_area_sum"],

@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 import ee
 import requests
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_ee
@@ -20,11 +20,49 @@ from app.services.gee_common import AnalysisError, public_analysis_error
 
 router = APIRouter(tags=["carbon"], dependencies=[Depends(require_feature("app.feature.carbon_stock"))])
 logger = logging.getLogger(__name__)
+
+
+@router.get("/carbon/extensions/catalog", dependencies=[Depends(get_current_app_viewer)])
+def carbon_extensions_catalog():
+    from app.services.carbon_extensions import DETRITUS_PRESETS, IPCC_URL
+
+    return {"detritus_presets": [{"key": key, **value} for key, value in DETRITUS_PRESETS.items()], "source": IPCC_URL,
+            "method": "IPCC 2019 Refinement Vol.4 Ch.2 Table 2.2, all vegetation types; Mg C/ha. Default Tier 1 skala iklim hutan, dengan ketidakpastian tinggi; bukan pengukuran lokal."}
+
+
+@router.get("/carbon/extensions/productivity-years", dependencies=[Depends(get_current_app_viewer), Depends(require_ee)])
+def carbon_productivity_years():
+    from app.services.carbon_extensions import productivity_years, MODIS_URL
+
+    return {"years": productivity_years(), "source": MODIS_URL}
 UPSTREAM_CONNECTION_ERROR = (
     "Koneksi ke layanan data eksternal terputus sebelum respons diterima. "
     "Coba jalankan ulang analisis; jika berulang, kecilkan AOI/rentang waktu "
     "atau cek koneksi ke Earth Engine/penyedia raster."
 )
+
+
+@router.get("/carbon/green-rankings/{run_id}")
+def green_rankings_page(run_id: str, page: int = Query(default=1, ge=1), viewer: object = Depends(get_current_app_viewer)):
+    from app.api.routes.analysis_jobs import job_owner_key
+    from app.services.green_rankings import result_page
+
+    try:
+        return result_page(run_id, job_owner_key(viewer), page)
+    except AnalysisError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=public_analysis_error(exc)) from exc
+
+
+@router.get("/carbon/green-rankings/{run_id}/export")
+def export_green_rankings(run_id: str, viewer: object = Depends(get_current_app_viewer)):
+    from app.api.routes.analysis_jobs import job_owner_key
+    from app.services.green_rankings import csv_rows
+
+    try:
+        rows = csv_rows(run_id, job_owner_key(viewer))
+        return StreamingResponse(rows, media_type="text/csv; charset=utf-8", headers={"Content-Disposition": 'attachment; filename="savegeo_green_rankings.csv"'})
+    except AnalysisError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=public_analysis_error(exc)) from exc
 
 
 @router.get("/carbon/reference-layers/{dataset_key}", dependencies=[Depends(get_current_app_viewer)])
@@ -82,7 +120,10 @@ def direct_carbon_reference_layer(
 
 
 @router.post("/analyze/carbon", dependencies=[Depends(get_current_app_viewer)])
-def analyze_carbon(request: Request, data: dict = Body(...), db: Session = Depends(get_db)):
+def analyze_carbon(request: Request, data: dict = Body(...), db: Session = Depends(get_db), viewer: object = Depends(get_current_app_viewer)):
+    from app.api.routes.analysis_jobs import job_owner_key
+
+    data = {**data, "_request_owner": job_owner_key(viewer)}
     if "aoi" not in data:
         raise HTTPException(status_code=400, detail="Missing required field: aoi")
     from app.registries.carbon_dataset_registry import get_external_carbon_meta

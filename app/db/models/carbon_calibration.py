@@ -2,11 +2,33 @@ from __future__ import annotations
 
 import datetime as dt
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
+
+
+class CarbonFieldObservation(Base):
+    __tablename__ = "carbon_field_observations"
+    __table_args__ = (UniqueConstraint("dataset_pk", "identity_key", name="uq_carbon_field_identity"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    dataset_pk: Mapped[int] = mapped_column(ForeignKey("carbon_calibration_datasets.id", ondelete="CASCADE"), index=True)
+    identity_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    pool: Mapped[str] = mapped_column(String(8), nullable=False)
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    observed_mg_c_ha: Mapped[float] = mapped_column(Float, nullable=False)
+    raw: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    predictions: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id", ondelete="SET NULL"))
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.UTC))
+
+    def to_dict(self):
+        return {"id": self.id, "pool": self.pool, "role": self.role,
+                "observed_mg_c_ha": self.observed_mg_c_ha, "raw": self.raw,
+                "predictions": self.predictions, "sha256": self.sha256,
+                "created_at": self.created_at.isoformat() if self.created_at else None}
 
 
 class CarbonCalibrationDataset(Base):

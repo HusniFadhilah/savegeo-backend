@@ -70,7 +70,7 @@ _ALLOWED_JOB_TYPES = {
     "crop_monitoring",
 }
 _CARBON_CACHEABLE_TYPES = {"carbon", "carbon_local", "carbon_delta"}
-_CARBON_CACHE_SCHEMA = 2
+_CARBON_CACHE_SCHEMA = 3
 _UPSTREAM_CONNECTION_ERROR = (
     "Koneksi ke layanan data eksternal terputus sebelum respons diterima. "
     "Coba jalankan ulang analisis; jika berulang, kecilkan AOI/rentang waktu "
@@ -325,6 +325,7 @@ def _run_job(
         if job_type in {"vegetation", "landcover", "landcover_change", "landcover_transition", "landcover_change_map", "landcover_hotspots", "landcover_fusion"}:
             payload = resolve_known_aoi(payload)
         if job_type == "carbon":
+            payload = {**payload, "_request_owner": owner}
             result = run_carbon_with_retry(
                 lambda: _analyze_carbon_job(db, payload), job_id=job_id,
             )
@@ -333,7 +334,7 @@ def _run_job(
         elif job_type == "carbon_delta":
             result = carbon_service.analyze_carbon_delta(db, payload)
         elif job_type == "geotiff":
-            result = download_service.download_geotiff(db, payload)
+            result = download_service.download_geotiff(db, {**payload, "_request_owner": owner})
         elif job_type == "vegetation":
             result = vegetation_service.analyze_vegetation(db, payload)
         elif job_type in {"landcover", "landcover_change"}:

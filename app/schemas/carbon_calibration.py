@@ -9,6 +9,9 @@ TARGET_POOLS = {
     "aboveground_biomass_carbon",
     "belowground_biomass_carbon",
     "living_biomass_carbon",
+    "soil_organic_carbon",
+    "litter_carbon",
+    "deadwood_carbon",
 }
 
 
@@ -35,6 +38,7 @@ class CalibrationDatasetCreate(BaseModel):
     field_reference_type: str = "allometric"
     access: str = "restricted"
     status: str = "draft"
+    soil_depth_cm: list[float] | None = None
 
     @field_validator("target_pools")
     @classmethod

@@ -89,7 +89,8 @@ def saved_model_image(roi, model, dataset_meta, analysis_year=None):
     image = predictors(roi, covariate_year, info["feature_names"])
     return ensemble_image(image, artifact), {
         "n_samples": info["n_samples"], "validation_samples": info["validation_samples"],
-        "validation_metrics": info["validation_metrics"], "validation_type": "spatial_reference_holdout",
+        "validation_metrics": info["validation_metrics"], "validation_type": info.get("validation_type", "spatial_reference_holdout"),
+        "source_url": info.get("source_url"), "source_data_kind": info.get("source_data_kind", "reference_raster"),
         "validation_note": "Validasi terhadap raster referensi pada blok spasial terpisah; akurasi lapangan belum ditetapkan.",
         "covariate_year": covariate_year, "reference_covariate_year": info["covariate_year"], "training_bbox": bbox,
         "deployment_mode": "frozen_ensemble", "trained_at": info["trained_at"],

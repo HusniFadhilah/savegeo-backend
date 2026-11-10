@@ -165,7 +165,7 @@ def evaluate_predictions(rows: list[dict[str, float]]) -> dict[str, Any]:
     }
 
 
-def lopo_linear_calibration(rows: list[dict[str, float]]) -> dict[str, Any]:
+def lopo_linear_calibration(rows: list[dict[str, float]], *, clip_min: float | None = None) -> dict[str, Any]:
     if len(rows) < 3:
         return {
             "status": "not_computed",
@@ -181,6 +181,8 @@ def lopo_linear_calibration(rows: list[dict[str, float]]) -> dict[str, Any]:
         else:
             slope, intercept = np.polyfit(x, y, 1)
         prediction = float(intercept + slope * held_out["predicted"])
+        if clip_min is not None:
+            prediction = max(clip_min, prediction)
         results.append(
             {
                 "plot_id": held_out.get("plot_id"),
@@ -192,8 +194,12 @@ def lopo_linear_calibration(rows: list[dict[str, float]]) -> dict[str, Any]:
         )
     metrics = evaluate_predictions(results)
     metrics["validation_method"] = "leave_one_plot_out"
-    metrics["calibration_intercept"] = float(np.mean([item["intercept"] for item in results]))
-    metrics["calibration_slope"] = float(np.mean([item["slope"] for item in results]))
+    # Out-of-fold predictions evaluate the method; deployment fits all calibration plots.
+    x = np.asarray([row["predicted"] for row in rows], dtype=float)
+    y = np.asarray([row["observed"] for row in rows], dtype=float)
+    slope, intercept = (0.0, float(y.mean())) if np.ptp(x) == 0 else np.polyfit(x, y, 1)
+    metrics["calibration_intercept"] = float(intercept)
+    metrics["calibration_slope"] = float(slope)
     return metrics
 
 

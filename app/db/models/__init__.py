@@ -38,6 +38,7 @@ from app.db.models.dmrv_monitoring import DmrvMonitoringPeriod
 from app.db.models.dmrv_evidence import DmrvEvidencePackage
 from app.db.models.dmrv_submission import DmrvSubmission, DmrvReviewFinding
 from app.db.models.carbon_calibration import (
+    CarbonFieldObservation,
     CarbonCalibrationDataset,
     CarbonCalibrationFile,
     CarbonCalibrationModel,
@@ -47,6 +48,7 @@ from app.db.models.carbon_calibration import (
 )
 
 __all__ = [
+    "CarbonFieldObservation",
     "AdminUser",
     "AnalysisResult",
     "AnalysisRun",

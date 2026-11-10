@@ -33,6 +33,8 @@ class Settings(BaseSettings):
     supabase_url: str = ""
     supabase_service_role_key: str = ""
     supabase_gee_credentials_bucket: str = "gee-credentials"
+    # Pre-created bucket writable by the configured Earth Engine identity.
+    gee_export_bucket: str = ""
 
     # --- JWT ---
     # Production must provide a stable secret through the environment/secret

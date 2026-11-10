@@ -505,7 +505,14 @@ def _run_calibration(run_id: str) -> None:
                 "aboveground_biomass_carbon": "carbon_agb_mg_c_ha",
                 "belowground_biomass_carbon": "carbon_bgb_mg_c_ha",
                 "living_biomass_carbon": "carbon_total_mg_c_ha",
+                "soil_organic_carbon": "carbon_soc_mg_c_ha",
+                "litter_carbon": "carbon_litter_mg_c_ha",
+                "deadwood_carbon": "carbon_deadwood_mg_c_ha",
             }[run.target_pool]
+            # A single legacy AGB prediction cannot be reused as a BGB/SOC predictor.
+            predicted = (attrs.get("current_model_predictions") or {}).get(run.target_pool)
+            if predicted is None and run.target_pool == "aboveground_biomass_carbon":
+                predicted = attrs.get("current_model_prediction")
             observed = attrs.get(target_key)
             if predicted is not None and observed is not None:
                 rows.append(
@@ -554,11 +561,8 @@ def _run_calibration(run_id: str) -> None:
                 "feature_schema": run.parameters.get("feature_schema", []),
                 "uncertainty": {"status": "not_computed", "reason": "plot-level bootstrap not configured"},
                 "scope": {
-                    "site": "Ring 3 PT Dahana",
-                    "location": "Subang, Jawa Barat",
-                    "ecosystem": "rubber_plantation",
-                    "species": ["Hevea brasiliensis"],
-                    "survey_year": 2026,
+                    key: (dataset.manifest or {}).get(key)
+                    for key in ("site", "location", "ecosystem", "species", "survey_year")
                 },
             }
             artifact_path.write_text(json.dumps(artifact, indent=2, sort_keys=True), encoding="utf-8")
@@ -568,7 +572,7 @@ def _run_calibration(run_id: str) -> None:
                     model_id=f"{dataset.dataset_id}_{run.id}",
                     dataset_pk=dataset.id,
                     run_id=run.id,
-                    model_name="PT Dahana LOPO Linear Calibration",
+                    model_name=f"{dataset.name} LOPO Linear Calibration",
                     version="1.0.0",
                     target_pool=run.target_pool,
                     target_unit="Mg C/ha",
@@ -981,7 +985,7 @@ def activate_model(
         raise HTTPException(status_code=404, detail="Calibration model not found")
     if model.status not in {"approved_local", "active_local"}:
         raise HTTPException(status_code=409, detail="Model must be approved before activation")
-    db.query(CarbonCalibrationModel).filter(CarbonCalibrationModel.dataset_pk == model.dataset_pk).update(
+    db.query(CarbonCalibrationModel).filter(CarbonCalibrationModel.dataset_pk == model.dataset_pk, CarbonCalibrationModel.target_pool == model.target_pool).update(
         {CarbonCalibrationModel.is_active: False}
     )
     model.is_active, model.status = True, "active_local"
@@ -992,7 +996,7 @@ def activate_model(
         "calibration.model.activate",
         "carbon_calibration_model",
         str(model.id),
-        {"scope": "PT Dahana Subang only"},
+        {"scope": model.metadata_json, "target_pool": model.target_pool},
     )
     return model.to_dict()
 
@@ -1069,7 +1073,7 @@ def promote_model(
         "calibration.model.promote",
         "carbon_calibration_model",
         str(model.id),
-        {"scope": "PT Dahana Subang only"},
+        {"scope": model.metadata_json, "target_pool": model.target_pool},
     )
     return model.to_dict()
 
@@ -1122,7 +1126,7 @@ def list_public_calibration_models(
     return {
         "models": [model.to_dict() for model in models],
         "selection": "explicit",
-        "warning": "Local calibration is scoped to PT Dahana Subang rubber plantation; it is not the national default.",
+        "warning": "Local calibration applies only within its documented site, habitat, source model and sampling depth; it is not the national default.",
         "aoi_received": bool(aoi),
     }
 
@@ -1132,3 +1136,8 @@ def public_model_validation(
     model_id: int, _viewer=Depends(get_current_app_viewer), db: Session = Depends(get_db)
 ):
     return get_model_validation(model_id, db)
+
+
+from app.api.routes.carbon_field import router as field_router  # noqa: E402
+
+router.include_router(field_router)

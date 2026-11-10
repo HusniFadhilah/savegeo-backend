@@ -990,6 +990,22 @@ def calculate_carbon_summary_for_year(
 
 
 def analyze_carbon(db: Session, data: dict) -> dict:
+    if data.get("extension") == "green_rankings":
+        from app.services.green_rankings import run_batch
+
+        return run_batch(data)
+    if data.get("extension"):
+        from app.services.carbon_extensions import analyze_extension
+
+        return analyze_extension(data)
+    if data.get("reference_dataset") in {"TROPICAL_LITTER_REFERENCE", "TROPICAL_DEADWOOD_REFERENCE"} and not data.get("reference_only") and not data.get("load_only"):
+        from app.services.detritus_training import ensure_model
+
+        if not data.get("aoi"):
+            raise AnalysisError("AOI diperlukan untuk estimasi serasah/kayu mati.", 422)
+        pool = "litter" if "LITTER" in data["reference_dataset"] else "deadwood"
+        model = ensure_model(db, pool)
+        data = {**data, "model_name": model["name"]}
     if data.get("simple_mode") and data.get("reference_only") and data.get("reference_dataset") in {"SPAWN", "ORNL_BGB", "SOILGRIDS_OCS_0_30CM"}:
         from app.services.carbon_pool_service import analyze_carbon_pool
 

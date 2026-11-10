@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 
 import ee
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Body
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_ee
@@ -18,6 +18,17 @@ router = APIRouter(prefix="/download", tags=["download"])
 logger = logging.getLogger(__name__)
 
 
+@router.post("/raster-task-status", dependencies=[Depends(get_current_app_viewer), Depends(require_ee)])
+def raster_task_status(data: dict = Body(...), viewer: object = Depends(get_current_app_viewer)):
+    from app.services.raster_batch_export import export_status
+    from app.api.routes.analysis_jobs import job_owner_key
+
+    try:
+        return export_status(str(data.get("task_token") or ""), job_owner_key(viewer))
+    except AnalysisError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=public_analysis_error(exc)) from exc
+
+
 @router.post("/geotiff", dependencies=[Depends(get_current_app_viewer), Depends(require_ee)])
 async def download_geotiff(
     request: Request,
@@ -25,6 +36,9 @@ async def download_geotiff(
     db: Session = Depends(get_db),
 ):
     data = await request.json()
+    from app.api.routes.analysis_jobs import job_owner_key
+
+    data["_request_owner"] = job_owner_key(viewer)
     ensure_export_feature_access(viewer, data, db)
     try:
         return download_service.download_geotiff(db, data)
