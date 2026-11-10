@@ -229,7 +229,7 @@ jobs:
                 pg_dump -U savegeo -Fc savegeo \
                 > "var/exports/predeploy_$(date +%Y%m%d_%H%M%S).dump"
             fi
-            docker compose -f docker-compose.prod.yml build api
+            docker compose -f docker-compose.prod.yml build api dmrv-worker
             docker compose -f docker-compose.prod.yml run --rm --no-deps \
               --volume "$BACKEND_REMOTE_DIR/../frontend/dist:/frontend-assets:ro" \
               api python -m scripts.check_auth_secret --frontend-dist /frontend-assets
