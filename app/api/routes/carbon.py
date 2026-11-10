@@ -1,6 +1,7 @@
 """Carbon analysis endpoints - /api/analyze/carbon*. Ported from backend/app.py."""
 from __future__ import annotations
 
+import json
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
@@ -35,6 +36,23 @@ def carbon_productivity_years():
     from app.services.carbon_extensions import productivity_years, MODIS_URL
 
     return {"years": productivity_years(), "source": MODIS_URL}
+
+
+@router.get("/carbon/extensions/blue-carbon/catalog", dependencies=[Depends(get_current_app_viewer)])
+def carbon_blue_carbon_catalog(db: Session = Depends(get_db)):
+    """Published blue-carbon records are visible to app users; edits remain admin-only."""
+    from app.services.config_service import get_setting
+
+    records = get_setting(db, "carbon.bluecarbon_profiles", [])
+    if isinstance(records, str):
+        try:
+            records = json.loads(records)
+        except (TypeError, ValueError):
+            records = []
+    if not isinstance(records, list):
+        records = []
+    published = [record for record in records if isinstance(record, dict) and record.get("status") == "published"]
+    return {"profiles": published}
 UPSTREAM_CONNECTION_ERROR = (
     "Koneksi ke layanan data eksternal terputus sebelum respons diterima. "
     "Coba jalankan ulang analisis; jika berulang, kecilkan AOI/rentang waktu "
