@@ -20,7 +20,8 @@ def catalog(monkeypatch):
 
 def test_catalog_excludes_duplicate_legacy_and_unconfigured_choices(catalog):
     products = {item["key"]: item for item in catalog()}
-    assert len(products) == 24
+    assert len(products) == 26
+    assert {"TROPICAL_LITTER_REFERENCE", "TROPICAL_DEADWOOD_REFERENCE"} <= products.keys()
     assert "GEDI" in products
     assert "GEDI_L4B_STACK" not in products
     assert "WCMC" in products

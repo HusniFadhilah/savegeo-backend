@@ -171,9 +171,7 @@ def download_geotiff(db: Session, data: dict) -> dict:
         return start_export(image, aoi, filename, scale, year, effective_year, data.get("_request_owner"))
     # Bound both uncompressed bytes and grid dimensions before requesting a
     # direct GEE download (32 MB / 10,000-pixel axis upstream limits).
-    projected = aoi.bounds(maxError=100, proj=ee.Projection("EPSG:6933")).coordinates().getInfo()[0]
-    width = max(p[0] for p in projected) - min(p[0] for p in projected)
-    height = max(p[1] for p in projected) - min(p[1] for p in projected)
+    width, height = _projected_aoi_dimensions(aoi)
     bands = 3 if layer_type == "rgb" else 1
     safe_scale = max(scale, math.ceil(width / 9500), math.ceil(height / 9500), math.ceil(math.sqrt(width * height * bands * 8 / 24_000_000)))
     if safe_scale > scale:
@@ -182,6 +180,14 @@ def download_geotiff(db: Session, data: dict) -> dict:
         scale = safe_scale
 
     return _download_image(image, aoi, filename, layer_type, scale, requested_scale, effective_year, year, start_date, end_date)
+
+
+def _projected_aoi_dimensions(aoi) -> tuple[float, float]:
+    """Return the AOI bounding-box width and height in the export CRS (metres)."""
+    projected = aoi.bounds(maxError=100, proj=ee.Projection("EPSG:6933")).coordinates().getInfo()[0]
+    width = max(point[0] for point in projected) - min(point[0] for point in projected)
+    height = max(point[1] for point in projected) - min(point[1] for point in projected)
+    return width, height
 
 
 def _legacy_carbon_image(db, data, aoi, model_name, year, start_month, end_month, cloud_threshold):
