@@ -40,8 +40,9 @@ def carbon_productivity_years():
 
 @router.get("/carbon/extensions/blue-carbon/catalog", dependencies=[Depends(get_current_app_viewer)])
 def carbon_blue_carbon_catalog(db: Session = Depends(get_db)):
-    """Published blue-carbon records are visible to app users; edits remain admin-only."""
+    """Curated open datasets and published admin records; edits remain admin-only."""
     from app.services.config_service import get_setting
+    from app.registries.blue_carbon_open_datasets import BLUE_CARBON_OPEN_DATASETS
 
     records = get_setting(db, "carbon.bluecarbon_profiles", [])
     if isinstance(records, str):
@@ -51,8 +52,57 @@ def carbon_blue_carbon_catalog(db: Session = Depends(get_db)):
             records = []
     if not isinstance(records, list):
         records = []
-    published = [record for record in records if isinstance(record, dict) and record.get("status") == "published"]
-    return {"profiles": published}
+    published = [
+        record
+        for record in records
+        if isinstance(record, dict)
+        and record.get("status") == "published"
+        and not record.get("is_curated")
+    ]
+    curated_ids = {record["id"] for record in BLUE_CARBON_OPEN_DATASETS}
+    published = [record for record in published if record.get("id") not in curated_ids]
+    return {"profiles": [*BLUE_CARBON_OPEN_DATASETS, *published]}
+
+
+@router.get("/carbon/green-rankings/latest")
+def latest_green_rankings_snapshot(
+    year: int = Query(ge=2015),
+    start_month: int = Query(default=1, ge=1, le=12),
+    end_month: int = Query(default=12, ge=1, le=12),
+    level: str = Query(default="province", pattern="^(province|city|district|village)$"),
+    province: str | None = Query(default=None, max_length=40),
+    city: str | None = Query(default=None, max_length=40),
+    district: str | None = Query(default=None, max_length=40),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=10, le=100),
+    search: str = Query(default="", max_length=100),
+    sort_by: str = Query(default="rank", max_length=40),
+    sort_dir: str = Query(default="asc", pattern="^(asc|desc)$"),
+    viewer: object = Depends(get_current_app_viewer),
+):
+    """Load the latest completed public ranking for an exact year/period/scope."""
+    from app.services.green_rankings import latest_snapshot, ranking_config
+
+    _ = viewer
+    try:
+        config = ranking_config(
+            {"level": level, "province": province, "city": city, "district": district},
+            year,
+            start_month,
+            end_month,
+        )
+        return latest_snapshot(
+            config,
+            page=page,
+            page_size=page_size,
+            search=search,
+            sort_by=sort_by,
+            sort_dir=sort_dir,
+        )
+    except AnalysisError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=public_analysis_error(exc)) from exc
+
+
 UPSTREAM_CONNECTION_ERROR = (
     "Koneksi ke layanan data eksternal terputus sebelum respons diterima. "
     "Coba jalankan ulang analisis; jika berulang, kecilkan AOI/rentang waktu "
@@ -61,12 +111,41 @@ UPSTREAM_CONNECTION_ERROR = (
 
 
 @router.get("/carbon/green-rankings/{run_id}")
-def green_rankings_page(run_id: str, page: int = Query(default=1, ge=1), viewer: object = Depends(get_current_app_viewer)):
+def green_rankings_page(
+    run_id: str,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=10, le=100),
+    search: str = Query(default="", max_length=100),
+    sort_by: str = Query(default="rank", max_length=40),
+    sort_dir: str = Query(default="asc", pattern="^(asc|desc)$"),
+    viewer: object = Depends(get_current_app_viewer),
+):
     from app.api.routes.analysis_jobs import job_owner_key
-    from app.services.green_rankings import result_page
+    from app.services.green_rankings import publish_snapshot, result_page, snapshot_page
 
     try:
-        return result_page(run_id, job_owner_key(viewer), page)
+        owner = job_owner_key(viewer)
+        result = result_page(
+            run_id,
+            owner,
+            page,
+            page_size=page_size,
+            search=search,
+            sort_by=sort_by,
+            sort_dir=sort_dir,
+        )
+        if result["done"] and not result.get("snapshot_saved_at"):
+            scope_key = publish_snapshot(run_id, owner)
+            if scope_key:
+                return snapshot_page(
+                    scope_key,
+                    page=page,
+                    page_size=page_size,
+                    search=search,
+                    sort_by=sort_by,
+                    sort_dir=sort_dir,
+                )
+        return result
     except AnalysisError as exc:
         raise HTTPException(status_code=exc.status_code, detail=public_analysis_error(exc)) from exc
 

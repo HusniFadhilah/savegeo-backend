@@ -46,9 +46,12 @@ from app.db.models.carbon_calibration import (
     FieldPlot,
     FieldTree,
 )
+from app.db.models.green_ranking import GreenRankingSnapshot, GreenRankingSnapshotRow
 
 __all__ = [
     "CarbonFieldObservation",
+    "GreenRankingSnapshot",
+    "GreenRankingSnapshotRow",
     "AdminUser",
     "AnalysisResult",
     "AnalysisRun",
