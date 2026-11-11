@@ -46,6 +46,22 @@ def basemaps(db: Session = Depends(get_db)):
     return {"layers": layers, "count": len(layers)}
 
 
+@router.get("/maps/apple-mapkit/status")
+def apple_mapkit_status(request: Request, _viewer: AdminUser | User = Depends(get_current_app_viewer)):
+    """Report whether the optional Apple basemap can issue tokens for this origin."""
+    if not apple_mapkit_service.is_configured():
+        return {"available": False}
+    origin = apple_mapkit_service.token_origin(request.headers.get("origin"), request.headers.get("referer"))
+    try:
+        # Check that the configured private key is readable and can sign before
+        # the frontend exposes Apple as a basemap choice.
+        apple_mapkit_service.create_token(origin)
+    except Exception as exc:  # noqa: BLE001 - keep key details out of the response
+        logger.warning("Apple MapKit readiness check failed: %s", type(exc).__name__)
+        return {"available": False}
+    return {"available": True}
+
+
 @router.get("/maps/apple-mapkit/token")
 def apple_mapkit_token(request: Request, _viewer: AdminUser | User = Depends(get_current_app_viewer)):
     """Issue a short-lived MapKit JS token for the Apple satellite basemap."""
