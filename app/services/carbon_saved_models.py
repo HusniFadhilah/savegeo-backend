@@ -13,10 +13,10 @@ from app.services.gee_common import AnalysisError
 FEATURES = ["blue", "green", "red", "nir", "swir1", "swir2", "ndvi", "ndmi", "elevation", "slope"]
 
 
-def predictors(region, year, feature_names):
+def predictors(region, year, feature_names, fill_gaps=False):
     from app.services.carbon_pool_service import _landsat_predictors
 
-    image = _landsat_predictors(region, year)
+    image = _landsat_predictors(region, year, fill_gaps=fill_gaps)
     if "s1_vv" in feature_names:
         radar = (ee.ImageCollection("COPERNICUS/S1_GRD").filterBounds(region)
                  .filterDate(f"{year}-01-01", f"{year + 1}-01-01")
@@ -86,14 +86,34 @@ def saved_model_image(roi, model, dataset_meta, analysis_year=None):
         raise AnalysisError("Checksum artefak model tidak sesuai. Deploy ulang paket model yang lengkap.", 503)
     artifact = _read_artifact(str(path), path.stat().st_mtime_ns)
     covariate_year = int(analysis_year or info["covariate_year"])
-    image = predictors(roi, covariate_year, info["feature_names"])
-    return ensemble_image(image, artifact), {
+    detritus_model = info.get("target_pool") in {"litter_carbon", "deadwood_carbon"} or info.get(
+        "target_dataset_key"
+    ) in {"TROPICAL_LITTER_REFERENCE", "TROPICAL_DEADWOOD_REFERENCE"}
+    image = predictors(roi, covariate_year, info["feature_names"], fill_gaps=detritus_model)
+    prediction = ensemble_image(image, artifact)
+    if detritus_model:
+        labels = (
+            ee.ImageCollection("GOOGLE/DYNAMICWORLD/V1")
+            .filterBounds(roi)
+            .filterDate(f"{covariate_year}-01-01", f"{covariate_year + 1}-01-01")
+        )
+        if not labels.size().getInfo():
+            raise AnalysisError(f"Dynamic World tahun {covariate_year} belum tersedia untuk memetakan tutupan pohon.", 404)
+        tree_cover = labels.select("label").mode().eq(1)
+        mangrove = ee.ImageCollection("LANDSAT/MANGROVE_FORESTS").mosaic().select("1").unmask(0).eq(1)
+        tropical = ee.Image.pixelLonLat().select("latitude").abs().lte(23.5)
+        prediction = prediction.updateMask(tree_cover.And(mangrove.Not()).And(tropical))
+    return prediction, {
         "n_samples": info["n_samples"], "validation_samples": info["validation_samples"],
         "validation_metrics": info["validation_metrics"], "validation_type": info.get("validation_type", "spatial_reference_holdout"),
         "source_url": info.get("source_url"), "source_data_kind": info.get("source_data_kind", "reference_raster"),
         "validation_note": "Validasi terhadap raster referensi pada blok spasial terpisah; akurasi lapangan belum ditetapkan.",
         "covariate_year": covariate_year, "reference_covariate_year": info["covariate_year"], "training_bbox": bbox,
         "deployment_mode": "frozen_ensemble", "trained_at": info["trained_at"],
+        "map_resolution_m": 30,
+        "reference_support_m": info.get("sample_scale_m"),
+        "predictor_gap_fill": "adjacent_year_composite" if detritus_model else None,
+        "display_mask": "dynamic_world_tree_cover_excluding_mangroves" if detritus_model else None,
     }
 
 

@@ -63,27 +63,40 @@ def _geometry(aoi):
     return ee.Geometry.Rectangle(coords)
 
 
-def _landsat_predictors(region, year):
+def _landsat_predictors(region, year, fill_gaps=False):
     # Changing mask bits, collection choice or compositing here requires bumping
     # carbon_annual_store.ANNUAL_ALGORITHM_VERSION.
     older = year < 2013
-    if older:
-        collection = ee.ImageCollection("LANDSAT/LT05/C02/T1_L2")
-        # Landsat 5 has regional acquisition gaps in the 2010 BGB reference
-        # year (including Bali). Landsat 7 uses the same optical band names;
-        # its annual observations also fill SLC-off gaps through compositing.
-        collection = collection.merge(ee.ImageCollection("LANDSAT/LE07/C02/T1_L2"))
-    else:
-        collection = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
-        if year >= 2021:
-            collection = collection.merge(ee.ImageCollection("LANDSAT/LC09/C02/T1_L2"))
     bands = ["SR_B1", "SR_B2", "SR_B3", "SR_B4", "SR_B5", "SR_B7"] if older else ["SR_B2", "SR_B3", "SR_B4", "SR_B5", "SR_B6", "SR_B7"]
 
     def prepare(image):
         mask = image.select("QA_PIXEL").bitwiseAnd(2 | 4 | 8 | 16 | 32).eq(0).And(image.select("QA_RADSAT").eq(0))
         return image.select(bands, ["blue", "green", "red", "nir", "swir1", "swir2"]).multiply(0.0000275).add(-0.2).updateMask(mask)
 
-    optical = collection.filterBounds(region).filterDate(f"{year}-01-01", f"{year + 1}-01-01").map(prepare).median()
+    legacy_sensor = year < 2013
+
+    def collection_for_period(start_year, end_year):
+        if legacy_sensor:
+            # Landsat 5 and 7 bridge regional acquisition gaps before 2013.
+            collection = ee.ImageCollection("LANDSAT/LT05/C02/T1_L2").merge(
+                ee.ImageCollection("LANDSAT/LE07/C02/T1_L2")
+            )
+        else:
+            collection = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
+            if end_year > 2021:
+                collection = collection.merge(ee.ImageCollection("LANDSAT/LC09/C02/T1_L2"))
+        return collection.filterBounds(region).filterDate(f"{start_year}-01-01", f"{end_year}-01-01")
+
+    optical_collection = collection_for_period(year, year + 1)
+    optical = optical_collection.map(prepare).median()
+    if fill_gaps:
+        # Keep the target year's valid observations and use adjacent-year
+        # medians only where annual cloud masking left no pixel. Tropical
+        # AOIs often have holes in a single-year Landsat composite.
+        start_year = max(1984, year - 1)
+        end_year = min(datetime.now(UTC).year + 1, year + 2)
+        fallback = collection_for_period(start_year, end_year).map(prepare).median()
+        optical = optical.unmask(fallback)
     ndvi = optical.normalizedDifference(["nir", "red"]).rename("ndvi")
     ndmi = optical.normalizedDifference(["nir", "swir1"]).rename("ndmi")
     dem = ee.ImageCollection("COPERNICUS/DEM/GLO30").select("DEM").mosaic().setDefaultProjection(ee.Projection("EPSG:4326").atScale(90))
@@ -172,7 +185,9 @@ def build_pool_export_image(db, data, roi):
         from app.services.carbon_saved_models import saved_model_image
 
         image, _ = saved_model_image(roi, model, meta, analysis_year=int(data["year"]))
-        return image.updateMask(reference.mask())
+        if key not in {"TROPICAL_LITTER_REFERENCE", "TROPICAL_DEADWOOD_REFERENCE"}:
+            image = image.updateMask(reference.mask())
+        return image
     if method == "soil_stock_integration":
         return soilgrids_stock_image(meta["depth_cm"], ee)
     if method == "ipcc_root_to_shoot":
@@ -213,7 +228,7 @@ def analyze_carbon_pool(db, data):
             from app.services.carbon_saved_models import saved_model_image
 
             image, extras = saved_model_image(calculation_roi, model, meta, analysis_year=analysis_year)
-            if reference is not None:
+            if reference is not None and key not in {"TROPICAL_LITTER_REFERENCE", "TROPICAL_DEADWOOD_REFERENCE"}:
                 image = image.updateMask(reference.mask())
         elif method == "soil_stock_integration":
             image = soilgrids_stock_image(meta["depth_cm"], ee)
@@ -295,6 +310,8 @@ def analyze_carbon_pool(db, data):
     result = {"carbon_estimated": estimated, "carbon_reference": reference_info, "area_info": area_info,
               "model_info": {"model_name": model["name"] if model else "reference_only", "algorithm": model["algorithm"] if model else "direct_raster",
                              "display_mode": "model" if model else "reference_only", "scale": scale,
+                             **({"map_resolution_m": 30, "reference_support_m": meta["resolution"]}
+                                if key in {"TROPICAL_LITTER_REFERENCE", "TROPICAL_DEADWOOD_REFERENCE"} and model else {}),
                              "calculation_mode": area_info["calculation_mode"], "model_version": model["version"] if model else None,
                              "reference_dataset": key, "reference_dataset_year": meta["year"], "analysis_year": analysis_year,
                              "requested_analysis_year": requested_analysis_year,

@@ -9,9 +9,9 @@ from app.db.models.carbon_annual_estimate import CarbonAnnualEstimate
 
 logger = logging.getLogger(__name__)
 
-# Bump when carbon_pool_service._landsat_predictors changes (QA mask bits, collection
-# choice, compositing); otherwise summaries from the old algorithm would be reused.
-ANNUAL_ALGORITHM_VERSION = "landsat-annual-median-v1"
+# Bump when predictor compositing or the map mask changes; otherwise annual
+# summaries computed with the older raster coverage would be reused.
+ANNUAL_ALGORITHM_VERSION = "landsat-annual-gap-fill-tree-mask-v2"
 
 
 def estimate_identity(data, model, analysis_year, reference_year, scale, today=None):
