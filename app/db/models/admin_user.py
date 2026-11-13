@@ -18,6 +18,8 @@ if TYPE_CHECKING:
 
 class AdminUser(Base):
     __tablename__ = "admin_users"
+    if TYPE_CHECKING:
+        _mfa_verified_at: int | None  # request context, deliberately absent from ORM metadata
 
     id: Mapped[int] = mapped_column(primary_key=True)
     username: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)

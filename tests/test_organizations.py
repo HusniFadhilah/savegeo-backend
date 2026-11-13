@@ -35,6 +35,7 @@ from app.db.models.user import User
 from app.db.models.gee_credential import GEECredential
 from app.db.models.audit_log import AuditLog
 from app.db.models.admin_mfa import AdminMfa, MfaChallenge
+from app.db.models.carbon_calibration import CarbonCalibrationDataset, CarbonCalibrationFile, CarbonCalibrationRun, CarbonCalibrationModel
 from app.db.session import get_db
 from app.schemas.organizations import MemberChange
 from app.services import organizations as service
@@ -52,7 +53,8 @@ TABLES = [User.__table__, AdminUser.__table__, Role.__table__, Permission.__tabl
           DmrvProject.__table__, ProjectMember.__table__, DmrvAuditEvent.__table__, DmrvIdempotencyKey.__table__,
           BoundaryVersion.__table__, DmrvMonitoringPeriod.__table__, DmrvJob.__table__, DmrvSnapshot.__table__,
           WorkspaceAnalysisRun.__table__, WorkspaceQuota.__table__, WorkspaceUsageEvent.__table__, GEECredential.__table__, AuditLog.__table__,
-          AdminMfa.__table__, MfaChallenge.__table__]
+          AdminMfa.__table__, MfaChallenge.__table__, CarbonCalibrationDataset.__table__, CarbonCalibrationFile.__table__,
+          CarbonCalibrationRun.__table__, CarbonCalibrationModel.__table__]
 
 
 @pytest.fixture(params=["sqlite", "postgresql"])
@@ -75,7 +77,8 @@ def env(request):
         db.add_all([User(id=1, username="alice", email="alice@example.test", password_hash="x"),
                     User(id=2, username="bob", email="bob@example.test", password_hash="x"),
                     User(id=3, username="carol", email="carol@example.test", password_hash="x"),
-                    AdminUser(id=1, username="root-admin", email="root@example.test", password_hash="x")])
+                    AdminUser(id=1, username="root-admin", email="root@example.test", password_hash="x"),
+                    AdminUser(id=2, username="reviewer", email="reviewer@example.test", password_hash="x")])
         db.commit()
     app = FastAPI()
     register_dmrv_error_handler(app)

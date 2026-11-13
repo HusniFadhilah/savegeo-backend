@@ -225,7 +225,7 @@ def ensure_admin_mfa(payload: dict, admin: AdminUser) -> None:
     if requires_admin_mfa(admin) and (not admin.mfa_enabled or type(verified) is not int
                                      or verified > int(dt.datetime.now(dt.UTC).timestamp()) + 30):
         raise HTTPException(status_code=403, detail={"code": "mfa_required", "message": "Masuk kembali dan selesaikan verifikasi MFA."})
-    setattr(admin, "_mfa_verified_at", verified)  # ephemeral request context, never serialized
+    admin._mfa_verified_at = verified  # ephemeral request context, never serialized
 
 
 def require_recent_mfa(admin: AdminUser) -> None:
@@ -439,7 +439,7 @@ def require_permission(code: str):
     def _dependency(admin: AdminUser = Depends(get_current_admin_panel)) -> AdminUser:
         if not admin_has_permission(admin, code):
             raise HTTPException(status_code=403, detail=f"Missing permission: {code}")
-        if code in {"secret.write", "credential.write", "config.write", "role.write", "roles.write", "user.write", "users.write", "model.write", "model.approve", "carbon_calibration.write"}:
+        if code in {"secret.write", "credential.write", "config.write", "role.write", "roles.write", "user.write", "users.write", "model.write", "model.approve", "calibration.write", "carbon_calibration.write"}:
             require_recent_mfa(admin)
         return admin
 

@@ -7,7 +7,6 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 from fastapi import HTTPException
 from pydantic import SecretStr
-from sqlalchemy import select
 
 from app.core import security, secret_encryption, totp
 from app.core.config import get_settings
