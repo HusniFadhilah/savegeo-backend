@@ -142,6 +142,17 @@ def login(payload: LoginRequest, request: Request, response: Response, db: Sessi
         auth_throttle.record_login_failure(request, "admin", payload.username)
         raise HTTPException(status_code=401, detail="Invalid username or password")
     auth_throttle.record_login_success(request, "admin", payload.username)
+    from app.core.security import requires_admin_mfa
+    if requires_admin_mfa(admin):
+        from app.services import admin_mfa
+        from app.core.secret_encryption import SecretEncryptionError
+        try:
+            challenge = admin_mfa.begin(db, admin)
+        except SecretEncryptionError:
+            raise HTTPException(503, "Konfigurasi enkripsi MFA server belum tersedia.") from None
+        clear_session_cookie(response, ADMIN_SESSION_COOKIE)
+        response.headers["Cache-Control"] = "no-store"
+        return challenge
     admin.last_login = datetime.now(UTC)
     db.commit()
     set_session_cookie(response, ADMIN_SESSION_COOKIE, create_access_token(admin))
@@ -300,16 +311,20 @@ async def upload_gee_credential(
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="Invalid JSON file")
 
-    if key_data.get("type") != "service_account":
+    if not isinstance(key_data, dict) or key_data.get("type") != "service_account":
         raise HTTPException(status_code=400, detail="File is not a GEE service-account key (type != service_account)")
     required = ("type", "project_id", "private_key", "client_email")
     missing = [f for f in required if f not in key_data]
     if missing:
         raise HTTPException(status_code=400, detail=f"Key file missing required fields: {missing}")
+    if not all(isinstance(key_data[field], str) and key_data[field] for field in required):
+        raise HTTPException(status_code=400, detail="Key metadata must be non-empty strings")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{3,127}", key_data["project_id"]) or len(key_data["client_email"]) > 256:
+        raise HTTPException(status_code=400, detail="Invalid credential project or email metadata")
 
     project_id = key_data["project_id"]
     client_email = key_data["client_email"]
-    ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+    ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
     bucket_path = f"gee_{project_id}_{ts}.json"
 
     try:
@@ -317,16 +332,13 @@ async def upload_gee_credential(
     except storage_service.StorageNotConfigured as exc:
         raise HTTPException(status_code=503, detail=str(exc))
 
-    if activate:
-        db.query(GEECredential).update({GEECredential.is_active: False})
-
     cred = GEECredential(
         label=label,
         project_id=project_id,
         client_email=client_email,
         json_filename=file.filename or bucket_path,
         bucket_path=bucket_path,
-        is_active=bool(activate),
+        is_active=False,
         uploaded_by=admin.id,
         notes=notes,
     )
@@ -336,7 +348,14 @@ async def upload_gee_credential(
     audit_service.log_audit(db, admin.id, "credential.create", "gee_credential", cred.id, detail={"label": label, "project_id": project_id})
 
     if activate:
-        request.app.state.ee_initialized = gee_service.initialize_ee(db)
+        from app.services import credential_activation
+        try:
+            credential_activation.activate(db, cred.id, admin.id)
+            request.app.state.ee_initialized = True
+        except credential_activation.CredentialActivationError as exc:
+            if exc.runtime_initialized is not None:
+                request.app.state.ee_initialized = exc.runtime_initialized
+            return {"message": "Credential uploaded; activation failed", "credential": cred.to_dict(), "activation_error": exc.code}
 
     return {"message": "Credential uploaded", "credential": cred.to_dict()}
 
@@ -364,13 +383,23 @@ def activate_gee_credential(cred_id: int, request: Request, admin: AdminUser = D
     cred = db.get(GEECredential, cred_id)
     if not cred:
         raise HTTPException(status_code=404, detail="Credential not found")
-    db.query(GEECredential).update({GEECredential.is_active: False})
-    cred.is_active = True
-    db.commit()
-    ee_initialized = gee_service.initialize_ee(db)
-    request.app.state.ee_initialized = ee_initialized
-    audit_service.log_audit(db, admin.id, "credential.activate", "gee_credential", cred_id, detail={"ee_initialized": ee_initialized})
-    return {"message": "Credential activated", "gee_initialized": ee_initialized}
+    from app.services import credential_activation
+    try:
+        result = credential_activation.activate(db, cred_id, admin.id)
+    except credential_activation.CredentialActivationError as exc:
+        if exc.runtime_initialized is not None:
+            request.app.state.ee_initialized = exc.runtime_initialized
+        raise HTTPException(status_code=503, detail={"code": exc.code, "message": str(exc)}) from None
+    request.app.state.ee_initialized = result["gee_initialized"]
+    return {"message": "Credential activated", **result}
+
+
+@router.post("/gee/credentials/{cred_id}/probe")
+def probe_gee_credential(cred_id: int, admin: AdminUser = Depends(require_permission("credential.write")), db: Session = Depends(get_db)):
+    from app.services import credential_activation
+    if db.get(GEECredential, cred_id) is None:
+        raise HTTPException(status_code=404, detail="Credential not found")
+    return credential_activation.check(db, cred_id, admin.id)
 
 
 @router.get("/gee/status")

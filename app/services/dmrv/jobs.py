@@ -133,9 +133,13 @@ def complete(db: Session, job_id: str, worker_id: str, result: dict[str, Any], n
     if job is None:
         db.rollback()
         return False
+    if job.cancel_requested:
+        db.rollback()
+        return False
     _close_last_stage(job, moment)
     job.status, job.result, job.error = "succeeded", result, None
     job.finished_at, job.lease_owner, job.lease_expires_at = moment, None, None
+    _settle_analysis(db, job, True, moment)
     db.commit()
     return True
 
@@ -157,6 +161,7 @@ def fail(
         job.run_after = moment + dt.timedelta(seconds=backoff_seconds(job.attempts))
     else:
         job.status, job.finished_at = "failed", moment
+        _settle_analysis(db, job, False, moment)
     status = job.status
     db.commit()
     return status
@@ -170,6 +175,7 @@ def request_cancel(db: Session, job_id: str, now: dt.datetime | None = None) -> 
         return "missing"
     if job.status == "queued":
         job.status, job.finished_at, job.cancel_requested = "cancelled", moment, True
+        _settle_analysis(db, job, False, moment)
         outcome = "cancelled"
     elif job.status == "running":
         job.cancel_requested = True
@@ -190,6 +196,7 @@ def mark_cancelled(db: Session, job_id: str, worker_id: str, now: dt.datetime | 
     _close_last_stage(job, moment)
     job.status, job.finished_at = "cancelled", moment
     job.lease_owner, job.lease_expires_at = None, None
+    _settle_analysis(db, job, False, moment)
     db.commit()
     return True
 
@@ -212,5 +219,13 @@ def reap_expired(db: Session, now: dt.datetime | None = None) -> int:
         else:
             job.status = "queued"
             job.run_after = moment + dt.timedelta(seconds=backoff_seconds(job.attempts))
+        if job.status in {"failed", "cancelled"}:
+            _settle_analysis(db, job, False, moment)
     db.commit()
     return len(expired)
+
+
+def _settle_analysis(db: Session, job: DmrvJob, succeeded: bool, now: dt.datetime) -> None:
+    if job.kind.startswith("analysis."):
+        from app.services.workspace_usage import settle
+        settle(db, job.id, succeeded, now)

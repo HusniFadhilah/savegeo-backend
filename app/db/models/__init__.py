@@ -3,6 +3,8 @@
 """
 
 from app.db.models.admin_user import AdminUser
+from app.db.models.admin_mfa import AdminMfa, MfaChallenge
+from app.db.models.workspace_analysis import WorkspaceAnalysisRun, WorkspaceQuota, WorkspaceUsageEvent
 from app.db.models.analysis_result import AnalysisResult
 from app.db.models.analysis_run import AnalysisRun
 from app.db.models.analysis_provenance import AnalysisProvenance
@@ -30,6 +32,7 @@ from app.db.models.uploaded_model import UploadedModel
 from app.db.models.user import User
 from app.db.models.workflow import Workflow, WorkflowRun
 from app.db.models.dmrv_project import DmrvProject, ProjectMember
+from app.db.models.organization import Organization, OrganizationMember, OrganizationInvitation, WorkspaceRequest
 from app.db.models.dmrv_boundary import BoundaryVersion
 from app.db.models.dmrv_audit import DmrvAuditEvent, DmrvIdempotencyKey
 from app.db.models.dmrv_field import ImportBatch, SurveyPlot, SurveyVisit, TreeMeasurement
@@ -49,6 +52,7 @@ from app.db.models.carbon_calibration import (
 from app.db.models.green_ranking import GreenRankingSnapshot, GreenRankingSnapshotRow
 
 __all__ = [
+    "Organization", "OrganizationMember", "OrganizationInvitation", "WorkspaceRequest",
     "CarbonFieldObservation",
     "GreenRankingSnapshot",
     "GreenRankingSnapshotRow",

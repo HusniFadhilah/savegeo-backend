@@ -6,6 +6,7 @@ requires-python = ">=3.11"
 readme = "README.md"
 
 dependencies = [
+    "cryptography==50.0.0",
     # --- Web framework ---
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.30.0",

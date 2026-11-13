@@ -121,6 +121,13 @@ def _job_out(row: DmrvJob) -> DmrvJobOut:
     )
 
 
+def _analysis_visible(db: Session, viewer: User | AdminUser, kind: str) -> bool:
+    if not kind.startswith("analysis."):
+        return True
+    from app.core.viewer_features import JOB_TYPE_FEATURES, viewer_feature_codes
+    return JOB_TYPE_FEATURES.get(kind.removeprefix("analysis.")) in viewer_feature_codes(db, viewer)
+
+
 @router.post("/projects/{project_id}/jobs", response_model=DmrvJobOut)
 def create_job(
     project_id: str,
@@ -184,7 +191,7 @@ def list_jobs(
     rows = db.execute(
         select(DmrvJob).where(DmrvJob.project_id == project_id).order_by(DmrvJob.created_at.desc()).limit(limit)
     ).scalars().all()
-    return [_job_out(row) for row in rows]
+    return [_job_out(row) for row in rows if _analysis_visible(db, viewer, row.kind)]
 
 
 @router.get("/projects/{project_id}/jobs/{job_id}", response_model=DmrvJobOut)
@@ -198,6 +205,8 @@ def get_job(
     row = db.execute(select(DmrvJob).where(DmrvJob.id == job_id, DmrvJob.project_id == project_id)).scalar_one_or_none()
     if row is None:
         raise DmrvError(404, "not_found", "Pekerjaan tidak ditemukan.")
+    if not _analysis_visible(db, viewer, row.kind):
+        raise DmrvError(403, "feature_forbidden", "Akses fitur analisis tidak diizinkan.")
     return _job_out(row)
 
 
@@ -220,6 +229,9 @@ def cancel_job(
     now = dt.datetime.now(dt.UTC)
     if row.status == "queued":
         row.status, row.finished_at, row.cancel_requested = "cancelled", now, True
+        if row.kind.startswith("analysis."):
+            from app.services.workspace_usage import settle
+            settle(db, row.id, False, now)
     elif row.status == "running":
         row.cancel_requested = True
     record_audit(
@@ -245,6 +257,8 @@ def get_snapshot(
     ).scalar_one_or_none()
     if row is None:
         raise DmrvError(404, "not_found", "Snapshot tidak ditemukan.")
+    if row.kind in {"carbon", "landcover", "landcover_transition", "vegetation"} and not _analysis_visible(db, viewer, "analysis." + row.kind):
+        raise DmrvError(403, "feature_forbidden", "Akses fitur analisis tidak diizinkan.")
     return DmrvSnapshotOut.model_validate(row, from_attributes=True)
 
 
@@ -625,7 +639,10 @@ def create_project(
     viewer: User | AdminUser = Depends(get_current_app_viewer),
     db: Session = Depends(get_db),
 ):
-    if not isinstance(viewer, AdminUser) or not admin_has_permission(viewer, CREATE_PERMISSION):
+    if payload.organization_id:
+        from app.services.organizations import require_member
+        require_member(db, payload.organization_id, Principal.from_account(viewer), manage=True)
+    elif not isinstance(viewer, AdminUser) or not admin_has_permission(viewer, CREATE_PERMISSION):
         raise DmrvError(403, "forbidden", "Akun ini tidak diizinkan membuat proyek dMRV.")
     if not idempotency_key or len(idempotency_key) > 128:
         raise DmrvError(400, "idempotency_key_required", "Header Idempotency-Key (maks. 128 karakter) wajib diisi.")

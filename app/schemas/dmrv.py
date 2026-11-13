@@ -15,6 +15,7 @@ class _Strict(BaseModel):
 class ProjectCreate(_Strict):
     name: str = Field(min_length=1, max_length=255)
     organization: str | None = Field(default=None, max_length=255)
+    organization_id: str | None = Field(default=None, min_length=1, max_length=36)
     activity_type: str = Field(default="ARR", max_length=32)
     jurisdiction: str | None = Field(default=None, max_length=128)
     methodology_id: str | None = Field(default=None, max_length=64)
@@ -45,6 +46,7 @@ class ProjectOut(BaseModel):
     id: str
     name: str
     organization: str | None
+    organization_id: str | None = None
     activity_type: str
     jurisdiction: str | None
     methodology_id: str | None

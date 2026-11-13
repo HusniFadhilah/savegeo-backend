@@ -11,7 +11,7 @@ import secrets
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import field_validator, model_validator
+from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     supabase_url: str = ""
     supabase_service_role_key: str = ""
     supabase_gee_credentials_bucket: str = "gee-credentials"
+    secret_encryption_keys: SecretStr = SecretStr("")
+    secret_encryption_active_key_id: str = ""
+    credential_allow_legacy_plaintext_read: bool = True
+    mfa_require_privileged_admins: bool | None = None
     # Pre-created bucket writable by the configured Earth Engine identity.
     gee_export_bucket: str = ""
 
@@ -273,6 +277,12 @@ class Settings(BaseSettings):
         """Use Secure cookies automatically outside local development."""
         if self.auth_cookie_secure is not None:
             return self.auth_cookie_secure
+        return self.app_env.lower() in {"prod", "production", "staging"}
+
+    @property
+    def privileged_mfa_required(self) -> bool:
+        if self.mfa_require_privileged_admins is not None:
+            return self.mfa_require_privileged_admins
         return self.app_env.lower() in {"prod", "production", "staging"}
 
     @property

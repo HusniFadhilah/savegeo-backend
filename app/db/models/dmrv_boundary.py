@@ -12,7 +12,8 @@ from app.db.base import Base
 
 class BoundaryVersion(Base):
     __tablename__ = "dmrv_boundary_versions"
-    __table_args__ = (UniqueConstraint("project_id", "version", name="uq_dmrv_boundary_version"),)
+    __table_args__ = (UniqueConstraint("project_id", "version", name="uq_dmrv_boundary_version"),
+                      UniqueConstraint("id", "project_id", name="uq_dmrv_boundary_project"))
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     project_id: Mapped[str] = mapped_column(ForeignKey("dmrv_projects.id", ondelete="CASCADE"), index=True)

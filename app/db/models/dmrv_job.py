@@ -17,6 +17,7 @@ def _now() -> dt.datetime:
 class DmrvJob(Base):
     __tablename__ = "dmrv_jobs"
     __table_args__ = (
+        UniqueConstraint("id", "project_id", name="uq_dmrv_job_project"),
         UniqueConstraint("created_by", "idempotency_key", name="uq_dmrv_job_idempotency"),
         Index("ix_dmrv_jobs_status_run_after", "status", "run_after"),
     )
