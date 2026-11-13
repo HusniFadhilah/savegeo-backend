@@ -13,6 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.security import admin_has_permission, get_current_app_viewer
+from app.api.routes.dmrv_integrity import router as integrity_router
 from app.db.models.admin_user import AdminUser
 from app.db.models.dmrv_job import DmrvJob, DmrvSnapshot
 from app.db.models.dmrv_evidence import DmrvEvidencePackage
@@ -55,6 +56,8 @@ from app.services.dmrv.errors import DmrvError
 from app.services.dmrv.field_import import CANONICAL_FIELDS, ImportOptions
 
 router = APIRouter(prefix="/dmrv", tags=["dmrv"])
+
+router.include_router(integrity_router)
 
 CREATE_PERMISSION = "dmrv.project.create"
 

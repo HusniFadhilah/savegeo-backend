@@ -21,6 +21,7 @@ from app.db.models.dmrv_evidence import DmrvEvidencePackage
 from app.db.models.dmrv_submission import DmrvSubmission, DmrvReviewFinding
 from app.db.models.dmrv_monitoring import DmrvMonitoringPeriod
 from app.db.models.dmrv_project import DmrvProject, ProjectMember
+from app.db.models.organization import Organization, OrganizationMember
 from app.db.models.role import Permission, Role, role_permissions
 from app.db.models.user import User
 from app.db.session import get_db
@@ -34,6 +35,7 @@ def _jsonb_sqlite(type_, compiler, **kwargs):
 
 TABLES = [
     User.__table__, AdminUser.__table__, Role.__table__, Permission.__table__, role_permissions,
+    Organization.__table__, OrganizationMember.__table__,
     DmrvProject.__table__, ProjectMember.__table__, BoundaryVersion.__table__,
     DmrvJob.__table__, DmrvSnapshot.__table__, DmrvEvidencePackage.__table__,
     DmrvSubmission.__table__, DmrvReviewFinding.__table__,
