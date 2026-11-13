@@ -55,6 +55,7 @@ from app.db.models.green_ranking import GreenRankingSnapshot, GreenRankingSnapsh
 __all__ = [
     "DmrvIntegrityRecord", "DmrvIntegrityRevision", "DmrvIntegrityDocument", "DmrvRiskPolicy",
     "Organization", "OrganizationMember", "OrganizationInvitation", "WorkspaceRequest",
+    "AdminMfa", "MfaChallenge", "WorkspaceAnalysisRun", "WorkspaceQuota", "WorkspaceUsageEvent",
     "CarbonFieldObservation",
     "GreenRankingSnapshot",
     "GreenRankingSnapshotRow",
