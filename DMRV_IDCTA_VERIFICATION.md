@@ -55,7 +55,9 @@ satellite failures remain retryable without fabricated zero-risk evidence.
   calibration does not automatically replace production models.
 - Existing unrelated edits in the original `main` working trees are preserved.
   The 37 installed source/guide files, database migration and local runtime checks
-  are recorded in separate receipts under `work/idcta`. No Git push or production
-  deployment was performed. The original working trees contain concurrent edits.
+  are recorded in separate receipts under `work/idcta`. The committed feature
+  branch `dmrv-idcta-integrity` was copied back to both original local repositories.
+  No push to internet remotes or production deployment was performed. The original
+  `main` working trees contain concurrent edits and have not been merged or cleaned.
 
 See `DMRV_IDCTA_GUIDE.md` for instructions, formulas and an illustrative case study.
