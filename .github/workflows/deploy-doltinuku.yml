@@ -1,8 +1,7 @@
 name: Beta Doltinuku Deployment
 
 on:
-  push:
-    branches: [main]
+  # Beta deployment is manual. Production LEN releases must not deploy here.
   workflow_dispatch:
 
 # Least privilege by default; jobs that need more declare it explicitly.

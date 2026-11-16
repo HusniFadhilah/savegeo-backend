@@ -83,6 +83,15 @@ def prepare(directory: Path, container: str) -> None:
                                check=True, capture_output=True, text=True)
     networks = json.loads(inspected.stdout)
     gateways = {item['Gateway'] for item in networks.values() if item.get('Gateway')}
+    # Internal Docker networks omit the endpoint gateway. Read their explicit
+    # IPAM configuration rather than guessing an address from the subnet.
+    if not gateways:
+        for network_name in networks:
+            network = subprocess.run(['docker', 'network', 'inspect', network_name],
+                                     check=True, capture_output=True, text=True)
+            for configuration in json.loads(network.stdout):
+                gateways.update(item['Gateway'] for item in configuration.get('IPAM', {}).get('Config', [])
+                                if item.get('Gateway'))
     from ipaddress import ip_address
     proxy_cidrs = ','.join(str(ip_address(value))+'/32' for value in sorted(gateways) if ip_address(value).version == 4)
     if not proxy_cidrs:
