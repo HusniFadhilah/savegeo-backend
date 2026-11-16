@@ -104,11 +104,11 @@ def prepare(directory: Path, container: str) -> None:
     lines = [line for line in original.splitlines() if line.split('=',1)[0].strip() not in updates]
     replacement = '\n'.join(lines+[key+'='+value for key,value in updates.items()])+'\n'
     backup = directory / ('.env.before-static-remediation-'+dt.datetime.now(dt.UTC).strftime('%Y%m%dT%H%M%S%fZ'))
-    backup.write_text(original, encoding='utf8')
-    os.chmod(backup, 0o600)
+    with os.fdopen(os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w', encoding='utf8') as file:
+        file.write(original)
     temporary = directory / '.env.audit-tmp'
-    temporary.write_text(replacement, encoding='utf8')
-    os.chmod(temporary, 0o600)
+    with os.fdopen(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w', encoding='utf8') as file:
+        file.write(replacement)
     temporary.replace(env_file)
     print('Restricted runtime role and environment prepared; original environment retained in a private backup')
 
