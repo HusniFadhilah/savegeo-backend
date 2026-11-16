@@ -16,6 +16,20 @@ concurrency:
 jobs:
   validate:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: savegeo_ci
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: savegeo_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U savegeo_ci -d savegeo_ci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     outputs:
       metadata_artifact_outcome: ${{ steps.metadata_artifact.outcome }}
     permissions:
@@ -38,6 +52,10 @@ jobs:
         env:
           DEBUG: "false"
           SAVEGEO_DEPLOYMENT_ENVIRONMENT: production
+          APP_ENV: development
+          DATABASE_URL: postgresql+psycopg://savegeo_ci:postgres@127.0.0.1:5432/savegeo_ci
+          WORKSPACE_TEST_DATABASE_URL: postgresql+psycopg://savegeo_ci:postgres@127.0.0.1:5432/savegeo_ci
+          DMRV_TEST_DATABASE_URL: postgresql+psycopg://savegeo_ci:postgres@127.0.0.1:5432/savegeo_ci
         run: |
           python scripts/write_build_metadata.py --output build-metadata.json
           python scripts/validate_build_metadata.py build-metadata.json --expected-environment production --require-workflow
@@ -58,6 +76,7 @@ jobs:
             echo "::warning::pip-audit could not reach its advisory service; retrying in 10 seconds (attempt $attempt/3)"
             sleep 10
           done
+          alembic upgrade head
           pytest
       - name: Preserve validated build metadata in job summary
         run: |
