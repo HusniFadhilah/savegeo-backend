@@ -16,7 +16,6 @@ from app.core.viewer_features import (
     viewer_feature_codes,
     workflow_required_feature_codes,
 )
-from app.core.version import get_product_version
 from app.db.models.user import User
 from app.db.models.workflow import Workflow, WorkflowRun
 from app.db.session import get_db
@@ -188,17 +187,9 @@ def run_workflow(workflow_id: str, payload: WorkflowRunRequest, user: User = Dep
     if workflow.owner_id != user.id:
         raise HTTPException(status_code=404, detail="WORKFLOW_NOT_FOUND")
     ensure_workflow_feature_access(user, workflow.workflow_json, db)
-    now = dt.datetime.now(dt.UTC)
-    node_statuses = {node["id"]: "completed" for node in workflow.workflow_json.get("nodes", [])}
-    provenance = {"workflowVersion": workflow.version, "executionLocation": "backend", "applicationVersion": get_product_version(), "startedAt": now.isoformat(), "completedAt": now.isoformat(), "nodeStatuses": node_statuses}
-    run = WorkflowRun(workflow_id=workflow.id, owner_id=user.id, status="completed", execution_location="backend" if payload.executionLocation == "auto" else payload.executionLocation, node_statuses=node_statuses, provenance=provenance, started_at=now, completed_at=now)
-    db.add(run)
-    workflow.last_run = {"runId": str(run.id) if run.id else None, "status": "completed", "completedAt": now.isoformat()}
-    db.commit()
-    db.refresh(run)
-    workflow.last_run = {"runId": str(run.id), "status": run.status, "completedAt": now.isoformat()}
-    db.commit()
-    return run.to_dict()
+    # No execution engine is installed here. Never fabricate completed nodes or
+    # output records from the workflow definition alone.
+    raise HTTPException(status_code=501, detail="WORKFLOW_EXECUTION_UNAVAILABLE")
 
 
 @router.get("/{workflow_id}/runs/{run_id}")

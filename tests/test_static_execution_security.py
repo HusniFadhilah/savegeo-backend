@@ -94,6 +94,17 @@ def test_optional_workflow_auth_rejects_malformed_header():
     assert error.value.status_code == 401
 
 
+def test_workflow_execution_does_not_fabricate_success_or_write_run(monkeypatch):
+    from app.schemas.workflow import WorkflowRunRequest
+    row = Workflow(id=10, owner_id=1, name='Saved definition', workflow_json={'nodes': [{'id': 'a'}]})
+    monkeypatch.setattr(workflows, '_find_workflow', lambda *args: row)
+    monkeypatch.setattr(workflows, 'ensure_workflow_feature_access', lambda *args: None)
+    db = SimpleNamespace(add=lambda *args: pytest.fail('No execution engine must create no run'), commit=lambda: pytest.fail('No data may be committed'))
+    with pytest.raises(HTTPException) as error:
+        workflows.run_workflow('10', WorkflowRunRequest(), User(id=1), db)
+    assert error.value.status_code == 501
+
+
 @pytest.mark.parametrize('algorithm', ['linear', 'ridge', 'random_forest', 'hist_gradient_boosting', 'lightgbm'])
 def test_onnx_roundtrip_preserves_predictions_and_never_loads_pickle(tmp_path, monkeypatch, algorithm):
     import joblib
