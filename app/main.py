@@ -102,6 +102,15 @@ def _problem_response(
 ):
     """Return RFC 9457-compatible JSON while retaining the legacy ``error`` key."""
     detail_text = detail if isinstance(detail, str) else "Request failed"
+    code = None
+    if isinstance(detail, dict):
+        candidate = detail.get("code")
+        if isinstance(candidate, str) and candidate.replace("_", "").isalnum() and len(candidate) <= 80:
+            code = candidate
+        if status_code < 500 and isinstance(detail.get("message"), str):
+            detail_text = detail["message"]
+    if status_code >= 500:
+        detail_text = "An internal server error occurred. Please try again later."
     body: dict[str, object] = {
         "type": f"urn:savegeo:problem:{status_code}",
         "title": "Request error" if status_code < 500 else "Internal server error",
@@ -115,6 +124,8 @@ def _problem_response(
     }
     if errors is not None:
         body["errors"] = jsonable_encoder(errors)
+    if code:
+        body["code"] = code
     return JSONResponse(
         status_code=status_code,
         content=body,
@@ -136,7 +147,9 @@ async def starlette_http_exception_handler(request: Request, exc: StarletteHTTPE
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    return _problem_response(request, 422, "Validation error", errors=exc.errors())
+    # Pydantic's raw input/ctx may contain passwords, tokens or key material.
+    errors = [{"loc": error["loc"], "type": error["type"], "msg": "Invalid value"} for error in exc.errors()]
+    return _problem_response(request, 422, "Validation error", errors=errors)
 
 
 @app.exception_handler(Exception)

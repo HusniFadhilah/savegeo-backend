@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.db.models.uploaded_model import UploadedModel
 
-ALLOWED_MODEL_EXTS = {".pkl", ".joblib", ".h5", ".pt", ".pth", ".onnx", ".bin"}
+ALLOWED_MODEL_EXTS = {".onnx"}
 
 
 def infer_model_type_from_name(filename: str) -> str:
@@ -36,14 +36,17 @@ def _safe_json_load_file(path: Path) -> dict:
 def get_active_model_path(db: Session, model_type: str, model_name: str | None = None) -> str | None:
     """Resolve which model file to load for inference.
 
-    Mirrors legacy `admin_routes.get_active_model_path`: prefer the DB-registered
-    active/default `UploadedModel` row; fall back to a bare file lookup in MODEL_DIR
-    for models that predate the DB registry.
+    Only DB-registered active artifacts may be executed. A bare filename must
+    not bypass the upload review and activation process.
     """
     settings = get_settings()
     root = settings.model_path.resolve()
 
     def safe_model_file(path: Path) -> str | None:
+        if path.suffix.lower() in {".pkl", ".joblib"}:
+            path = path.with_suffix(".onnx")
+        if path.is_symlink():
+            return None
         resolved = path.resolve()
         if resolved.is_relative_to(root) and resolved.is_file() and resolved.suffix.lower() in ALLOWED_MODEL_EXTS:
             return str(resolved)
@@ -69,15 +72,6 @@ def get_active_model_path(db: Session, model_type: str, model_name: str | None =
         if safe_path:
             return safe_path
 
-    if model_name:
-        if any(character in model_name for character in ("/", "\\", ":")) or model_name in {".", ".."}:
-            return None
-        for ext in ALLOWED_MODEL_EXTS:
-            candidate = settings.model_path / f"{model_name}{ext}"
-            safe_path = safe_model_file(candidate)
-            if safe_path:
-                return safe_path
-
     return None
 
 
@@ -97,6 +91,9 @@ def import_legacy_models(db: Session, saved_models_dir: str) -> dict:
 
     for model_file in saved_dir.iterdir():
         if model_file.suffix.lower() not in ALLOWED_MODEL_EXTS:
+            continue
+        if model_file.is_symlink() or not model_file.resolve().is_relative_to(saved_dir.resolve()):
+            skipped += 1
             continue
         try:
             model_name = model_file.stem
@@ -144,7 +141,7 @@ def import_legacy_models(db: Session, saved_models_dir: str) -> dict:
                     filepath=str(model_file.resolve()),
                     file_size_kb=file_size_kb,
                     is_default=False,
-                    is_active=True,
+                    is_active=False,
                     is_legacy=True,
                     description=f"Imported from legacy saved_models: {model_file.name}",
                     version=metadata.get("version"),

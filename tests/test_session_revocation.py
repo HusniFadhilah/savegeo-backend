@@ -82,7 +82,7 @@ def test_logout_revokes_cookie_bearer_and_query_replay_across_clients(auth_app, 
     assert client.get(prefix + "/me", headers={"Authorization": f"Bearer {stolen}"}).status_code == 401
     assert client.get("/api/qa/tile", params={"token": stolen}).status_code == 401
     if kind == "user":
-        assert client.get("/api/qa/workflow", headers={"Authorization": f"Bearer {stolen}"}).json()["id"] is None
+        assert client.get("/api/qa/workflow", headers={"Authorization": f"Bearer {stolen}"}).status_code == 401
     assert client.get("/api/chat/sessions", headers={"Authorization": f"Bearer {stolen}"}).status_code == 401
     assert client.get("/api/chat/sessions", headers={"Authorization": f"Bearer {unrelated_token}"}).status_code == 200
     client.cookies.set(cookie_name, stolen)

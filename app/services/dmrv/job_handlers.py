@@ -206,7 +206,12 @@ def _test_fail(ctx: JobContext) -> dict:
 
 
 def get_handlers() -> dict[str, Handler]:
+    from app.services.dmrv import analysis_handler
+    from app.services.dmrv.integrity_risks import run_scan, validate_scan_payload
     handlers = {"field_summary": Handler(validate=_validate_field_summary, run=run_field_summary)}
+    for kind in ("carbon", "landcover", "landcover_transition", "vegetation"):
+        handlers["analysis." + kind] = Handler(validate=analysis_handler.validate, run=analysis_handler.run)
+    handlers["integrity_risk_scan"] = Handler(validate=validate_scan_payload, run=run_scan)
     if os.environ.get("DMRV_TEST_HANDLERS") == "1":
         handlers["_test_sleep"] = Handler(validate=lambda p: p, run=_test_sleep)
         handlers["_test_fail"] = Handler(validate=lambda p: p, run=_test_fail)

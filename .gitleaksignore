@@ -1,0 +1,8 @@
+# Reviewed false positives: public dataset/model identifiers in these exact
+# historical lines, not authentication credentials. Raw redacted scan results
+# and the source review are retained in the remediation evidence package.
+4688bb923fdac58ac05160e85f434a9b73a52684:scripts/build_postman_collection.py:generic-api-key:43
+318fb65a16b95c3fa67c765688ea2d6d91ed0010:app/services/landcover_model_service.py:generic-api-key:103
+318fb65a16b95c3fa67c765688ea2d6d91ed0010:app/services/landcover_model_service.py:generic-api-key:150
+318fb65a16b95c3fa67c765688ea2d6d91ed0010:app/services/landcover_model_service.py:generic-api-key:158
+5d42e5f62d700abf87904e543a543ca08e7a815f:scripts/train_gedi_l4a_direct_model.py:generic-api-key:44

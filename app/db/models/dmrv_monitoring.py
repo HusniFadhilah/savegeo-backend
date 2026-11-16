@@ -16,6 +16,7 @@ def _now() -> dt.datetime:
 class DmrvMonitoringPeriod(Base):
     __tablename__ = "dmrv_monitoring_periods"
     __table_args__ = (
+        UniqueConstraint("id", "project_id", name="uq_dmrv_period_project"),
         UniqueConstraint("project_id", "name", name="uq_dmrv_monitoring_period_name"),
         CheckConstraint("end_date >= start_date", name="ck_dmrv_monitoring_period_dates"),
         CheckConstraint("status IN ('planned', 'in_progress', 'completed')", name="ck_dmrv_monitoring_period_status"),

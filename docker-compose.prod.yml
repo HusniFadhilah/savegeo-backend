@@ -17,6 +17,9 @@ services:
       - savegeo_pgdata:/var/lib/postgresql/data
 
   api:
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
     build:
       context: .
       dockerfile: Dockerfile
@@ -30,7 +33,9 @@ services:
     environment:
       APP_ENV: production
       DEBUG: "false"
-      DATABASE_URL: postgresql+psycopg://savegeo:${POSTGRES_PASSWORD}@db:5432/savegeo
+      DATABASE_URL: ${RUNTIME_DATABASE_URL:?Run scripts/prepare_runtime_database.py before deploying}
+      POSTGRES_PASSWORD: ""
+      MIGRATION_DATABASE_URL: ""
       UPLOAD_DIR: /app/var/uploads
       DMRV_EVIDENCE_DIR: /app/var/dmrv/evidence
       MODEL_DIR: /app/var/saved_models
@@ -53,22 +58,26 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     command:
       - sh
       - -c
       - >-
-        python -m alembic upgrade head &&
-        python -m scripts.seed_rbac &&
         python -m uvicorn app.main:app --host 0.0.0.0 --port 8086
+        --no-proxy-headers
         --workers $${WEB_CONCURRENCY:-2}
     ports:
-      # The LEN public reverse proxy reaches the backend on the server LAN IP.
-      - "8086:8086"
+      # Apache on this host proxies /api/ to 127.0.0.1:8086.
+      - "127.0.0.1:8086:8086"
     volumes:
       # Runtime data and deployment metadata persist outside source sync.
       - ./var:/app/var
 
   dmrv-worker:
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
     build:
       context: .
       dockerfile: Dockerfile
@@ -82,17 +91,47 @@ services:
     environment:
       APP_ENV: production
       DEBUG: "false"
-      DATABASE_URL: postgresql+psycopg://savegeo:${POSTGRES_PASSWORD}@db:5432/savegeo
+      DATABASE_URL: ${RUNTIME_DATABASE_URL:?Run scripts/prepare_runtime_database.py before deploying}
+      POSTGRES_PASSWORD: ""
+      MIGRATION_DATABASE_URL: ""
       DMRV_WORKER_POLL_INTERVAL: ${DMRV_WORKER_POLL_INTERVAL:-2}
+      UPLOAD_DIR: /app/var/uploads
+      MODEL_DIR: /app/var/saved_models
+      DMRV_EVIDENCE_DIR: /app/var/dmrv/evidence
+    volumes:
+      - ./var:/app/var
+    # A queue worker has no HTTP listener. API readiness is checked separately.
+    healthcheck:
+      disable: true
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     command:
       - python
       - -m
       - app.workers.dmrv_worker
       - --poll-interval
       - ${DMRV_WORKER_POLL_INTERVAL:-2}
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: "no"
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    environment:
+      APP_ENV: test
+      DEBUG: "false"
+      DATABASE_URL: postgresql+psycopg://savegeo:${POSTGRES_PASSWORD}@db:5432/savegeo
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      disable: true
+    command: ["sh", "-c", "python -m alembic upgrade head && python -m scripts.seed_rbac"]
 
 volumes:
   savegeo_pgdata:

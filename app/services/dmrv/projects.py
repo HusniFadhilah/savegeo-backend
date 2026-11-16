@@ -72,9 +72,16 @@ def create_project(
     request_hash = _request_hash(payload)
     replayed = _replay(db, principal, idempotency_key, request_hash)
     if replayed is not None:
+        _authorize(db, replayed.id, principal, "project.read")
         return replayed, True
 
+    if payload.organization_id:
+        from app.services.organizations import require_member
+        require_member(db, payload.organization_id, principal, manage=True)
     project = DmrvProject(id=str(uuid.uuid4()), **payload.model_dump())
+    if payload.organization_id:
+        from app.db.models.organization import Organization
+        project.organization = db.get(Organization, payload.organization_id).name
     try:
         db.add(project)
         db.flush()
@@ -112,7 +119,8 @@ def list_projects(db: Session, principal: Principal) -> list[ProjectOut]:
         .where(ProjectMember.principal_type == principal.type, ProjectMember.principal_id == principal.id)
         .order_by(DmrvProject.created_at.desc())
     ).all()
-    return [_project_out(project, role) for project, role in rows]
+    from app.services.organizations import filter_projects
+    return [_project_out(project, role) for project, role in filter_projects(db, principal, rows)]
 
 
 def get_project(db: Session, principal: Principal, project_id: str) -> ProjectOut:
@@ -158,8 +166,12 @@ def add_member(
         raise DmrvError(422, "invalid_role", f"Peran harus salah satu dari: {', '.join(sorted(PROJECT_ROLES))}.")
     account_model: Any = User if payload.principal_type == "user" else AdminUser
     account = db.execute(select(account_model).where(account_model.username == payload.username)).scalar_one_or_none()
-    if account is None:
+    if account is None or not account.is_active:
         raise DmrvError(422, "unknown_account", "Akun tidak ditemukan.")
+    project = db.get(DmrvProject, project_id)
+    if project.organization_id:
+        from app.services.organizations import require_member
+        require_member(db, project.organization_id, Principal(payload.principal_type, account.id))
     exists = db.execute(
         select(ProjectMember.id).where(
             ProjectMember.project_id == project_id,

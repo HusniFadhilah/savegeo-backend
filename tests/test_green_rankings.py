@@ -55,6 +55,10 @@ def test_rankings_use_percent_not_absolute_area_and_keep_partial_and_missing_row
     assert result["status"] == "partial"
     assert result["rows"][0]["code"] == "small"
     assert result["rows"][-1]["rank"] is None
+    assert [row["rank"] for row in result["rows"]] == [1, 2, None]
+    descending = service.result_page("run", "admin:1", sort_by="rank", sort_dir="desc")
+    assert [row["code"] for row in descending["rows"]] == ["big", "small", "missing"]
+    assert [row["rank"] for row in descending["rows"]] == [2, 1, None]
     assert result["statistics"]["processed"] == 3
     assert result["statistics"]["eligible"] == 2
     assert result["statistics"]["median_percent"] == 70

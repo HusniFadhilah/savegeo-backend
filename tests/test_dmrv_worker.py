@@ -209,6 +209,6 @@ def test_a_worker_that_lost_its_lease_cannot_finish_or_leave_data_behind(factory
 
 def test_test_handlers_exist_only_when_enabled(monkeypatch):
     monkeypatch.delenv("DMRV_TEST_HANDLERS", raising=False)
-    assert set(job_handlers.get_handlers()) == {"field_summary"}
+    assert set(job_handlers.get_handlers()) == {"field_summary", "integrity_risk_scan", "analysis.carbon", "analysis.landcover", "analysis.landcover_transition", "analysis.vegetation"}
     monkeypatch.setenv("DMRV_TEST_HANDLERS", "1")
     assert {"field_summary", "_test_sleep"} <= set(job_handlers.get_handlers())

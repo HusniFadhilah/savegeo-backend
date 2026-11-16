@@ -96,13 +96,14 @@ def verify_login_password(plain: str, account: User | AdminUser | None) -> bool:
     return verify_password(plain, account.password_hash)
 
 
-def create_access_token(admin: AdminUser) -> str:
+def create_access_token(admin: AdminUser, *, mfa_verified_at: int | None = None) -> str:
     settings = get_settings()
     now = dt.datetime.now(dt.UTC)
     payload = {
         "sub": str(admin.id),
         "username": admin.username,
         "typ": "admin",
+        "mfa_at": mfa_verified_at,
         **_session_claims(admin),
         "iat": now,
         "exp": now + dt.timedelta(minutes=settings.access_token_expire_minutes),
@@ -214,6 +215,27 @@ def ensure_current_session(payload: dict, account: User | AdminUser) -> None:
         raise HTTPException(status_code=401, detail="Invalid or revoked session")
 
 
+def requires_admin_mfa(admin: AdminUser) -> bool:
+    privileged = admin.role_id is None or bool(admin.role and admin.role.name == "geospatial_expert")
+    return bool(getattr(admin, "mfa_enabled", False) or (privileged and get_settings().privileged_mfa_required))
+
+
+def ensure_admin_mfa(payload: dict, admin: AdminUser) -> None:
+    verified = payload.get("mfa_at")
+    if requires_admin_mfa(admin) and (not admin.mfa_enabled or type(verified) is not int
+                                     or verified > int(dt.datetime.now(dt.UTC).timestamp()) + 30):
+        raise HTTPException(status_code=403, detail={"code": "mfa_required", "message": "Masuk kembali dan selesaikan verifikasi MFA."})
+    admin._mfa_verified_at = verified  # ephemeral request context, never serialized
+
+
+def require_recent_mfa(admin: AdminUser) -> None:
+    if not requires_admin_mfa(admin):
+        return
+    verified = getattr(admin, "_mfa_verified_at", None)
+    if type(verified) is not int or int(dt.datetime.now(dt.UTC).timestamp()) - verified > 300:
+        raise HTTPException(status_code=403, detail={"code": "mfa_step_up_required", "message": "Verifikasi MFA ulang untuk tindakan sensitif ini."})
+
+
 def revoke_account_sessions(db: Session, account: User | AdminUser) -> None:
     # Atomic database increment: durable across workers/restarts and concurrent logouts.
     model = type(account)
@@ -289,6 +311,7 @@ def get_current_admin(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin account not found or inactive"
         )
     ensure_current_session(payload, admin)
+    ensure_admin_mfa(payload, admin)
     return admin
 
 
@@ -379,6 +402,7 @@ def get_current_disaster_viewer(
             if admin is not None and admin.is_active:
                 try:
                     ensure_current_session(payload, admin)
+                    ensure_admin_mfa(payload, admin)
                     return admin
                 except HTTPException:
                     continue
@@ -415,6 +439,8 @@ def require_permission(code: str):
     def _dependency(admin: AdminUser = Depends(get_current_admin_panel)) -> AdminUser:
         if not admin_has_permission(admin, code):
             raise HTTPException(status_code=403, detail=f"Missing permission: {code}")
+        if code in {"secret.write", "credential.write", "config.write", "role.write", "roles.write", "user.write", "users.write", "model.write", "model.approve", "calibration.write", "carbon_calibration.write"}:
+            require_recent_mfa(admin)
         return admin
 
     return _dependency

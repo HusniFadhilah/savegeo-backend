@@ -67,6 +67,7 @@ def claim_next(db: Session, worker_id: str, lease_seconds: int = 60, now: dt.dat
         .order_by(DmrvJob.created_at, DmrvJob.id)
         .limit(1)
         .with_for_update(skip_locked=True)
+        .execution_options(populate_existing=True)
     ).scalar_one_or_none()
     if job is None:
         db.rollback()
@@ -81,11 +82,13 @@ def claim_next(db: Session, worker_id: str, lease_seconds: int = 60, now: dt.dat
     return job
 
 
-def _owned(db: Session, job_id: str, worker_id: str) -> DmrvJob | None:
+def _owned(db: Session, job_id: str, worker_id: str, now: dt.datetime) -> DmrvJob | None:
     return db.execute(
         select(DmrvJob)
-        .where(DmrvJob.id == job_id, DmrvJob.status == "running", DmrvJob.lease_owner == worker_id)
+        .where(DmrvJob.id == job_id, DmrvJob.status == "running", DmrvJob.lease_owner == worker_id,
+               DmrvJob.lease_expires_at > now)
         .with_for_update()
+        .execution_options(populate_existing=True)
     ).scalar_one_or_none()
 
 
@@ -100,7 +103,7 @@ def _close_last_stage(job: DmrvJob, moment: dt.datetime) -> None:
 
 def heartbeat(db: Session, job_id: str, worker_id: str, lease_seconds: int = 60, now: dt.datetime | None = None) -> HeartbeatResult:
     moment = _now(now)
-    job = _owned(db, job_id, worker_id)
+    job = _owned(db, job_id, worker_id, moment)
     if job is None:
         db.rollback()
         return HeartbeatResult(False)
@@ -113,7 +116,7 @@ def heartbeat(db: Session, job_id: str, worker_id: str, lease_seconds: int = 60,
 
 def set_stage(db: Session, job_id: str, worker_id: str, stage: str, now: dt.datetime | None = None) -> bool:
     moment = _now(now)
-    job = _owned(db, job_id, worker_id)
+    job = _owned(db, job_id, worker_id, moment)
     if job is None:
         db.rollback()
         return False
@@ -129,13 +132,17 @@ def set_stage(db: Session, job_id: str, worker_id: str, stage: str, now: dt.date
 def complete(db: Session, job_id: str, worker_id: str, result: dict[str, Any], now: dt.datetime | None = None) -> bool:
     """Commit the caller's staged writes together with the success transition, or discard them all."""
     moment = _now(now)
-    job = _owned(db, job_id, worker_id)
+    job = _owned(db, job_id, worker_id, moment)
     if job is None:
+        db.rollback()
+        return False
+    if job.cancel_requested:
         db.rollback()
         return False
     _close_last_stage(job, moment)
     job.status, job.result, job.error = "succeeded", result, None
     job.finished_at, job.lease_owner, job.lease_expires_at = moment, None, None
+    _settle_analysis(db, job, True, moment)
     db.commit()
     return True
 
@@ -145,18 +152,22 @@ def fail(
 ) -> str:
     moment = _now(now)
     db.rollback()  # discard anything the failed handler staged
-    job = _owned(db, job_id, worker_id)
+    job = _owned(db, job_id, worker_id, moment)
     if job is None:
         db.rollback()
         return "lost"
     _close_last_stage(job, moment)
     job.error = {**error, "retryable": bool(retryable)}
     job.lease_owner, job.lease_expires_at = None, None
-    if retryable and job.attempts < job.max_attempts:
+    if job.cancel_requested:
+        job.status, job.finished_at = "cancelled", moment
+        _settle_analysis(db, job, False, moment)
+    elif retryable and job.attempts < job.max_attempts:
         job.status = "queued"
         job.run_after = moment + dt.timedelta(seconds=backoff_seconds(job.attempts))
     else:
         job.status, job.finished_at = "failed", moment
+        _settle_analysis(db, job, False, moment)
     status = job.status
     db.commit()
     return status
@@ -164,12 +175,13 @@ def fail(
 
 def request_cancel(db: Session, job_id: str, now: dt.datetime | None = None) -> str:
     moment = _now(now)
-    job = db.execute(select(DmrvJob).where(DmrvJob.id == job_id).with_for_update()).scalar_one_or_none()
+    job = db.execute(select(DmrvJob).where(DmrvJob.id == job_id).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
     if job is None:
         db.rollback()
         return "missing"
     if job.status == "queued":
         job.status, job.finished_at, job.cancel_requested = "cancelled", moment, True
+        _settle_analysis(db, job, False, moment)
         outcome = "cancelled"
     elif job.status == "running":
         job.cancel_requested = True
@@ -183,13 +195,14 @@ def request_cancel(db: Session, job_id: str, now: dt.datetime | None = None) -> 
 def mark_cancelled(db: Session, job_id: str, worker_id: str, now: dt.datetime | None = None) -> bool:
     moment = _now(now)
     db.rollback()
-    job = _owned(db, job_id, worker_id)
+    job = _owned(db, job_id, worker_id, moment)
     if job is None:
         db.rollback()
         return False
     _close_last_stage(job, moment)
     job.status, job.finished_at = "cancelled", moment
     job.lease_owner, job.lease_expires_at = None, None
+    _settle_analysis(db, job, False, moment)
     db.commit()
     return True
 
@@ -201,6 +214,7 @@ def reap_expired(db: Session, now: dt.datetime | None = None) -> int:
         select(DmrvJob)
         .where(DmrvJob.status == "running", DmrvJob.lease_expires_at < moment)
         .with_for_update(skip_locked=True)
+        .execution_options(populate_existing=True)
     ).scalars().all()
     for job in expired:
         job.lease_owner, job.lease_expires_at = None, None
@@ -212,5 +226,13 @@ def reap_expired(db: Session, now: dt.datetime | None = None) -> int:
         else:
             job.status = "queued"
             job.run_after = moment + dt.timedelta(seconds=backoff_seconds(job.attempts))
+        if job.status in {"failed", "cancelled"}:
+            _settle_analysis(db, job, False, moment)
     db.commit()
     return len(expired)
+
+
+def _settle_analysis(db: Session, job: DmrvJob, succeeded: bool, now: dt.datetime) -> None:
+    if job.kind.startswith("analysis."):
+        from app.services.workspace_usage import settle
+        settle(db, job.id, succeeded, now)

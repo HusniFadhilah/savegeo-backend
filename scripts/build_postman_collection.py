@@ -10,6 +10,7 @@ For deterministic review against a previously exported OpenAPI file:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import uuid
@@ -19,12 +20,27 @@ from typing import Any
 
 
 METHODS = {"get", "post", "put", "patch", "delete", "options", "head"}
-EXPECTED_APP_ERRORS = [400, 401, 403, 404, 409, 413, 415, 422, 429, 503]
+EXPECTED_APP_ERRORS = [400, 401, 403, 404, 409, 413, 415, 422, 429]
 SAMPLE_POLYGON = {
     "type": "Polygon",
     "coordinates": [[[110.39, -7.02], [110.40, -7.02], [110.40, -7.01], [110.39, -7.01], [110.39, -7.02]]],
 }
 PARAMETER_DEFAULTS = {
+    "project_id": "replace-with-project-uuid",
+    "organization_id": "replace-with-organization-uuid",
+    "period_id": "replace-with-period-uuid",
+    "monitoring_period_id": "{{period_id}}",
+    "baseline_period_id": "replace-with-baseline-period-uuid",
+    "snapshot_id": "replace-with-snapshot-uuid",
+    "boundary_id": "replace-with-boundary-uuid",
+    "record_id": "replace-with-record-uuid",
+    "document_id": "replace-with-document-uuid",
+    "member_id": "replace-with-member-uuid",
+    "invitation_id": "replace-with-invitation-uuid",
+    "submission_id": "replace-with-submission-uuid",
+    "package_id": "replace-with-package-uuid",
+    "finding_id": "replace-with-finding-uuid",
+    "challenge": "{{mfaChallenge}}",
     "action_id": "replace-with-action-id",
     "output_id": "result",
     "model_id": "1",
@@ -127,7 +143,8 @@ def _sample_value(schema: dict[str, Any], field: str, schemas: dict[str, Any], d
             return {}
         return {}
     if kind == "array":
-        return []
+        count = max(0, int(schema.get("minItems", 0)))
+        return [_sample_value(schema.get("items", {}), field.rstrip("s"), schemas, depth + 1) for _ in range(count)]
     if kind == "integer":
         return int(schema.get("minimum", 1))
     if kind == "number":
@@ -183,22 +200,54 @@ def _query_is_enabled(parameter: dict[str, Any]) -> bool:
     return bool(parameter.get("required") or parameter.get("schema", {}).get("default") is not None)
 
 
-def _postman_script(expected: list[int]) -> list[str]:
-    allowed = sorted(set(expected + EXPECTED_APP_ERRORS))
-    return [
-        f"const expectedStatuses = {json.dumps(allowed)};",
-        "pm.test('HTTP status is expected (see endpoint description for auth/validation cases)', function () {",
-        "    pm.expect(expectedStatuses, 'Unexpected HTTP ' + pm.response.code + ': ' + pm.response.text()).to.include(pm.response.code);",
+def _postman_script(expected: list[int], path: str = "", method: str = "GET") -> list[str]:
+    success = sorted({status for status in expected if 200 <= status < 300}) or [200, 201, 202, 204, 206]
+    lines = [
+        f"const successStatuses = {json.dumps(success)};",
+        f"const negativeStatuses = {json.dumps(EXPECTED_APP_ERRORS)};",
+        "const negativeMode = String(pm.variables.get('allowExpectedErrors')).toLowerCase() === 'true';",
+        "pm.test('No server error or method mismatch', function () {",
+        "    pm.expect(pm.response.code).to.be.below(500);",
+        "    pm.expect(pm.response.code).not.to.equal(405);",
+        "});",
+        "pm.test('HTTP response matches the selected test mode', function () {",
+        "    const allowed = negativeMode ? successStatuses.concat(negativeStatuses) : successStatuses;",
+        "    pm.expect(allowed, 'HTTP ' + pm.response.code + ': ' + pm.response.text().slice(0, 1200)).to.include(pm.response.code);",
         "});",
         "pm.test('Response time is under 120 seconds', function () {",
         "    pm.expect(pm.response.responseTime).to.be.below(120000);",
         "});",
-        "try {",
+        "if (pm.response.code >= 200 && pm.response.code < 300) {",
+        "  try {",
         "    const data = pm.response.json();",
-        "    if (data && data.job_id) pm.collectionVariables.set('jobId', String(data.job_id));",
-        "    if (data && data.status_url) pm.collectionVariables.set('jobStatusUrl', String(data.status_url));",
-        "} catch (e) { /* binary/empty response */ }",
     ]
+    captures = {
+        ("POST", "/api/organizations"): {"organization_id": "data.id"},
+        ("POST", "/api/organizations/invitations/accept"): {"organization_id": "data.id"},
+        ("POST", "/api/dmrv/projects"): {"project_id": "data.id"},
+        ("POST", "/api/dmrv/projects/{project_id}/monitoring-periods"): {"period_id": "data.id"},
+        ("POST", "/api/dmrv/projects/{project_id}/analysis-runs"): {"dmrvJobId": "data.id"},
+        ("POST", "/api/dmrv/projects/{project_id}/jobs"): {"dmrvJobId": "data.id"},
+        ("POST", "/api/dmrv/projects/{project_id}/evidence-packages"): {"package_id": "data.id"},
+        ("POST", "/api/dmrv/projects/{project_id}/submissions"): {"submission_id": "data.id"},
+    }.get((method, path), {})
+    for variable, expression in captures.items():
+        lines.append(f"    if ({expression}) pm.environment.set({json.dumps(variable)}, String({expression}));")
+    lines += [
+        "    if (data && data.job_id) { pm.environment.set('jobId', String(data.job_id)); pm.environment.set('job_id', String(data.job_id)); }",
+        "    if (data && data.status_url) pm.environment.set('jobStatusUrl', String(data.status_url));",
+        "    if (data && data.result && data.result.snapshot_id) pm.environment.set('snapshot_id', String(data.result.snapshot_id));",
+        "    if (data && Number.isInteger(data.revision)) pm.environment.set('revision', String(data.revision));",
+    ]
+    if path == "/api/admin/auth/login":
+        lines += [
+            "    if (data && data.mfa_required && data.challenge) pm.environment.set('mfaChallenge', data.challenge);",
+            "    else pm.environment.unset('mfaChallenge');",
+        ]
+    if path == "/api/admin/auth/mfa/verify":
+        lines += ["    pm.environment.unset('mfaChallenge');", "    pm.environment.unset('mfaCode');"]
+    lines += ["  } catch (e) { /* binary or empty response */ }", "}"]
+    return lines
 
 
 def _parameter_doc(parameters: list[dict[str, Any]], location: str, schemas: dict[str, Any]) -> list[str]:
@@ -217,19 +266,6 @@ def _parameter_doc(parameters: list[dict[str, Any]], location: str, schemas: dic
 def _request_body(operation: dict[str, Any], path: str, method: str, schemas: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
     body = operation.get("requestBody")
     if not body:
-        if method in {"POST", "PUT", "PATCH"} and path not in {
-            "/api/admin/auth/logout", "/api/auth/logout", "/api/carbon/datasets/health/refresh"
-        }:
-            template = {
-                "TODO": "OpenAPI tidak mencantumkan schema body untuk endpoint ini. Ganti dengan payload dari dokumentasi atau Network browser."
-            }
-            if path == "/api/analysis-jobs":
-                template = {"type": "carbon", "payload": {}}
-            return {
-                "mode": "raw",
-                "raw": json.dumps(template, ensure_ascii=False, indent=2),
-                "options": {"raw": {"language": "json"}},
-            }, ["Body schema tidak tersedia di OpenAPI. Template `TODO` sengaja ditandai agar tidak dianggap payload valid."]
         return None, []
 
     content = body.get("content", {})
@@ -237,11 +273,24 @@ def _request_body(operation: dict[str, Any], path: str, method: str, schemas: di
         schema = content["application/json"].get("schema", {})
         example = _sample_value(schema, "body", schemas)
         if path == "/api/analysis-jobs":
-            example = {"type": "carbon", "payload": {}}
+            example = {"type": "carbon", "payload": {
+                "aoi": {"geojson": SAMPLE_POLYGON}, "reference_dataset": "WCMC",
+                "year": "{{analysisYear}}", "start_month": 1, "end_month": 12,
+                "cloud_threshold": 20, "clip_to_aoi": True,
+            }}
         if path in {"/api/auth/login", "/api/admin/auth/login"}:
             example = {"username": "{{username}}", "password": "{{password}}"}
             if path == "/api/admin/auth/login":
                 example = {"username": "{{adminUsername}}", "password": "{{adminPassword}}"}
+        if path.startswith("/api/admin/auth/mfa/") and isinstance(example, dict):
+            if "challenge" in example:
+                example["challenge"] = "{{mfaChallenge}}"
+            if "code" in example:
+                example["code"] = "{{mfaCode}}"
+            if "password" in example:
+                example["password"] = "{{adminPassword}}"
+        if path == "/api/dmrv/projects/{project_id}/analysis-runs":
+            example = {"kind": "carbon", "monitoring_period_id": "{{period_id}}", "parameters": {"reference_dataset": "WCMC"}}
         if example is None:
             example = {}
         schema_lines = _body_description(schema, schemas)
@@ -269,7 +318,7 @@ def _request_body(operation: dict[str, Any], path: str, method: str, schemas: di
                 item["src"] = ""
             else:
                 value = _sample_value(prop, name, schemas)
-                item["value"] = str(value if value is not None else "")
+                item["value"] = json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list, bool)) else str(value if value is not None else "")
                 if name not in required:
                     item["disabled"] = True
             fields.append(item)
@@ -295,7 +344,7 @@ def build_collection(spec: dict[str, Any]) -> dict[str, Any]:
             tag = tags[0]
             category = "01 — Read-only (GET)" if method_upper in {"GET", "HEAD"} else "02 — Write / analysis (review first)"
             grouped.setdefault(tag, {"read": [], "write": []})["read" if category.startswith("01") else "write"].append(
-                {"path": path, "method": method_upper, "operation": operation, "tag": tag}
+                {"path": path, "method": method_upper, "operation": operation, "tag": tag, "path_parameters": path_item.get("parameters", [])}
             )
 
     collection_items: list[dict[str, Any]] = []
@@ -314,8 +363,10 @@ def build_collection(spec: dict[str, Any]) -> dict[str, Any]:
                 path = entry["path"]
                 method = entry["method"]
                 operation = entry["operation"]
-                parameters = list(operation.get("parameters", []))
+                parameters = list(entry["path_parameters"]) + list(operation.get("parameters", []))
                 path_with_vars = re.sub(r"\{([^{}]+)\}", r"{{\1}}", path)
+                if path.startswith("/api/dmrv/"):
+                    path_with_vars = path_with_vars.replace("{{job_id}}", "{{dmrvJobId}}")
                 query_items = []
                 raw_query: list[str] = []
                 for p in [p for p in parameters if p.get("in") == "query"]:
@@ -342,6 +393,18 @@ def build_collection(spec: dict[str, Any]) -> dict[str, Any]:
                     url_obj["query"] = query_items
 
                 request_headers = [{"key": "Accept", "value": "application/json, application/problem+json, */*;q=0.8", "type": "text"}]
+                for parameter in parameters:
+                    if parameter.get("in") != "header":
+                        continue
+                    name = parameter["name"]
+                    value = _parameter_sample(parameter, schemas)
+                    if name.lower() == "idempotency-key":
+                        value = "{{requestIdempotencyKey}}"
+                    elif name.lower() == "if-match":
+                        value = '\"{{revision}}\"'
+                    request_headers.append({"key": name, "value": value, "type": "text",
+                        "description": parameter.get("description", "Required" if parameter.get("required") else "Optional"),
+                        **({"disabled": True} if not parameter.get("required") and name.lower() not in {"idempotency-key", "if-match"} else {})})
                 body, body_notes = _request_body(operation, path, method, schemas)
                 if body and body.get("mode") == "raw":
                     request_headers.append({"key": "Content-Type", "value": "application/json", "type": "text"})
@@ -369,7 +432,7 @@ def build_collection(spec: dict[str, Any]) -> dict[str, Any]:
                     "name": f"{method} {path} — {operation.get('summary') or operation.get('operationId') or ''}".strip(),
                     "request": {**request, "description": "\n".join(description_lines)},
                     "response": [],
-                    "event": [{"listen": "test", "script": {"type": "text/javascript", "exec": _postman_script([int(s) for s in operation.get("responses", {}) if str(s).isdigit()])}}],
+                    "event": [{"listen": "test", "script": {"type": "text/javascript", "exec": _postman_script([int(s) for s in operation.get("responses", {}) if str(s).isdigit()], path, method)}}],
                 })
             folders.append({
                 "name": folder_name,
@@ -402,7 +465,7 @@ def build_collection(spec: dict[str, Any]) -> dict[str, Any]:
         })
     collection_items.insert(0, {
         "name": "00 — OpenAPI & documentation",
-        "description": "Endpoint dokumentasi FastAPI; terpisah dari 284 operasi API yang dihasilkan dari OpenAPI.",
+        "description": "Endpoint dokumentasi FastAPI; terpisah dari operasi API yang dihasilkan dari OpenAPI.",
         "item": docs_items,
     })
 
@@ -414,6 +477,13 @@ def build_collection(spec: dict[str, Any]) -> dict[str, Any]:
         ("adminPassword", "", "Password admin. Jangan commit credential."),
         ("email", "", "Email yang dipakai pada payload auth atau user."),
         ("accessToken", "", "Opsional: tempel JWT di header Authorization: Bearer secara manual bila dibutuhkan."),
+        ("idempotencyKey", "", "Opsional: isi UUID tetap untuk retry/replay; kosong menghasilkan UUID baru per pengiriman."),
+        ("revision", "1", "Revisi resource untuk If-Match. GET resource yang akan diubah terlebih dahulu."),
+        ("mfaChallenge", "", "Challenge MFA dari login admin; sensitif, jangan dibagikan."),
+        ("mfaCode", "", "TOTP 6 digit atau recovery code sekali pakai. Isi secara manual."),
+        ("analysisYear", str(datetime.now(timezone.utc).year), "Tahun analisis; tahun berjalan dapat memiliki cakupan parsial."),
+        ("dmrvJobId", "replace-with-dmrv-job-uuid", "ID job durable dMRV, terpisah dari job eksplorasi."),
+        ("allowExpectedErrors", "false", "false: hanya 2xx sesuai kontrak lulus. true: aktifkan hanya untuk tes negatif."),
         ("jobId", "replace-with-job-id", "Job id hasil POST /api/analysis-jobs."),
         ("jobStatusUrl", "/api/analysis-jobs/replace-with-job-id", "status_url dari response analysis job."),
         ("aoiGeojson", json.dumps(SAMPLE_POLYGON, ensure_ascii=False), "Contoh AOI polygon di sekitar Semarang; ganti sesuai wilayah uji."),
@@ -434,10 +504,13 @@ def build_collection(spec: dict[str, Any]) -> dict[str, Any]:
                 "Template yang ditandai TODO perlu diisi dari kontrak route atau request browser Network."
             ),
             "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
-            "version": "1.0.0",
+            "version": "2.0.0",
         },
         "auth": {"type": "noauth"},
-        "event": [{"listen": "prerequest", "script": {"type": "text/javascript", "exec": ["// Auth memakai session cookie setelah request login. Tidak ada credential yang ditanam di collection."]}}],
+        "event": [{"listen": "prerequest", "script": {"type": "text/javascript", "exec": [
+            "// Cookie jar supplies authentication. A fixed override allows deliberate idempotency retries.",
+            "pm.variables.set('requestIdempotencyKey', pm.environment.get('idempotencyKey') || pm.variables.replaceIn('{{$guid}}'));",
+        ]}}],
         "item": collection_items,
         "variable": [{"key": k, "value": v, "type": "string", "description": d} for k, v, d in variables],
     }
@@ -482,6 +555,12 @@ def main() -> int:
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     collection = build_collection(spec)
+    previous_collection = args.output_dir / "SaveGeo-Backend.postman_collection.json"
+    if previous_collection.exists():
+        previous = json.loads(previous_collection.read_text(encoding="utf-8-sig"))
+        previous_id = previous.get("info", {}).get("_postman_id")
+        if previous_id:
+            collection["info"]["_postman_id"] = previous_id
     targets = {
         "SaveGeo-Backend.postman_collection.json": collection,
         "SaveGeo-Local.postman_environment.json": _environment(
@@ -493,10 +572,41 @@ def main() -> int:
     }
     for name, data in targets.items():
         path = args.output_dir / name
+        if name.endswith("postman_environment.json"):
+            if path.exists():
+                existing = json.loads(path.read_text(encoding="utf-8-sig"))
+                if not isinstance(existing, dict) or not isinstance(existing.get("values"), list):
+                    raise ValueError(f"Invalid environment structure: {path.name}; original file preserved")
+                data["id"] = existing.get("id", data["id"])
+                by_key = {entry["key"]: entry for entry in data["values"]}
+                by_key.update({entry["key"]: entry for entry in existing["values"]})
+                data["values"] = list(by_key.values())
+            keys = {entry["key"] for entry in data["values"]}
+            secret_keys = {"mfaChallenge", "mfaCode"}
+            for variable in collection["variable"]:
+                key = variable["key"]
+                if key not in keys:
+                    data["values"].append({"key": key, "value": variable["value"],
+                        "type": "secret" if key in secret_keys else "default", "enabled": True})
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        print(f"wrote {path}")
-    operations = sum(len(tag["item"][0].get("item", [])) + (len(tag["item"][1].get("item", [])) if len(tag["item"]) > 1 else 0) for tag in collection["item"])
-    print(f"generated {operations} Postman requests in {len(collection['item'])} tag groups")
+        print(f"wrote {path.name}")
+    spec_bytes = (json.dumps(spec, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    (args.output_dir / "SaveGeo-OpenAPI.json").write_bytes(spec_bytes)
+    operations = [(method.upper(), path, operation.get("tags", ["untagged"])[0])
+        for path, item in spec.get("paths", {}).items() for method, operation in item.items()
+        if method.lower() in METHODS and isinstance(operation, dict)]
+    timestamp = datetime.now(timezone.utc).isoformat()
+    lines = ["# Cakupan Collection SaveGeo", "", f"Dibuat (UTC): {timestamp}",
+        f"Operasi API: **{len(operations)}**; grup tag: **{len({tag for _, _, tag in operations})}**.",
+        "Ditambah empat endpoint dokumentasi FastAPI (ketersediaannya tergantung deployment).", "",
+        f"SHA-256 OpenAPI: `{hashlib.sha256(spec_bytes).hexdigest()}`", "",
+        "Sumber: kode backend lokal saat generator dijalankan; bukan bukti semua perubahan sudah terdeploy di production.",
+        "Tidak ada request mutasi atau analisis dikirim saat pembuatan collection.", "",
+        "| Metode | Endpoint | Grup |", "|---|---|---|"]
+    lines.extend(f"| {method} | `{path}` | {tag} |" for method, path, tag in sorted(operations))
+    (args.output_dir / "COVERAGE.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"generated {len(operations)} API requests plus 4 documentation requests")
+
     return 0
 
 

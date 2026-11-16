@@ -605,19 +605,19 @@ def _risk_score(db: Session, sub_results: dict) -> dict:
 # Orchestrator
 # ─────────────────────────────────────────────
 
-def run_crop_monitoring(db: Session, data: dict) -> dict:
+def run_crop_monitoring(db: Session, data: dict, owner_key: str) -> dict:
     token = _COMPOSITES.set({})
     try:
-        return _run_crop_monitoring(db, data)
+        return _run_crop_monitoring(db, data, owner_key)
     finally:
         _COMPOSITES.reset(token)
 
 
-def _run_crop_monitoring(db: Session, data: dict) -> dict:
+def _run_crop_monitoring(db: Session, data: dict, owner_key: str) -> dict:
     field_id = data.get("field_id")
     if not field_id:
         raise AnalysisError("field_id is required", 400)
-    field = field_repo.get_field(db, int(field_id))
+    field = field_repo.get_field(db, int(field_id), owner_key)
     if field is None:
         raise AnalysisError("Field tidak ditemukan", 404)
     aoi = create_geometry_from_payload({"geojson": field.geojson})

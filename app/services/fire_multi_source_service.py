@@ -14,7 +14,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, date, datetime, timedelta
 from collections import defaultdict
-from xml.etree import ElementTree
+from defusedxml import ElementTree
 from uuid import uuid4
 
 import ee

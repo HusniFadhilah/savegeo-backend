@@ -1,21 +1,9 @@
-"""A named, persisted farm/field boundary for Crop Monitoring.
-
-Shape copied from `company_boundary.py` (flat `name + geojson JSONB + area_ha +
-timestamps`), minus company-specific columns, plus crop metadata. Deliberately
-**no owner/login column** - Crop Monitoring is a Sidebar tab like Carbon/
-LC-Change (no auth), not a gated route like the Disaster Dashboard, so Fields
-are a shared, publicly-writable list (every visitor sees/edits the same set),
-not per-user. Geometry is immutable after creation - editing a Field only
-touches its metadata columns (name/commodity/variety/planting_date/
-season_label); redrawing the boundary means creating a new Field row, which
-keeps `area_ha` always consistent with `geojson` without a recompute-on-edit
-code path.
-"""
+"""Private Crop Monitoring boundaries. Unattributed legacy rows remain stored."""
 from __future__ import annotations
 
 import datetime as dt
 
-from sqlalchemy import Date, DateTime, Float, String
+from sqlalchemy import Date, DateTime, Float, String, JSON
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -26,8 +14,9 @@ class Field(Base):
     __tablename__ = "fields"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    owner_key: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    geojson: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    geojson: Mapped[dict] = mapped_column(JSONB().with_variant(JSON(), "sqlite"), nullable=False)
     area_ha: Mapped[float] = mapped_column(Float, nullable=False)
     commodity: Mapped[str] = mapped_column(String(50), nullable=False)
     variety: Mapped[str | None] = mapped_column(String(100))

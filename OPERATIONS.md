@@ -2,6 +2,31 @@
 
 ## Local workflow
 
+### Security rollout requirements
+
+The runtime image runs as UID/GID 10001. Before deploying it, back up the
+database and runtime directory, verify the absolute runtime directory on the
+server, and grant that UID read/write access to the mounted `var` directory.
+Check existing model, upload and dMRV evidence files as well as newly created
+files. The worker and API must mount the same runtime directory. Do not change
+production ownership until the target directory and backup have been checked.
+Keep existing host ownership and grant UID 10001 an explicit ACL on `var`, with
+default ACLs on its directories. Test both the deployment account and UID 10001.
+The production API binds to loopback behind Apache. `prepare_runtime_database.py`
+verifies the Docker bridge gateway used by that proxy and records it as trusted;
+Uvicorn proxy-header rewriting stays disabled so forwarding is interpreted once.
+
+The web process loads carbon models from ONNX and JSON only. Keep legacy
+pickle files and original metadata as backup. Convert trusted legacy models
+offline with `python -m scripts.convert_trusted_carbon_model <file.pkl> --sha256
+<independently-verified-hash>` and compare predictions before rollout. New
+uploads accept ONNX, remain inactive and require review before activation.
+Uploaded files must never be passed to the offline pickle converter.
+
+`/api/live` checks process availability; `/api/ready` checks database access
+and returns 503 on failure. Production smoke tests must also check schema
+revision, authorized access and analysis results.
+
 1. Create `.venv` with Python 3.11.
 2. Install `pip install -e ".[dev]"`.
 3. Copy `.env.example` to `.env` and set `DATABASE_URL`, JWT, GEE, and storage settings.

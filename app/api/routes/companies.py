@@ -32,7 +32,7 @@ def list_companies(
     if province:
         query = query.filter_by(province=province)
     if search:
-        query = query.filter(CompanyBoundary.name.ilike(f"%{search.strip()}%"))
+        query = query.filter(CompanyBoundary.name.icontains(search.strip(), autoescape=True))
     companies = query.order_by(CompanyBoundary.name).all()
     return {"companies": [c.to_dict() for c in companies], "count": len(companies)}
 

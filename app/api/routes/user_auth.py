@@ -40,8 +40,15 @@ RESET_REQUEST_MESSAGE = (
 )
 
 
+@router.get("/config")
+def auth_config():
+    return {"registration_enabled": get_settings().allow_user_registration}
+
+
 @router.post("/register")
 def register(payload: UserRegisterRequest, response: Response, db: Session = Depends(get_db)):
+    if not get_settings().allow_user_registration:
+        raise HTTPException(status_code=404, detail="Registration is unavailable")
     if len(payload.password) < 8:
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
     if db.query(User).filter_by(username=payload.username).first():
@@ -114,7 +121,7 @@ def forgot_password(payload: PasswordForgotRequest, request: Request, db: Sessio
 
     settings = get_settings()
     token = create_password_reset_token(user)
-    reset_url = f"{settings.frontend_base_url.rstrip('/')}/reset-password#token={token}"
+    reset_url = f"{settings.frontend_base_url.rstrip('/')}/reset-password#kind=user&token={token}"
     try:
         send_password_reset_email(user.email, user.username, reset_url)
     except EmailDeliveryError as exc:

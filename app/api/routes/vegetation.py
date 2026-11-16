@@ -6,6 +6,8 @@ and gated behind `require_ee`. Ported from backend/app.py.
 """
 from __future__ import annotations
 
+from starlette.concurrency import run_in_threadpool
+
 import logging
 
 import ee
@@ -52,7 +54,7 @@ def vegetation_cloud_mask_techniques():
 async def analyze_vegetation(request: Request, db: Session = Depends(get_db)):
     data = await request.json()
     try:
-        return vegetation_service.analyze_vegetation(db, data)
+        return await run_in_threadpool(vegetation_service.analyze_vegetation, db, data)
     except AnalysisError as e:
         raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
     except ee.EEException:
@@ -72,7 +74,7 @@ async def analyze_vegetation(request: Request, db: Session = Depends(get_db)):
 async def analyze_vegetation_compare(request: Request, db: Session = Depends(get_db)):
     data = await request.json()
     try:
-        return vegetation_service.analyze_vegetation_compare(db, data)
+        return await run_in_threadpool(vegetation_service.analyze_vegetation_compare, db, data)
     except AnalysisError as e:
         raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
     except ee.EEException:
@@ -95,7 +97,7 @@ async def analyze_vegetation_change_hotspots(request: Request, db: Session = Dep
     vegetation_service.analyze_vegetation_change_hotspots for the full contract."""
     data = await request.json()
     try:
-        return vegetation_service.analyze_vegetation_change_hotspots(db, data)
+        return await run_in_threadpool(vegetation_service.analyze_vegetation_change_hotspots, db, data)
     except AnalysisError as e:
         raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
     except ee.EEException:

@@ -6,6 +6,7 @@ from fastapi import APIRouter
 
 from app.api.routes import (
     admin,
+    admin_mfa,
     actions,
     admin_disaster,
     agent,
@@ -33,6 +34,8 @@ from app.api.routes import (
     landcover_models,
     maps,
     models,
+    organizations,
+    workspace_analysis,
     regions,
     reports,
     timeseries,
@@ -48,6 +51,8 @@ api_router = APIRouter()
 
 api_router.include_router(health.router)
 api_router.include_router(dmrv.router)
+api_router.include_router(organizations.router)
+api_router.include_router(workspace_analysis.router)
 api_router.include_router(viewer_features.router)
 api_router.include_router(actions.router)
 api_router.include_router(datasets.router)
@@ -61,6 +66,7 @@ api_router.include_router(chat.router)
 api_router.include_router(utils.router)
 api_router.include_router(reports.router)
 api_router.include_router(admin.router)
+api_router.include_router(admin_mfa.router)
 api_router.include_router(carbon.router)
 api_router.include_router(carbon_calibration.router)
 api_router.include_router(carbon_calibration.public_router)

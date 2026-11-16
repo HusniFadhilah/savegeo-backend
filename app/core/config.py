@@ -10,8 +10,10 @@ from __future__ import annotations
 import secrets
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
+from urllib.parse import urlsplit
 
-from pydantic import field_validator, model_validator
+from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -19,8 +21,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore", hide_input_in_errors=True)
 
     # --- App ---
-    app_env: str = "development"
-    debug: bool = True
+    app_env: Literal["development", "test", "staging", "production"] = "development"
+    debug: bool = False
     api_prefix: str = "/api"
     port: int = 8086
     app_name: str = "SAVEGEO"
@@ -33,6 +35,10 @@ class Settings(BaseSettings):
     supabase_url: str = ""
     supabase_service_role_key: str = ""
     supabase_gee_credentials_bucket: str = "gee-credentials"
+    secret_encryption_keys: SecretStr = SecretStr("")
+    secret_encryption_active_key_id: str = ""
+    credential_allow_legacy_plaintext_read: bool = True
+    mfa_require_privileged_admins: bool | None = None
     # Pre-created bucket writable by the configured Earth Engine identity.
     gee_export_bucket: str = ""
 
@@ -49,7 +55,9 @@ class Settings(BaseSettings):
     auth_cookie_secure: bool | None = None
     auth_cookie_samesite: str = "lax"
     csrf_protection_enabled: bool = True
+    allow_user_registration: bool = False
     rate_limit_requests_per_minute: int = 120
+    trusted_proxy_cidrs: str = ""
     # Viewport raster requests are numerous and should not consume the budget
     # reserved for JSON/API operations such as hotspot region statistics.
     rate_limit_map_tiles_per_minute: int = 600
@@ -229,6 +237,23 @@ class Settings(BaseSettings):
     carbon_tile_max_source_tiles: int = 32
     carbon_dataset_health_ttl_seconds: int = 900
 
+    @field_validator("app_env", mode="before")
+    @classmethod
+    def normalize_environment(cls, value: object) -> object:
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            return {"prod": "production", "release": "production", "dev": "development", "testing": "test"}.get(normalized, normalized)
+        return value
+
+    @field_validator("trusted_proxy_cidrs")
+    @classmethod
+    def validate_proxy_networks(cls, value: str) -> str:
+        from ipaddress import ip_network
+        for entry in value.split(","):
+            if entry.strip():
+                ip_network(entry.strip(), strict=False)
+        return value
+
     @field_validator("chloris_stock_year", mode="before")
     @classmethod
     def empty_chloris_stock_year(cls, value: object) -> object:
@@ -247,7 +272,7 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def require_production_secrets(self) -> Settings:
-        if self.app_env.lower() in {"prod", "production"}:
+        if self.app_env in {"production", "staging"}:
             key = self.jwt_secret_key
             repeated = any(key == (key[:n] * (len(key) // n + 1))[:len(key)] for n in range(1, 17)) if key else True
             if len(key) < 64 or len(set(key)) < 12 or repeated or key.startswith(("eyJ", "pk.", "sk.")):
@@ -260,6 +285,13 @@ class Settings(BaseSettings):
         if self.auth_cookie_samesite.lower() not in {"lax", "strict", "none"}:
             raise ValueError("AUTH_COOKIE_SAMESITE must be lax, strict, or none")
         if self.app_env.lower() in {"prod", "production", "staging"}:
+            if self.debug:
+                raise ValueError("DEBUG must be false outside local development")
+            database = urlsplit(self.database_url)
+            if not database.hostname or database.username in {None, "postgres", "root"}:
+                raise ValueError("DATABASE_URL must use a configured non-superuser application role")
+            if not self.allowed_origins_list or any(urlsplit(origin).scheme != "https" or urlsplit(origin).hostname in {None, "localhost", "127.0.0.1", "::1"} for origin in self.allowed_origins_list):
+                raise ValueError("Production CORS origins must use explicit HTTPS hosts")
             if self.auth_cookie_secure is False or not self.csrf_protection_enabled:
                 raise ValueError("Production requires Secure session cookies and CSRF protection")
             if "*" in self.allowed_origins_list:
@@ -273,6 +305,12 @@ class Settings(BaseSettings):
         """Use Secure cookies automatically outside local development."""
         if self.auth_cookie_secure is not None:
             return self.auth_cookie_secure
+        return self.app_env.lower() in {"prod", "production", "staging"}
+
+    @property
+    def privileged_mfa_required(self) -> bool:
+        if self.mfa_require_privileged_admins is not None:
+            return self.mfa_require_privileged_admins
         return self.app_env.lower() in {"prod", "production", "staging"}
 
     @property

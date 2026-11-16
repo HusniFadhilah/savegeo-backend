@@ -27,12 +27,14 @@ jobs:
 
     steps:
       - name: Checkout backend
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          fetch-depth: 0
+          persist-credentials: false
           path: backend
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"
           cache: pip
@@ -47,13 +49,13 @@ jobs:
           python scripts/write_build_metadata.py --output build-metadata.json
           python scripts/validate_build_metadata.py build-metadata.json --expected-environment beta --require-workflow
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          pip install --require-hashes -r requirements-ci.lock
+          pip install --no-deps --no-build-isolation -e .
           ruff check . --ignore E501 --ignore B904 --ignore B905
           mypy app
           bandit -r app -lll
-          # scikit-learn is pinned for existing pickle model compatibility; remove this ignore after retraining.
           for attempt in 1 2 3; do
-            if pip-audit . --ignore-vuln PYSEC-2024-110; then
+            if pip-audit -r requirements-api.lock --no-deps --disable-pip; then
               break
             fi
             if [ "$attempt" -eq 3 ]; then
@@ -65,7 +67,7 @@ jobs:
           done
           pytest
       - name: Upload beta build metadata
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: savegeo-backend-beta-build-metadata
           path: backend/build-metadata.json
@@ -78,14 +80,15 @@ jobs:
 
     steps:
       - name: Checkout backend
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+          persist-credentials: false
           path: backend
 
-      - name: Scan backend working tree for secrets
+      - name: Scan backend Git history for secrets
         env:
-          GITLEAKS_IMAGE: ghcr.io/gitleaks/gitleaks:v8.30.1
+          GITLEAKS_IMAGE: ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
         run: |
           set -euo pipefail
           pulled=false
@@ -107,7 +110,7 @@ jobs:
             "$GITLEAKS_IMAGE" detect \
             --source /repo \
             --config /repo/.gitleaks.toml \
-            --no-git \
+            --gitleaks-ignore-path /repo/.gitleaksignore \
             --redact \
             --report-format json \
             --report-path /repo/gitleaks-report.json \
@@ -127,8 +130,10 @@ jobs:
 
     steps:
       - name: Checkout backend
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          fetch-depth: 0
+          persist-credentials: false
           path: backend
 
       - name: Build backend image
@@ -174,12 +179,14 @@ jobs:
 
     steps:
       - name: Checkout backend
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          fetch-depth: 0
+          persist-credentials: false
           path: backend
 
       - name: Download and validate build metadata
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: savegeo-backend-beta-build-metadata
           path: backend/build-metadata-artifact
@@ -509,7 +516,7 @@ jobs:
         run: python scripts/write_deployment_record.py --metadata build-metadata-artifact/build-metadata.json --output backend-beta-deployment-record.json --environment beta
 
       - name: Upload beta deployment record
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: savegeo-backend-beta-deployment-record
           path: backend/backend-beta-deployment-record.json

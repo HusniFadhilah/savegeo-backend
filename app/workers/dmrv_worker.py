@@ -117,8 +117,15 @@ def main(argv: list[str] | None = None) -> int:
         signal.signal(sig, lambda *_: stopping.set())
     logger.info("worker %s started (lease %ss, poll %ss)", worker_id, args.lease_seconds, args.poll_interval)
 
+    last_schedule_check = 0.0
     while not stopping.is_set():
         try:
+            import time
+            if time.monotonic() - last_schedule_check >= 60:
+                from app.services.dmrv.integrity_risks import enqueue_due
+                with SessionLocal() as session:
+                    enqueue_due(session)
+                last_schedule_check = time.monotonic()
             with SessionLocal() as session:
                 reaped = jobs.reap_expired(session)
             if reaped:

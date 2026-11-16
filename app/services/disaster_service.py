@@ -14,7 +14,7 @@ from app.services.imagery_resolution import native_median
 
 import logging
 from datetime import UTC, date, datetime, timedelta
-from xml.etree import ElementTree as ET
+from defusedxml import ElementTree as ET
 
 import ee
 import requests

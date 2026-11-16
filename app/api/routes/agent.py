@@ -6,6 +6,8 @@ capabilities document itself reports `ee_initialized` status to the caller.
 from __future__ import annotations
 
 import logging
+import json
+import math
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
@@ -25,12 +27,34 @@ logger = logging.getLogger(__name__)
 
 
 async def _json_object(request: Request) -> dict:
+    raw = bytearray()
+    async for chunk in request.stream():
+        raw.extend(chunk)
+        if len(raw) > 10 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="Agent request is too large")
     try:
-        payload = await request.json()
-    except ValueError as exc:
+        payload = json.loads(raw)
+    except (ValueError, RecursionError) as exc:
         raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="JSON body must be an object")
+    message = payload.get("message", "")
+    if not isinstance(message, str) or len(message) > 20_000:
+        raise HTTPException(status_code=422, detail="Agent message exceeds the supported limit")
+    if "session_id" in payload and payload["session_id"] is not None:
+        value = payload["session_id"]
+        if type(value) is not int or value < 1:
+            raise HTTPException(status_code=422, detail="Invalid session ID")
+    remaining = 100_000
+    def validate(value, depth=0):
+        nonlocal remaining
+        remaining -= 1
+        if remaining < 0 or depth > 25 or isinstance(value, float) and not math.isfinite(value):
+            raise HTTPException(status_code=422, detail="Agent context exceeds the supported limits")
+        children = value.values() if isinstance(value, dict) else value if isinstance(value, list) else []
+        for item in children:
+            validate(item, depth + 1)
+    validate(payload)
     return payload
 
 

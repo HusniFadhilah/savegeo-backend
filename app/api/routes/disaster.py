@@ -47,7 +47,7 @@ def get_firms_fires(
     north: float = Query(...),
     min_confidence: str | None = Query(default=None),
     min_frp: float | None = Query(default=None),
-    limit: int = Query(default=2000),
+    limit: int = Query(default=2000, ge=1, le=10000),
     viewer=Depends(get_current_disaster_viewer),
 ):
     try:
@@ -72,8 +72,8 @@ def get_firms_wms(
     east: float = Query(...),
     north: float = Query(...),
     crs: str = Query(default="EPSG:4326"),
-    width: int = Query(default=1024),
-    height: int = Query(default=512),
+    width: int = Query(default=1024, ge=1, le=4096),
+    height: int = Query(default=512, ge=1, le=4096),
     format: str = Query(default="image/png"),
     viewer=Depends(get_current_disaster_viewer),
 ):
@@ -136,7 +136,7 @@ async def load_fire_big_boundaries(request: Request):
 @router.post("/fire-import", dependencies=[Depends(get_current_disaster_viewer)])
 async def import_fire_observations(request: Request):
     try:
-        return fire_multi_source_service.import_observations(await request.json())
+        return await run_in_threadpool(fire_multi_source_service.import_observations, await request.json())
     except (AnalysisError, ValueError) as exc:
         raise HTTPException(
             status_code=exc.status_code if isinstance(exc, AnalysisError) else 400, detail=public_analysis_error(exc)
@@ -149,7 +149,7 @@ def get_disaster_sources(viewer=Depends(get_current_disaster_viewer)):
 
 
 @router.get("/bmkg-alerts")
-def get_bmkg_alerts(limit: int = 30, viewer=Depends(get_current_disaster_viewer)):
+def get_bmkg_alerts(limit: int = Query(default=30, ge=1, le=100), viewer=Depends(get_current_disaster_viewer)):
     try:
         return disaster_service.get_bmkg_alerts(limit=limit)
     except AnalysisError as e:
@@ -160,7 +160,7 @@ def get_bmkg_alerts(limit: int = 30, viewer=Depends(get_current_disaster_viewer)
 async def get_disaster_dem_slope(request: Request):
     data = await request.json()
     try:
-        return disaster_service.get_disaster_dem_slope(data)
+        return await run_in_threadpool(disaster_service.get_disaster_dem_slope, data)
     except AnalysisError as e:
         raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
 
@@ -174,7 +174,7 @@ async def get_disaster_event_map(request: Request):
     """
     data = await request.json()
     try:
-        return disaster_service.get_disaster_event_map(data)
+        return await run_in_threadpool(disaster_service.get_disaster_event_map, data)
     except AnalysisError as e:
         raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
 
@@ -187,7 +187,7 @@ async def get_disaster_event_map(request: Request):
 async def start_fire_sam_job(request: Request):
     """Segment candidate burn objects using MODIS thermal seeds + SamGeo."""
     try:
-        return disaster_service.start_fire_sam_job(await request.json())
+        return await run_in_threadpool(disaster_service.start_fire_sam_job, await request.json())
     except AnalysisError as e:
         raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
 

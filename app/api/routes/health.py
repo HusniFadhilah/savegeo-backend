@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, HTTPException
+from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -14,6 +15,20 @@ from app.core.version import get_public_version_metadata
 
 router = APIRouter(tags=["health"])
 logger = logging.getLogger(__name__)
+
+
+@router.get("/live")
+def liveness():
+    return {"status": "ok"}
+
+
+@router.get("/ready")
+def readiness(db: Session = Depends(get_db)):
+    try:
+        db.execute(text("SELECT 1"))
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=503, detail="Database unavailable") from exc
+    return {"status": "ready"}
 
 
 @router.get("/version")

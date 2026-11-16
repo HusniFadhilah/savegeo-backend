@@ -1,6 +1,8 @@
 """Vegetation index monthly time series - /api/timeseries. Ported from backend/app.py."""
 from __future__ import annotations
 
+from starlette.concurrency import run_in_threadpool
+
 import logging
 
 import ee
@@ -21,7 +23,7 @@ logger = logging.getLogger(__name__)
 async def analyze_timeseries(request: Request, db: Session = Depends(get_db)):
     data = await request.json()
     try:
-        return vegetation_service.analyze_timeseries(db, data)
+        return await run_in_threadpool(vegetation_service.analyze_timeseries, db, data)
     except AnalysisError as e:
         raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
     except ee.EEException as e:

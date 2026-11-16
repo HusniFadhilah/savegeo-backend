@@ -11,7 +11,7 @@ import json
 import logging
 import math
 
-import requests
+from app.core.public_http import public_http as requests
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 
@@ -48,6 +48,8 @@ def arcgis_tile_proxy(
     Non-cached ImageServer services use exportImage with bbox derived from tile coords.
     Auth token added server-side and never exposed to client.
     """
+    if not 0 <= z <= 22 or not 0 <= x < (1 << z) or not 0 <= y < (1 << z):
+        raise HTTPException(status_code=400, detail="Invalid tile coordinates")
     _is_carbon_tile = is_arcgis_carbon_dataset(dataset_key)
 
     if _is_carbon_tile:
@@ -172,15 +174,18 @@ def arcgis_tile_proxy(
 
     try:
         # POST avoids URL length limits when renderingRule contains a complex polygon
-        resp = requests.post(f"{service_url}/exportImage", data=params, timeout=20)
-        if resp.status_code == 200 and resp.headers.get("Content-Type", "").startswith("image"):
+        resp = requests.post(f"{service_url}/exportImage", data=params, timeout=20, allow_redirects=False)
+        if 300 <= resp.status_code < 400:
+            raise HTTPException(status_code=502, detail="ArcGIS redirects are not allowed")
+        if resp.status_code == 200 and resp.headers.get("Content-Type", "").startswith("image/"):
             return Response(
                 content=resp.content,
                 media_type=resp.headers.get("Content-Type", "image/png"),
                 headers={"Cache-Control": "public, max-age=3600"},
             )
-        # Forward non-image responses as transparent tile to avoid Leaflet errors
-        return Response(content=b"", status_code=200, media_type="image/png")
+        raise HTTPException(status_code=502, detail="ArcGIS did not return an image")
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
-        logger.error(f"ArcGIS tile proxy error [{dataset_key} z={z} y={y} x={x}]: {exc}")
-        return Response(content=b"", status_code=200, media_type="image/png")
+        logger.warning("ArcGIS tile proxy failed (%s)", type(exc).__name__)
+        raise HTTPException(status_code=502, detail="ArcGIS temporarily unavailable") from exc

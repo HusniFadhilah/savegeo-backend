@@ -30,6 +30,9 @@ class GEECredential(Base):
     uploaded_by: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id"))
     uploaded_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.UTC))
     last_used_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    last_checked_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    last_check_status: Mapped[str | None] = mapped_column(String(16))
+    last_check_code: Mapped[str | None] = mapped_column(String(64))
     notes: Mapped[str | None] = mapped_column(Text)
 
     uploader: Mapped[AdminUser | None] = relationship("AdminUser", backref="gee_credentials")
@@ -45,6 +48,9 @@ class GEECredential(Base):
             "uploaded_by": self.uploader.username if self.uploader else None,
             "uploaded_at": self.uploaded_at.isoformat() if self.uploaded_at else None,
             "last_used_at": self.last_used_at.isoformat() if self.last_used_at else None,
+            "last_checked_at": self.last_checked_at.isoformat() if self.last_checked_at else None,
+            "last_check_status": self.last_check_status,
+            "last_check_code": self.last_check_code,
             "notes": self.notes,
         }
         if include_path:

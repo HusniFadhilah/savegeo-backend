@@ -61,7 +61,7 @@ def test_one_section_failure_keeps_success_and_does_not_compute_weather(monkeypa
     monkeypatch.setattr(service, "_crop_health", lambda *_: {"available": True, "ndvi_mean": .45})
     weather = MagicMock()
     monkeypatch.setattr(service.weather_service, "get_weather_stats", weather)
-    result = service.run_crop_monitoring(MagicMock(), {"field_id": 3, "sub_analyses": ["landcover", "health"]})
+    result = service.run_crop_monitoring(MagicMock(), {"field_id": 3, "sub_analyses": ["landcover", "health"]}, "user:1")
     assert result["sub_analyses"]["health"]["ndvi_mean"] == .45
     assert result["sub_analyses"]["landcover"]["available"] is False
     assert result["skipped"][0]["sub_analysis"] == "landcover"

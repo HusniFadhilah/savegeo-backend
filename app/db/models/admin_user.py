@@ -18,6 +18,8 @@ if TYPE_CHECKING:
 
 class AdminUser(Base):
     __tablename__ = "admin_users"
+    if TYPE_CHECKING:
+        _mfa_verified_at: int | None  # request context, deliberately absent from ORM metadata
 
     id: Mapped[int] = mapped_column(primary_key=True)
     username: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
@@ -26,6 +28,7 @@ class AdminUser(Base):
     password_hash: Mapped[str] = mapped_column(String(256), nullable=False)
     session_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    mfa_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     # Nullable and NOT backfilled on existing rows on purpose: NULL means
     # "legacy full-access admin" (the only mode that existed before this
     # column was added), so no existing admin's access changes. Only admins
@@ -44,6 +47,7 @@ class AdminUser(Base):
             "full_name": self.full_name,
             "email": self.email,
             "is_active": self.is_active,
+            "mfa_enabled": self.mfa_enabled,
             "role": self.role.name if self.role else None,
             # Expose only permission codes to the SPA. Credential values and
             # other sensitive fields remain server-side; this is used solely

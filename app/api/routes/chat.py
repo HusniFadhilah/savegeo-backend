@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.core.chat_ownership import chat_session_owner_key
+from app.core.client_ip import get_client_ip
 from app.core.security import get_current_app_viewer
 from app.db.models.admin_user import AdminUser
 from app.db.models.chat_session import ChatSession
@@ -31,10 +32,7 @@ class SessionUpdateRequest(BaseModel):
 
 
 def _client_ip(request: Request) -> str | None:
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else None
+    return get_client_ip(request)
 
 
 @router.get("/sessions")

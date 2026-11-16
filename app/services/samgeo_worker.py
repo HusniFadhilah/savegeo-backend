@@ -31,8 +31,9 @@ def main():
             profile = dataset.profile.copy()
         image = Image.fromarray(rgb)
         model_id = "IDEA-Research/grounding-dino-tiny"
-        processor = AutoProcessor.from_pretrained(model_id)
-        detector = AutoModelForZeroShotObjectDetection.from_pretrained(model_id, use_safetensors=True).eval()
+        revision = "a2bb814dd30d776dcf7e30523b00659f4f141c71"
+        processor = AutoProcessor.from_pretrained(model_id, revision=revision, trust_remote_code=False)
+        detector = AutoModelForZeroShotObjectDetection.from_pretrained(model_id, revision=revision, trust_remote_code=False, use_safetensors=True).eval()
         inputs = processor(images=image, text=prompt.rstrip(".")+".", return_tensors="pt")
         with torch.inference_mode():
             outputs = detector(**inputs)

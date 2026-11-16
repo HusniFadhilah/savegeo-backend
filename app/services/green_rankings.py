@@ -342,7 +342,7 @@ def result_page(run, owner, page=1, page_size=50, search="", sort_by="rank", sor
             sort_by = "rank"
         direction = sort_dir.upper()
         order_clause = (
-            f"eligible DESC, green {direction}, code {direction}"
+            f"eligible DESC, official_rank {direction}, code ASC"
             if sort_by == "rank"
             else f"CASE WHEN {sort_columns[sort_by]} IS NULL THEN 1 ELSE 0 END ASC, {sort_columns[sort_by]} {direction}, code ASC"
         )

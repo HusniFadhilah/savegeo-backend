@@ -21,6 +21,7 @@ from typing import Any
 from fastapi import Request
 from sqlalchemy.orm import Session
 
+from app.core.client_ip import get_client_ip
 from app.agentic import agentic_ai, rate_limiter
 from app.agentic.geoai_tools import filter_direct_reference_layers
 from app.agentic.agentic_ai import (
@@ -157,10 +158,7 @@ def run_agent_analyze(
 
 
 def _client_ip(request: Request) -> str:
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else ""
+    return get_client_ip(request)
 
 
 class _AiCallError(Exception):
@@ -256,7 +254,9 @@ def run_agent_control(
     """
     # ── Rate limiting ────────────────────────────────────────────
     client_ip = _client_ip(request)
-    allowed, rl_msg, retry_after = rate_limiter.check(client_ip)
+    # The viewer is authenticated before owner_key is constructed. Separate
+    # accounts behind one proxy do not share the expensive AI quota.
+    allowed, rl_msg, retry_after = rate_limiter.check(owner_key or client_ip)
     if not allowed:
         return (
             {

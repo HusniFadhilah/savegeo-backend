@@ -1,4 +1,4 @@
-"""Pydantic request bodies for the public Field CRUD routes
+"""Pydantic request bodies for the private Field CRUD routes
 (`app/api/routes/fields.py`). This is a plain CRUD resource (unlike the raw-
 dict GEE analysis routes - see `app/schemas/common.py`'s documented split),
 so it gets real schemas, mirroring `app/schemas/user.py`'s minimal style -

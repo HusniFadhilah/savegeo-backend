@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
 
-import requests
+from app.core.public_http import public_http as requests
 
 logger = logging.getLogger(__name__)
 
@@ -31,9 +31,9 @@ def _is_allowed_domain(url: str) -> bool:
     """Return True if the URL's domain is on the allowlist."""
     try:
         parsed = urlparse(url)
-        host = parsed.netloc.lower()
-        # strip port if present
-        host = host.split(":")[0]
+        host = (parsed.hostname or "").lower()
+        if parsed.scheme != "https" or parsed.username is not None or parsed.password is not None or parsed.port not in {None, 443}:
+            return False
         return any(host == d or host.endswith("." + d) for d in _SERVICE_ALLOWLIST_DOMAINS)
     except Exception:  # noqa: BLE001 - malformed URL: fail closed (not on the allowlist), not a crash
         return False
@@ -122,10 +122,14 @@ class ArcGISClient:
             raise ValueError(f"Invalid item_id format: {item_id!r}")
 
         url = f"{self._portal_url}/sharing/rest/content/items/{item_id}"
+        if not _is_allowed_domain(url):
+            raise ValueError("ArcGIS portal URL is not allowed")
         params = {"f": "json"}
         params.update(self._get_auth_params())
 
-        resp = requests.get(url, params=params, timeout=self._timeout)
+        resp = requests.get(url, params=params, timeout=self._timeout, allow_redirects=False)
+        if 300 <= resp.status_code < 400:
+            raise ValueError("ArcGIS redirects are not allowed")
         resp.raise_for_status()
         data = resp.json()
 
@@ -164,7 +168,9 @@ class ArcGISClient:
         params = {"f": "json"}
         params.update(self._get_auth_params())
 
-        resp = requests.get(service_url, params=params, timeout=self._timeout)
+        resp = requests.get(service_url, params=params, timeout=self._timeout, allow_redirects=False)
+        if 300 <= resp.status_code < 400:
+            raise ValueError("ArcGIS redirects are not allowed")
         resp.raise_for_status()
         data = resp.json()
 
@@ -200,9 +206,13 @@ class ArcGISClient:
 
     def _fetch_portal_info(self) -> dict[str, Any]:
         url = f"{self._portal_url}/sharing/rest/portals/self"
+        if not _is_allowed_domain(url):
+            raise ValueError("ArcGIS portal URL is not allowed")
         params = {"f": "json"}
         params.update(self._get_auth_params())
-        resp = requests.get(url, params=params, timeout=self._timeout)
+        resp = requests.get(url, params=params, timeout=self._timeout, allow_redirects=False)
+        if 300 <= resp.status_code < 400:
+            raise ValueError("ArcGIS redirects are not allowed")
         resp.raise_for_status()
         data = resp.json()
         if isinstance(data, dict) and "error" in data:

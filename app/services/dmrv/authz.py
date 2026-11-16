@@ -14,7 +14,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.models.admin_user import AdminUser
-from app.db.models.dmrv_project import ProjectMember
+from app.db.models.dmrv_project import DmrvProject, ProjectMember
+from app.db.models.organization import OrganizationMember
 from app.db.models.user import User
 from app.services.dmrv.errors import DmrvError, project_not_found
 
@@ -28,8 +29,8 @@ _READ = frozenset({"project.read", "boundary.read", "field.read", "accounting.re
 
 # Separation of duties: no role may both create a submission and decide a review.
 ROLE_ACTIONS: dict[str, frozenset[str]] = {
-    "project_owner": _READ | {"project.write", "members.manage", "boundary.write", "field.write", "field.summary.run", "monitoring.write", "evidence.write", "submission.create"},
-    "analyst": _READ | {"boundary.write", "field.summary.run", "monitoring.write", "evidence.write", "submission.create"},
+    "project_owner": _READ | {"project.write", "members.manage", "boundary.write", "field.write", "field.summary.run", "analysis.run", "monitoring.write", "evidence.write", "submission.create"},
+    "analyst": _READ | {"boundary.write", "field.summary.run", "analysis.run", "monitoring.write", "evidence.write", "submission.create"},
     "field_operator": frozenset({"project.read", "boundary.read", "field.read", "field.write", "monitoring.read"}),
     "reviewer": _READ | {"review.decide"},
     "verifier": _READ | {"review.decide"},
@@ -59,6 +60,16 @@ class Principal:
 
 
 def get_member_role(db: Session, project_id: str, principal: Principal) -> str | None:
+    project = db.get(DmrvProject, project_id)
+    if project is None:
+        return None
+    if project.organization_id and db.execute(select(OrganizationMember.id).where(
+        OrganizationMember.organization_id == project.organization_id,
+        OrganizationMember.principal_type == principal.type,
+        OrganizationMember.principal_id == principal.id,
+        OrganizationMember.is_active.is_(True),
+    )).first() is None:
+        return None
     return db.execute(
         select(ProjectMember.role).where(
             ProjectMember.project_id == project_id,

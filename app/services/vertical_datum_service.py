@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import math
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +55,8 @@ def convert_ellipsoidal_to_orthometric(
     source_vertical_reference: str,
     geoid_model: str = "EGM2008",
 ) -> dict[str, Any]:
+    if not all(math.isfinite(value) for value in (ellipsoidal_height_m, geoid_undulation_m)):
+        raise ValueError("Height values must be finite")
     source = source_vertical_reference.strip().upper()
     model = geoid_model.strip().upper()
     if source in {"UNKNOWN", "", "UNSPECIFIED"}:
@@ -63,6 +66,8 @@ def convert_ellipsoidal_to_orthometric(
     if source not in {"ELLIPSOIDAL", "WGS84_ELLIPSOID", "WGS 84 ELLIPSOID"}:
         raise ValueError("input must be an ellipsoidal height")
     orthometric = float(ellipsoidal_height_m) - float(geoid_undulation_m)
+    if not math.isfinite(orthometric):
+        raise ValueError("Converted height must be finite")
     return {
         "source_height_m": float(ellipsoidal_height_m),
         "source_height_type": "ellipsoidal",

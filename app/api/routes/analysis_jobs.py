@@ -48,6 +48,7 @@ from app.services import (
 from app.services.gee_common import AnalysisError, public_analysis_error
 from app.services.carbon_retry import run_carbon_with_retry
 from app.services.aoi_reference import resolve_known_aoi
+from app.services.analysis_requirements import requires_earth_engine
 
 router = APIRouter(tags=["analysis-jobs"])
 logger = logging.getLogger(__name__)
@@ -348,7 +349,7 @@ def _run_job(
         elif job_type == "landcover_fusion":
             result = landcover_fusion_service.analyze_landcover_fusion(payload)
         elif job_type == "crop_monitoring":
-            result = crop_monitoring_service.run_crop_monitoring(db, payload)
+            result = crop_monitoring_service.run_crop_monitoring(db, payload, owner)
         else:  # defensive; validated before submit
             raise ValueError(f"Unsupported job type: {job_type}")
         _write_job(
@@ -472,17 +473,7 @@ def create_analysis_job(
     # Pure local/reference jobs do not need an Earth Engine session. Keep the
     # gate for all GEE workflows, but allow COG/SoilGrids references to work
     # during credential outages and in offline deployments.
-    needs_ee = job_type not in {"carbon_local"}
-    if job_type == "carbon_local" and payload.get("model_name") == "ibm_granite_geospatial_biomass":
-        # Granite's local inference stage consumes an HLS composite downloaded
-        # from Earth Engine, so it still needs the EE session initialized.
-        needs_ee = True
-    if job_type == "carbon":
-        from app.registries.carbon_dataset_registry import get_external_carbon_meta
-        dataset = str(payload.get("reference_dataset") or "")
-        meta = get_external_carbon_meta(dataset)
-        direct = bool(payload.get("reference_only")) or not payload.get("model_name")
-        needs_ee = not (direct and meta and meta.get("ingestion_method") in {"cog_rasterio", "soilgrids_rest"})
+    needs_ee = requires_earth_engine(job_type, payload)
     owner = job_owner_key(viewer)
     cache_key = _carbon_cache_key(db, job_type, payload, owner) if job_type in _CARBON_CACHEABLE_TYPES else None
     if cache_key:

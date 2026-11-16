@@ -1,4 +1,4 @@
-"""Public model registry read endpoints (no auth) — /api/models*."""
+"""Feature-authorized model catalog with scientific public metadata only."""
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -20,9 +20,9 @@ router = APIRouter(
 
 @router.get("/models/list")
 def models_list_legacy(model_type: str = "carbon", db: Session = Depends(get_db)):
-    """Legacy alias — returns full (non-public) dict shape, matches old `/api/models/list`."""
-    models = db.query(UploadedModel).filter_by(model_type=model_type).all()
-    return {"models": [m.to_dict() for m in models], "count": len(models)}
+    """Legacy route with the same safe metadata contract as /api/models."""
+    models = db.query(UploadedModel).filter_by(model_type=model_type, is_active=True).all()
+    return {"models": [m.to_dict_public() for m in models], "count": len(models)}
 
 
 @router.get("/models")
@@ -33,6 +33,8 @@ def models_list(
     gee_deployable: bool | None = None,
     db: Session = Depends(get_db),
 ):
+    if include_inactive:
+        raise HTTPException(status_code=403, detail="Inactive models are available only through the admin API")
     query = db.query(UploadedModel)
     if model_type:
         query = query.filter_by(model_type=model_type)
@@ -71,7 +73,7 @@ def models_list(
 @router.get("/models/{model_id}")
 def model_detail(model_id: int, db: Session = Depends(get_db)):
     model = db.get(UploadedModel, model_id)
-    if not model:
+    if not model or not model.is_active:
         raise HTTPException(status_code=404, detail="Model not found")
     return model.to_dict_public(include_path=False)
 
@@ -85,6 +87,6 @@ def model_by_name(model_name: str, db: Session = Depends(get_db)):
     if builtin:
         return builtin
     model = db.query(UploadedModel).filter_by(name=model_name, is_active=True).first()
-    if not model:
+    if not model or not model.is_active:
         raise HTTPException(status_code=404, detail="Model not found")
     return model.to_dict_public(include_path=False)

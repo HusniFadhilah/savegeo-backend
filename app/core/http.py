@@ -17,8 +17,11 @@ from urllib.parse import urlsplit
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
+from starlette.concurrency import run_in_threadpool
+from fastapi import HTTPException
 
 from app.core.config import Settings
+from app.core.client_ip import get_client_ip
 
 _REQUEST_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 # dMRV field-data uploads: 10 MB file + multipart overhead. The route re-checks the file itself; this
@@ -56,7 +59,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         )
 
     def _rate_limited(self, request: Request) -> bool:
-        if request.url.path in {"/api/health", "/docs", "/redoc", "/openapi.json"}:
+        if request.url.path in {"/api/health", "/api/live", "/api/ready", "/docs", "/redoc", "/openapi.json"}:
             return False
         if not request.url.path.startswith("/api/"):
             return False
@@ -78,8 +81,17 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         if limit <= 0:
             return False
 
-        client = request.client.host if request.client else "unknown"
+        client = get_client_ip(request, self.settings)
+        if self.settings.app_env in {"production", "staging"}:
+            from app.core.shared_rate_limit import consume
+            return consume(f"http:{bucket}:{client}", limit, 60) > 0
         now = time.monotonic()
+        # Bound state even when many distinct clients contact the process.
+        if len(self._rate_windows) >= 50_000:
+            for key in [key for key, entries in self._rate_windows.items() if not entries or now - entries[-1] >= 60]:
+                del self._rate_windows[key]
+            if (client, bucket) not in self._rate_windows and len(self._rate_windows) >= 50_000:
+                return True
         window = self._rate_windows[(client, bucket)]
         while window and now - window[0] >= 60:
             window.popleft()
@@ -125,7 +137,15 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         request_id = supplied if _REQUEST_ID.fullmatch(supplied) else str(uuid.uuid4())
         request.state.request_id = request_id
 
-        if self._rate_limited(request):
+        quota_error = None
+        try:
+            limited = await run_in_threadpool(self._rate_limited, request) if self.settings.app_env in {"production", "staging"} else self._rate_limited(request)
+        except HTTPException as exc:
+            limited = False
+            quota_error = exc
+        if quota_error:
+            response = self._problem(request, quota_error.status_code, "Request quota service unavailable", dict(quota_error.headers or {}))
+        elif limited:
             response = self._problem(request, 429, "Rate limit exceeded", {"Retry-After": "60"})
         elif self._csrf_rejected(request):
             response = self._problem(request, 403, "Origin is not allowed for cookie-authenticated requests")

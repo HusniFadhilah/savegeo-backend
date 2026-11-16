@@ -72,6 +72,17 @@ class UploadedModel(Base):
 
     def to_dict_public(self, include_path: bool = False) -> dict:
         data = self._base_dict()
-        if include_path:
-            data["filepath"] = self.filepath
+        # The application needs scientific descriptors, not operator metadata.
+        data.pop("filename", None)
+        data.pop("file_size_kb", None)
+        public_keys = {
+            "algorithm", "version", "created_at", "trained_at", "n_samples",
+            "n_features", "feature_names", "train_metrics", "cv_metrics", "cv_method",
+            "scaled_features", "feature_importance", "gee_deployable", "preliminary",
+            "method", "training_domain", "training_mode", "reference_year", "provider",
+            "builtin", "time_series_supported", "compatible_reference_datasets",
+            "target_dataset", "target_pool", "units", "description", "limitations",
+            "reference_dataset", "reference_datasets", "training_source", "pool",
+        }
+        data["metadata_json"] = {k: v for k, v in (self.metadata_json or {}).items() if k in public_keys}
         return data

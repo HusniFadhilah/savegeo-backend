@@ -65,7 +65,7 @@ def test_analysis_routes_hide_internal_errors(monkeypatch, path, service, method
 
     monkeypatch.setattr(service, method, fail)
     app.dependency_overrides[require_ee] = lambda: None
-    app.dependency_overrides[get_current_app_viewer] = lambda: object()
+    app.dependency_overrides[get_current_app_viewer] = lambda: AdminUser(id=1)
     app.dependency_overrides[get_db] = lambda: object()
     router, route_path = {
         "/api/analyze/landcover": (landcover.router, "/analyze/landcover"),

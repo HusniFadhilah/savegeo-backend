@@ -7,7 +7,6 @@ stored on `app.state.ee_initialized` (see app/main.py's lifespan) and read via t
 from __future__ import annotations
 
 import logging
-import tempfile
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -29,9 +28,15 @@ def _init_from_key_file(client_email: str, key_path: str) -> bool:
     return True
 
 
+def _init_from_key_data(client_email: str, key_bytes: bytes) -> bool:
+    import ee
+    credentials = ee.ServiceAccountCredentials(client_email, key_data=key_bytes.decode("utf-8"))
+    ee.Initialize(credentials, project=get_settings().gee_project_id or None)
+    return True
+
+
 def initialize_ee(db: Session) -> bool:
-    """Try the active DB credential first (downloaded from Supabase Storage into a
-    temp file for the duration of `ee.Initialize` only), then fall back to env vars.
+    """Try the active DB credential first (decrypted in process memory), then env.
     Returns whether GEE is now initialized.
     """
     cred = db.query(GEECredential).filter_by(is_active=True).first()
@@ -41,19 +46,13 @@ def initialize_ee(db: Session) -> bool:
             from app.services import storage_service
 
             key_bytes = storage_service.download_credential(cred.bucket_path)
-            with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
-                tmp.write(key_bytes)
-                tmp_path = tmp.name
-            try:
-                _init_from_key_file(cred.client_email, tmp_path)
-                cred.last_used_at = __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
-                db.commit()
-                logger.info("Earth Engine initialized from DB credential: %s", cred.client_email)
-                return True
-            finally:
-                Path(tmp_path).unlink(missing_ok=True)
+            _init_from_key_data(cred.client_email, key_bytes)
+            cred.last_used_at = __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
+            db.commit()
+            logger.info("Earth Engine initialized from DB credential id=%s", cred.id)
+            return True
         except Exception as exc:  # noqa: BLE001
-            logger.error("GEE init from DB credential failed: %s", exc)
+            logger.error("GEE init from DB credential failed: %s", type(exc).__name__)
 
     # --- Fallback: env vars ---
     settings = get_settings()
@@ -66,7 +65,7 @@ def initialize_ee(db: Session) -> bool:
             logger.info("Earth Engine initialized from env: %s", client_email)
             return True
         except Exception as exc:  # noqa: BLE001
-            logger.error("GEE init from env failed: %s", exc)
+            logger.error("GEE init from env failed: %s", type(exc).__name__)
 
     logger.warning("Earth Engine could not be initialized (no active DB credential or valid env fallback).")
     return False

@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
+from starlette.concurrency import run_in_threadpool
 
 from app.reporting.executive_summary import build_executive_summary_docx
 from app.core.security import get_current_app_viewer
@@ -34,7 +35,7 @@ async def executive_summary_docx(
     requested = [code for key, code in included.items() if result.get(key)]
     for code in requested or ["app.feature.carbon_stock"]:
         ensure_feature_access(viewer, code, db)
-    buf = build_executive_summary_docx(payload)
+    buf = await run_in_threadpool(build_executive_summary_docx, payload)
 
     ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     aoi_raw = str(payload.get("aoi_name") or "report")

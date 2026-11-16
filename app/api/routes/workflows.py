@@ -33,11 +33,12 @@ def optional_user(
 ) -> User | None:
     raw_token = _credential_or_cookie(request, credentials, USER_SESSION_COOKIE)
     if not raw_token:
+        if request.headers.get("authorization"):
+            raise HTTPException(status_code=401, detail="Invalid credentials")
         return None
-    try:
-        return get_current_user(request=request, credentials=credentials, db=db)
-    except (HTTPException, ValueError, TypeError):
-        return None
+    if request.headers.get("authorization") and credentials is None:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    return get_current_user(request=request, credentials=credentials, db=db)
 
 
 def _checksum(value: dict) -> str:
@@ -57,7 +58,7 @@ def _find_workflow(workflow_id: str, db: Session) -> Workflow:
 
 def _public_or_owner(workflow: Workflow, user: User | None) -> None:
     if workflow.visibility == "private" and (user is None or user.id != workflow.owner_id):
-        raise HTTPException(status_code=403, detail="WORKFLOW_PERMISSION_DENIED")
+        raise HTTPException(status_code=404, detail="WORKFLOW_NOT_FOUND")
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -94,7 +95,7 @@ def list_workflows(
     if category:
         query = query.filter(Workflow.category == category)
     if search:
-        query = query.filter(Workflow.name.ilike(f"%{search}%"))
+        query = query.filter(Workflow.name.icontains(search, autoescape=True))
     rows = query.order_by(Workflow.updated_at.desc()).all()
     enabled = viewer_feature_codes(db, user)
     visible = [
@@ -124,7 +125,7 @@ def get_workflow(workflow_id: str, user: User | None = Depends(optional_user), d
 def update_workflow(workflow_id: str, payload: WorkflowUpdateRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     workflow = _find_workflow(workflow_id, db)
     if workflow.owner_id != user.id:
-        raise HTTPException(status_code=403, detail="WORKFLOW_PERMISSION_DENIED")
+        raise HTTPException(status_code=404, detail="WORKFLOW_NOT_FOUND")
     ensure_workflow_feature_access(user, workflow.workflow_json, db)
     definition = payload.workflow
     workflow_json = definition.model_dump(mode="json")
@@ -146,7 +147,7 @@ def update_workflow(workflow_id: str, payload: WorkflowUpdateRequest, user: User
 def delete_workflow(workflow_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     workflow = _find_workflow(workflow_id, db)
     if workflow.owner_id != user.id:
-        raise HTTPException(status_code=403, detail="WORKFLOW_PERMISSION_DENIED")
+        raise HTTPException(status_code=404, detail="WORKFLOW_NOT_FOUND")
     db.delete(workflow)
     db.commit()
     return {"message": "Workflow deleted"}
@@ -157,7 +158,8 @@ def duplicate_workflow(workflow_id: str, user: User = Depends(get_current_user),
     source = _find_workflow(workflow_id, db)
     _public_or_owner(source, user)
     ensure_workflow_feature_access(user, source.workflow_json, db)
-    copy = Workflow(owner_id=user.id, name=f"{source.name} (copy)", description=source.description, category=source.category, visibility="private", workflow_json=source.workflow_json, checksum=source.checksum)
+    copied_json = {**source.workflow_json, "visibility": "private", "name": f"{source.name} (copy)"}
+    copy = Workflow(owner_id=user.id, name=copied_json["name"], description=source.description, category=source.category, visibility="private", workflow_json=copied_json, checksum=_checksum(copied_json))
     db.add(copy)
     db.commit()
     db.refresh(copy)
@@ -168,11 +170,14 @@ def duplicate_workflow(workflow_id: str, user: User = Depends(get_current_user),
 def share_workflow(workflow_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     workflow = _find_workflow(workflow_id, db)
     if workflow.owner_id != user.id:
-        raise HTTPException(status_code=403, detail="WORKFLOW_PERMISSION_DENIED")
+        raise HTTPException(status_code=404, detail="WORKFLOW_NOT_FOUND")
     ensure_workflow_feature_access(user, workflow.workflow_json, db)
     if workflow.visibility == "private":
         workflow.visibility = "unlisted"
         workflow.workflow_json = {**workflow.workflow_json, "visibility": "unlisted"}
+        workflow.checksum = _checksum(workflow.workflow_json)
+        workflow.version += 1
+        workflow.updated_at = dt.datetime.now(dt.UTC)
         db.commit()
     return {"workflowId": str(workflow.id), "visibility": workflow.visibility}
 
@@ -181,7 +186,7 @@ def share_workflow(workflow_id: str, user: User = Depends(get_current_user), db:
 def run_workflow(workflow_id: str, payload: WorkflowRunRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     workflow = _find_workflow(workflow_id, db)
     if workflow.owner_id != user.id:
-        raise HTTPException(status_code=403, detail="WORKFLOW_PERMISSION_DENIED")
+        raise HTTPException(status_code=404, detail="WORKFLOW_NOT_FOUND")
     ensure_workflow_feature_access(user, workflow.workflow_json, db)
     now = dt.datetime.now(dt.UTC)
     node_statuses = {node["id"]: "completed" for node in workflow.workflow_json.get("nodes", [])}
@@ -200,7 +205,7 @@ def run_workflow(workflow_id: str, payload: WorkflowRunRequest, user: User = Dep
 def get_workflow_run(workflow_id: str, run_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     workflow = _find_workflow(workflow_id, db)
     if workflow.owner_id != user.id:
-        raise HTTPException(status_code=403, detail="WORKFLOW_PERMISSION_DENIED")
+        raise HTTPException(status_code=404, detail="WORKFLOW_NOT_FOUND")
     ensure_workflow_feature_access(user, workflow.workflow_json, db)
     try:
         run = db.get(WorkflowRun, int(run_id))

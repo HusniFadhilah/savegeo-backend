@@ -1,4 +1,4 @@
-FROM python:3.11-slim-bookworm AS builder
+FROM python:3.11-slim-bookworm@sha256:a83ba18aef0f865b1a4a611c2cf460fe446f2795673bbb9fe43be570439e3b39 AS builder
 
 WORKDIR /app
 
@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && (apt-get purge -y --auto-remove python3-msgpack python3-setuptools || true) \
     && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml README.md ./
+COPY pyproject.toml README.md requirements-api.lock ./
 COPY app ./app
 COPY alembic ./alembic
 COPY alembic.ini ./
@@ -18,11 +18,9 @@ COPY scripts ./scripts
 
 RUN python -m venv --without-pip "${VIRTUAL_ENV}" \
     && /usr/local/bin/python -m pip install --no-cache-dir \
-    --target "${VIRTUAL_ENV}/lib/python3.11/site-packages" ".[cams]" \
-    && /usr/local/bin/python -m pip install --no-cache-dir --upgrade \
-    --target "${VIRTUAL_ENV}/lib/python3.11/site-packages" \
-    "msgpack>=1.2.1" \
-    "filelock>=4.2.1" \
+    --target "${VIRTUAL_ENV}/lib/python3.11/site-packages" --require-hashes -r requirements-api.lock \
+    && /usr/local/bin/python -m pip install --no-cache-dir --no-deps \
+    --target "${VIRTUAL_ENV}/lib/python3.11/site-packages" . \
     && rm -rf \
     /tmp/* \
     /root/.cache/pip \
@@ -38,18 +36,18 @@ RUN python -m venv --without-pip "${VIRTUAL_ENV}" \
     -cf /tmp/python-runtime.tar .
 
 # Keep optional CPU inference packages separate from API dependencies.
-FROM python:3.11-slim-bookworm AS samgeo-builder
+FROM python:3.11-slim-bookworm@sha256:a83ba18aef0f865b1a4a611c2cf460fe446f2795673bbb9fe43be570439e3b39 AS samgeo-builder
 RUN python -m venv /opt/samgeo \
     && /opt/samgeo/bin/python -m pip install --no-cache-dir \
        torch==2.13.0 torchvision==0.28.0 \
        --index-url https://download.pytorch.org/whl/cpu \
     && /opt/samgeo/bin/python -m pip install --no-cache-dir \
-       "Pillow>=13.0.0" "filelock>=4.2.1" segment-geospatial==1.4.2 transformers==5.19.0 \
+       "Pillow>=13.0.0" "filelock>=4.2.1" "hydra-core>=1.3.8" segment-geospatial==1.4.2 transformers==5.19.0 \
     && /opt/samgeo/bin/python -m pip uninstall -y pip setuptools
 
 # Granite/TerraTorch has a newer NumPy and geospatial stack than the API.
 # Keep it in its own interpreter so it cannot upgrade or shadow API packages.
-FROM python:3.12-slim-bookworm AS granite-builder
+FROM python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df AS granite-builder
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates libbz2-1.0 libexpat1 libffi8 libgomp1 liblzma5 \
     libpq5 libsqlite3-0 libssl3 libstdc++6 libuuid1 zlib1g \
@@ -57,10 +55,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN python -m venv /opt/granite \
     && /opt/granite/bin/python -m pip install --no-cache-dir --no-deps \
        --index-url https://download.pytorch.org/whl/cpu \
-       torch==2.10.0 torchvision==0.25.0 \
+       torch==2.13.0 torchvision==0.28.0 \
     && /opt/granite/bin/python -m pip install --no-cache-dir \
-       terratorch==1.2.13 lightning>=2.6.6 filelock>=4.2.1 \
-       fsspec>=2026.6.0 geopandas>=1.1.2 \
+       terratorch==1.2.13 "lightning>=2.6.6" "filelock>=4.2.1" "hydra-core>=1.3.8" \
+       "fsspec>=2026.6.0" "geopandas>=1.1.2" \
     && /opt/granite/bin/python -m pip uninstall -y pip setuptools
 RUN /opt/granite/bin/python -c "from terratorch.cli_tools import LightningInferenceModel; import torch, torchvision; print(torch.__version__, torchvision.__version__)"
 RUN rm -rf \
@@ -78,7 +76,7 @@ RUN rm -rf \
 # Keep compilers and development headers out of the production image. Start
 # from a plain Debian runtime so its system Python metadata cannot reintroduce
 # stale packaging versions; copy only the patched interpreter from the builder.
-FROM debian:bookworm-slim AS runtime
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS runtime
 
 WORKDIR /app
 
@@ -124,5 +122,15 @@ COPY scripts ./scripts
 
 ENV PORT=8086
 EXPOSE 8086
+
+RUN groupadd --gid 10001 savegeo \
+    && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin savegeo \
+    && mkdir -p /app/var /app/.cache \
+    && chown -R 10001:10001 /app/var /app/.cache
+ENV HOME=/app/var \
+    XDG_CACHE_HOME=/app/.cache
+USER 10001:10001
+HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=3 \
+    CMD python -c "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8086')+'/api/ready',timeout=3)"
 
 CMD ["sh", "-c", "python -m uvicorn app.main:app --host 0.0.0.0 --port ${PORT}"]

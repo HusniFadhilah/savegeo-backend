@@ -1,11 +1,3 @@
-vulnerabilities:
-  - id: PYSEC-2024-110
-    statement: scikit-learn remains pinned for compatibility with existing serialized models until they are retrained.
-  - id: GHSA-6v7p-g79w-8964
-    statement: Trivy reports stale packaging metadata outside the patched runtime environment.
-  - id: CVE-2025-47273
-    statement: Trivy reports stale packaging metadata outside the patched runtime environment.
-
 secrets:
   - id: gcp-service-account
     paths:

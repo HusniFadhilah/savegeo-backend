@@ -9,8 +9,11 @@ queue without changing the frontend contract.
 from __future__ import annotations
 
 import ipaddress
+import math
 import re
 import uuid
+from copy import deepcopy
+from threading import Lock
 from typing import Any, Literal
 from urllib.parse import urlparse
 
@@ -19,6 +22,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from app.core.security import get_current_app_viewer, require_permission
+from app.core.chat_ownership import chat_session_owner_key
 from app.core.viewer_features import (
     FEATURE_ACCESS_DENIED_DETAIL,
     ensure_feature_access,
@@ -60,12 +64,10 @@ def _dataset_feature_allowed(principal: AdminUser | User, module: str | None, db
 
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _URL = re.compile(r"^https?://", re.IGNORECASE)
-_FORBIDDEN_SQL = re.compile(
-    r"(?:;|--|/\*|\*/|\b(?:COPY|ATTACH|DETACH|INSTALL|LOAD|EXPORT|IMPORT|CREATE|DROP|ALTER|INSERT|UPDATE|DELETE|PRAGMA)\b)",
-    re.IGNORECASE,
-)
 _catalog: dict[str, dict[str, Any]] = {}
 _jobs: dict[str, dict[str, Any]] = {}
+_jobs_lock = Lock()
+_MAX_JOBS = 2000
 
 
 def _safe_remote_url(value: str) -> str:
@@ -127,7 +129,7 @@ class DatasetReference(BaseModel):
     @field_validator("bbox")
     @classmethod
     def valid_bbox(cls, value: list[float] | None) -> list[float] | None:
-        if value is not None and (value[0] > value[2] or value[1] > value[3]):
+        if value is not None and (not all(math.isfinite(n) for n in value) or not (-180 <= value[0] <= value[2] <= 180 and -90 <= value[1] <= value[3] <= 90)):
             raise ValueError("invalid bbox")
         return value
 
@@ -147,16 +149,11 @@ class QueryRequest(BaseModel):
     limit: int = Field(default=1000, ge=1, le=10_000)
 
 
-def _safe_sql(sql: str, limit: int) -> str:
-    normalized = sql.strip()
-    if _FORBIDDEN_SQL.search(normalized) or not re.match(r"^(SELECT|WITH)\b", normalized, re.IGNORECASE):
-        raise HTTPException(status_code=400, detail="Only read-only SELECT queries are allowed")
-    if re.search(r"\bLIMIT\s+\d+\b", normalized, re.IGNORECASE):
-        return re.sub(r"\bLIMIT\s+\d+\b", f"LIMIT {limit}", normalized, flags=re.IGNORECASE)
-    return f"{normalized} LIMIT {limit}"
+def _public_job(job: dict[str, Any]) -> dict[str, Any]:
+    return deepcopy({key: value for key, value in job.items() if key != "owner"})
 
 
-def _new_job(kind: str, request: ExportRequest | QueryRequest, feature_code: str) -> dict[str, Any]:
+def _new_job(kind: str, request: ExportRequest | QueryRequest, feature_code: str, viewer: AdminUser | User) -> dict[str, Any]:
     job_id = str(uuid.uuid4())
     job = {
         "id": job_id,
@@ -164,11 +161,15 @@ def _new_job(kind: str, request: ExportRequest | QueryRequest, feature_code: str
         "status": "queued",
         "mode": "server",
         "featureCode": feature_code,
+        "owner": chat_session_owner_key(viewer),
         "createdAt": format_rfc3339(utc_now()),
         "request": request.model_dump(exclude_none=True),
     }
-    _jobs[job_id] = job
-    return job
+    with _jobs_lock:
+        if len(_jobs) >= _MAX_JOBS:
+            raise HTTPException(status_code=503, detail="Geospatial job capacity reached")
+        _jobs[job_id] = job
+    return _public_job(job)
 
 
 @router.get("/datasets")
@@ -217,6 +218,10 @@ def register_cloud_dataset(reference: DatasetReference, _admin: object = Depends
         raise HTTPException(
             status_code=400, detail="Private dataset URLs must be issued by the access endpoint"
         )
+    if reference.id in _catalog:
+        raise HTTPException(status_code=409, detail="Dataset already registered")
+    if len(_catalog) >= 2000:
+        raise HTTPException(status_code=503, detail="Dataset catalog capacity reached")
     _catalog[reference.id] = data
     return data
 
@@ -252,7 +257,7 @@ def export_cog(
     if dataset is None:
         raise HTTPException(status_code=404, detail="Dataset not found")
     feature_code = _ensure_dataset_feature_access(viewer, dataset.get("module"), db)
-    return _new_job("cog", request, feature_code)
+    return _new_job("cog", request, feature_code, viewer)
 
 
 @router.post("/export/geoparquet", status_code=status.HTTP_202_ACCEPTED)
@@ -265,7 +270,7 @@ def export_geoparquet(
     if dataset is None:
         raise HTTPException(status_code=404, detail="Dataset not found")
     feature_code = _ensure_dataset_feature_access(viewer, dataset.get("module"), db)
-    return _new_job("geoparquet", request, feature_code)
+    return _new_job("geoparquet", request, feature_code, viewer)
 
 
 @router.post("/query", status_code=status.HTTP_202_ACCEPTED)
@@ -274,14 +279,11 @@ def geospatial_query(
     viewer: AdminUser | User = Depends(get_current_app_viewer),
     db: Session = Depends(get_db),
 ):
-    dataset = _catalog.get(request.datasetId)
-    if dataset is None:
-        raise HTTPException(status_code=404, detail="Dataset not found")
-    feature_code = _ensure_dataset_feature_access(viewer, dataset.get("module"), db)
-    safe_sql = _safe_sql(request.sql, request.limit)
-    job = _new_job("query", request, feature_code)
-    job["request"]["sql"] = safe_sql
-    return job
+    # There is no server SQL executor wired to this contract. Never accept a
+    # misleading queued job or pass user SQL to the application DB. Browser
+    # DuckDB remains available; enabling a server executor requires a separate
+    # read-only role, structural validation and a real durable worker.
+    raise HTTPException(status_code=501, detail="Server Spatial SQL is unavailable; use browser processing")
 
 
 @router.get("/jobs/{job_id}")
@@ -291,10 +293,10 @@ def get_geospatial_job(
     db: Session = Depends(get_db),
 ):
     job = _jobs.get(job_id)
-    if job is None:
+    if job is None or job.get("owner") != chat_session_owner_key(viewer):
         raise HTTPException(status_code=404, detail="Job not found")
     ensure_feature_access(viewer, job.get("featureCode"), db)
-    return job
+    return _public_job(job)
 
 
 @router.post("/jobs/{job_id}/cancel")
@@ -303,9 +305,12 @@ def cancel_geospatial_job(
     viewer: AdminUser | User = Depends(get_current_app_viewer),
     db: Session = Depends(get_db),
 ):
-    job = _jobs.get(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="Job not found")
-    ensure_feature_access(viewer, job.get("featureCode"), db)
-    job["status"] = "cancelled"
-    return job
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if job is None or job.get("owner") != chat_session_owner_key(viewer):
+            raise HTTPException(status_code=404, detail="Job not found")
+        ensure_feature_access(viewer, job.get("featureCode"), db)
+        if job.get("status") not in {"queued", "running"}:
+            raise HTTPException(status_code=409, detail="Job is no longer cancellable")
+        job["status"] = "cancelled"
+        return _public_job(job)

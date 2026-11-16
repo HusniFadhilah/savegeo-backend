@@ -980,25 +980,8 @@ def get_run(run_id: str, db: Session = Depends(get_db)):
 def activate_model(
     model_id: int, admin=Depends(require_permission("calibration.write")), db: Session = Depends(get_db)
 ):
-    model = db.get(CarbonCalibrationModel, model_id)
-    if not model:
-        raise HTTPException(status_code=404, detail="Calibration model not found")
-    if model.status not in {"approved_local", "active_local"}:
-        raise HTTPException(status_code=409, detail="Model must be approved before activation")
-    db.query(CarbonCalibrationModel).filter(CarbonCalibrationModel.dataset_pk == model.dataset_pk, CarbonCalibrationModel.target_pool == model.target_pool).update(
-        {CarbonCalibrationModel.is_active: False}
-    )
-    model.is_active, model.status = True, "active_local"
-    db.commit()
-    audit_service.log_audit(
-        db,
-        admin.id,
-        "calibration.model.activate",
-        "carbon_calibration_model",
-        str(model.id),
-        {"scope": model.metadata_json, "target_pool": model.target_pool},
-    )
-    return model.to_dict()
+    from app.services.calibration_review import activate
+    return activate(db, model_id, admin.id).to_dict()
 
 
 @router.post("/runs/{run_id}/approve", dependencies=[Depends(require_permission("calibration.write"))])
@@ -1009,23 +992,10 @@ def approve_run(
     if not run:
         raise HTTPException(status_code=404, detail="Calibration run not found")
     model = db.query(CarbonCalibrationModel).filter_by(run_id=run_id).first()
-    if not model or run.status != "complete":
+    if not model:
         raise HTTPException(status_code=409, detail="A completed run with a calibration artifact is required")
-    model.status = "approved_local"
-    model.metadata_json = {
-        **(model.metadata_json or {}),
-        "approved_at": datetime.now(UTC).isoformat(),
-        "approved_by": admin.username,
-    }
-    db.commit()
-    audit_service.log_audit(
-        db,
-        admin.id,
-        "calibration.model.approve",
-        "carbon_calibration_model",
-        str(model.id),
-        {"run_id": run_id},
-    )
+    from app.services.calibration_review import approve
+    model = approve(db, model.id, admin.id)
     return {"run": run.to_dict(), "model": model.to_dict()}
 
 
@@ -1033,49 +1003,9 @@ def approve_run(
 def promote_model(
     model_id: int, admin=Depends(require_permission("calibration.write")), db: Session = Depends(get_db)
 ):
-    """Promote a validated artifact to approved-local; activation stays explicit."""
-    model = db.get(CarbonCalibrationModel, model_id)
-    if not model:
-        raise HTTPException(status_code=404, detail="Calibration model not found")
-    run = db.get(CarbonCalibrationRun, model.run_id) if model.run_id else None
-    if model.status not in {"experimental", "approved_local"} or not run or run.status != "complete":
-        raise HTTPException(status_code=409, detail="A completed validation run is required before promotion")
-    metrics = run.metrics or {}
-    report = db.get(CarbonCalibrationDataset, model.dataset_pk).validation_report or {}
-    blockers = []
-    if metrics.get("status") != "computed":
-        blockers.append("validation_metrics_not_computed")
-    if int(metrics.get("sample_count", metrics.get("n_plots", 0))) < 3:
-        blockers.append("minimum_plot_count_not_met")
-    if report.get("spatial", {}).get("blocking"):
-        blockers.append("spatial_validation_blocked")
-    for audit in report.get("workbook_audits", []):
-        if (
-            audit.get("audit", {}).get("tree_review_count", 0)
-            and model.target_pool == "aboveground_biomass_carbon"
-        ):
-            blockers.append("unresolved_or_reviewed_label_records")
-    if blockers:
-        raise HTTPException(
-            status_code=409, detail={"code": "promotion_guard", "blockers": sorted(set(blockers))}
-        )
-    model.status = "approved_local"
-    model.metadata_json = {
-        **(model.metadata_json or {}),
-        "promoted_at": datetime.now(UTC).isoformat(),
-        "promoted_by": admin.username,
-        "activation_policy": "explicit local activation only; national default unchanged",
-    }
-    db.commit()
-    audit_service.log_audit(
-        db,
-        admin.id,
-        "calibration.model.promote",
-        "carbon_calibration_model",
-        str(model.id),
-        {"scope": model.metadata_json, "target_pool": model.target_pool},
-    )
-    return model.to_dict()
+    """Compatibility alias with the exact same approval guard as /approve."""
+    from app.services.calibration_review import approve
+    return approve(db, model_id, admin.id).to_dict()
 
 
 @router.post("/models/{model_id}/rollback", dependencies=[Depends(require_permission("calibration.write"))])

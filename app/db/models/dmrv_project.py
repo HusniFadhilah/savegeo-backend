@@ -15,10 +15,12 @@ def _now() -> dt.datetime:
 
 class DmrvProject(Base):
     __tablename__ = "dmrv_projects"
+    __table_args__ = (UniqueConstraint("id", "organization_id", name="uq_dmrv_project_organization"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     organization: Mapped[str | None] = mapped_column(String(255))
+    organization_id: Mapped[str | None] = mapped_column(ForeignKey("organizations.id", ondelete="RESTRICT"), index=True)
     activity_type: Mapped[str] = mapped_column(String(32), nullable=False, default="ARR")
     jurisdiction: Mapped[str | None] = mapped_column(String(128))
     methodology_id: Mapped[str | None] = mapped_column(String(64))

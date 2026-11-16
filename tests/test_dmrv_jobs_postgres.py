@@ -1,14 +1,17 @@
 """Queue concurrency on a real PostgreSQL (row locks, SKIP LOCKED). Skipped unless DMRV_TEST_DATABASE_URL is set
-to a THROWAWAY database; the tables are dropped afterwards."""
+to an explicitly selected test database; each test uses a unique schema."""
 import os
 import threading
+import uuid
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.schema import CreateSchema, DropSchema
 
 from app.db.models.dmrv_job import DmrvJob
 from app.db.models.dmrv_project import DmrvProject
+from app.db.models.organization import Organization
 from app.services.dmrv import jobs
 
 URL = os.environ.get("DMRV_TEST_DATABASE_URL")
@@ -17,19 +20,21 @@ pytestmark = pytest.mark.skipif(not URL, reason="DMRV_TEST_DATABASE_URL not set"
 
 @pytest.fixture()
 def factory():
-    engine = create_engine(URL)
-    for model in (DmrvJob, DmrvProject):
-        model.__table__.drop(engine, checkfirst=True)
-    for model in (DmrvProject, DmrvJob):
+    root = create_engine(URL)
+    schema = "dmrv_queue_test_" + uuid.uuid4().hex
+    with root.begin() as connection:
+        connection.execute(CreateSchema(schema))
+    engine = root.execution_options(schema_translate_map={None: schema})
+    for model in (Organization, DmrvProject, DmrvJob):
         model.__table__.create(engine)
     maker = sessionmaker(bind=engine, expire_on_commit=False)
     with maker() as session:
         session.add(DmrvProject(id="p-1", name="A"))
         session.commit()
     yield maker
-    for model in (DmrvJob, DmrvProject):
-        model.__table__.drop(engine, checkfirst=True)
-    engine.dispose()
+    with root.begin() as connection:
+        connection.execute(DropSchema(schema, cascade=True))
+    root.dispose()
 
 
 def test_concurrent_workers_claim_every_job_exactly_once(factory):

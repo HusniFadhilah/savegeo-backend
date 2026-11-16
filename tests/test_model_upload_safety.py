@@ -31,13 +31,23 @@ def test_model_lookup_cannot_escape_model_directory(tmp_path, monkeypatch, name)
 def test_model_lookup_accepts_only_files_under_model_root(tmp_path, monkeypatch):
     root = tmp_path / "models"
     root.mkdir()
-    model = root / "valid.pkl"
+    model = root / "valid.onnx"
     model.write_bytes(b"trusted")
     monkeypatch.setattr(uploaded_model_repo, "get_settings", lambda: SimpleNamespace(model_path=root))
-    query = SimpleNamespace(first=lambda: None)
+    query = SimpleNamespace(first=lambda: SimpleNamespace(filepath=str(model), filename=model.name))
     query.filter_by = lambda **_kwargs: query
     db = SimpleNamespace(query=lambda _model: query)
     assert uploaded_model_repo.get_active_model_path(db, "carbon", "valid") == str(model.resolve())
+
+
+def test_unregistered_onnx_cannot_bypass_activation(tmp_path, monkeypatch):
+    model = tmp_path / 'unreviewed.onnx'
+    model.write_bytes(b'not-activated')
+    monkeypatch.setattr(uploaded_model_repo, 'get_settings', lambda: SimpleNamespace(model_path=tmp_path))
+    query = SimpleNamespace(first=lambda: None)
+    query.filter_by = lambda **_kwargs: query
+    db = SimpleNamespace(query=lambda _model: query)
+    assert uploaded_model_repo.get_active_model_path(db, 'carbon', 'unreviewed') is None
 
 
 def test_registered_model_outside_root_cannot_be_loaded(tmp_path, monkeypatch):

@@ -1,4 +1,5 @@
 import os
+import uuid
 
 import pytest
 from fastapi import Depends, FastAPI, Request
@@ -8,6 +9,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
+from sqlalchemy.schema import CreateSchema, DropSchema
 
 from app.api.routes import dmrv as dmrv_routes
 from app.core.security import get_current_app_viewer
@@ -21,6 +23,7 @@ from app.db.models.dmrv_evidence import DmrvEvidencePackage
 from app.db.models.dmrv_submission import DmrvSubmission, DmrvReviewFinding
 from app.db.models.dmrv_monitoring import DmrvMonitoringPeriod
 from app.db.models.dmrv_project import DmrvProject, ProjectMember
+from app.db.models.organization import Organization, OrganizationMember
 from app.db.models.role import Permission, Role, role_permissions
 from app.db.models.user import User
 from app.db.session import get_db
@@ -34,6 +37,7 @@ def _jsonb_sqlite(type_, compiler, **kwargs):
 
 TABLES = [
     User.__table__, AdminUser.__table__, Role.__table__, Permission.__table__, role_permissions,
+    Organization.__table__, OrganizationMember.__table__,
     DmrvProject.__table__, ProjectMember.__table__, BoundaryVersion.__table__,
     DmrvJob.__table__, DmrvSnapshot.__table__, DmrvEvidencePackage.__table__,
     DmrvSubmission.__table__, DmrvReviewFinding.__table__,
@@ -57,9 +61,14 @@ def env():
     # Set DMRV_TEST_DATABASE_URL to a THROWAWAY PostgreSQL database to run these
     # tests on PostgreSQL; the tables are dropped afterwards. Default: SQLite.
     url = os.environ.get("DMRV_TEST_DATABASE_URL")
+    root_engine = None
+    schema = None
     if url:
-        engine = create_engine(url)
-        Base.metadata.drop_all(engine, tables=TABLES)
+        root_engine = create_engine(url)
+        schema = "dmrv_api_test_" + uuid.uuid4().hex
+        with root_engine.begin() as connection:
+            connection.execute(CreateSchema(schema))
+        engine = create_engine(url, connect_args={"options": f"-csearch_path={schema}"})
     else:
         engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     Base.metadata.create_all(engine, tables=TABLES)
@@ -90,8 +99,11 @@ def env():
     app.dependency_overrides[get_current_app_viewer] = test_viewer
     client = TestClient(app, raise_server_exceptions=False)
     yield client, factory
-    if url:
-        Base.metadata.drop_all(engine, tables=TABLES)
+    if root_engine is not None:
+        engine.dispose()
+        with root_engine.begin() as connection:
+            connection.execute(DropSchema(schema, cascade=True))
+        root_engine.dispose()
     engine.dispose()
 
 

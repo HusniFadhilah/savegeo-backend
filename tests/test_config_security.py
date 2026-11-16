@@ -8,6 +8,33 @@ from app.core.config import Settings
 TEST_SECRET = secrets.token_urlsafe(64)
 
 
+@pytest.fixture(autouse=True)
+def safe_production_environment(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://savegeo_app:isolated-test@db.example.test/savegeo")
+    monkeypatch.setenv("ALLOWED_ORIGINS", "https://savegeo.example.test")
+    monkeypatch.setenv("DEBUG", "false")
+
+
+@pytest.mark.parametrize("environment", ["prod", "release", "production", "staging"])
+def test_all_hosted_environments_require_stable_secrets(environment):
+    with pytest.raises(ValueError, match="JWT_SECRET_KEY"):
+        Settings(_env_file=None, app_env=environment, jwt_secret_key="short")
+    settings = Settings(_env_file=None, app_env=environment, jwt_secret_key=TEST_SECRET)
+    assert settings.session_cookie_secure
+    assert settings.app_env in {"staging", "production"}
+
+
+@pytest.mark.parametrize("overrides", [{"debug": True}, {"database_url": "postgresql://postgres:postgres@localhost/postgres"}, {"allowed_origins": "http://localhost:3000"}])
+def test_hosted_environments_reject_development_defaults(overrides):
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, app_env="release", jwt_secret_key=TEST_SECRET, **overrides)
+
+
+def test_unknown_environment_cannot_silently_disable_protection():
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, app_env="productoin")
+
+
 def test_production_requires_stable_jwt_secret():
     with pytest.raises(ValueError, match="JWT_SECRET_KEY"):
         Settings(app_env="production", jwt_secret_key="")
