@@ -7,6 +7,7 @@ Run before deploying the production Compose file with separate migration role.
 from __future__ import annotations
 
 import argparse
+import base64
 import datetime as dt
 import json
 import os
@@ -87,9 +88,22 @@ def prepare(directory: Path, container: str) -> None:
     if not proxy_cidrs:
         raise RuntimeError('Could not verify the deployment bridge gateway; environment unchanged')
     updates = {'RUNTIME_DATABASE_URL': url, 'ALLOWED_ORIGINS': 'https://savegeo.len.co.id', 'TRUSTED_PROXY_CIDRS': proxy_cidrs}
+    # Provision once on the deployment host; runtime never generates a key.
+    keyring = values.get('SECRET_ENCRYPTION_KEYS', '')
+    active_key = values.get('SECRET_ENCRYPTION_ACTIVE_KEY_ID', '')
+    if bool(keyring) != bool(active_key):
+        raise RuntimeError('Incomplete existing encryption configuration; environment unchanged')
+    if keyring:
+        parsed_keys = json.loads(keyring)
+        if active_key not in parsed_keys or any(len(base64.b64decode(value, validate=True)) != 32 for value in parsed_keys.values()):
+            raise RuntimeError('Invalid existing encryption configuration; environment unchanged')
+    else:
+        active_key = 'local-'+dt.datetime.now(dt.UTC).strftime('%Y%m%d')
+        keyring = json.dumps({active_key: base64.b64encode(secrets.token_bytes(32)).decode()}, separators=(',', ':'))
+    updates.update(SECRET_ENCRYPTION_KEYS=keyring, SECRET_ENCRYPTION_ACTIVE_KEY_ID=active_key)
     lines = [line for line in original.splitlines() if line.split('=',1)[0].strip() not in updates]
     replacement = '\n'.join(lines+[key+'='+value for key,value in updates.items()])+'\n'
-    backup = directory / ('.env.before-static-remediation-'+dt.datetime.now(dt.UTC).strftime('%Y%m%dT%H%M%SZ'))
+    backup = directory / ('.env.before-static-remediation-'+dt.datetime.now(dt.UTC).strftime('%Y%m%dT%H%M%S%fZ'))
     backup.write_text(original, encoding='utf8')
     os.chmod(backup, 0o600)
     temporary = directory / '.env.audit-tmp'
