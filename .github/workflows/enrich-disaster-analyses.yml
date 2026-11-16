@@ -131,8 +131,18 @@ jobs:
               "$DEPLOY_USER@$DEPLOY_HOST:$BACKEND_REMOTE_DIR/var/$report.json" "operation-report/$report.json" || true
           done
 
-      - name: Upload reports
+      - name: Record available reports in job summary
         if: always()
+        run: |
+          for report in operation-report/*.json; do
+            [ -s "$report" ] || continue
+            printf '### %s\n\n```json\n' "$(basename "$report")" >> "$GITHUB_STEP_SUMMARY"
+            cat "$report" >> "$GITHUB_STEP_SUMMARY"
+            printf '\n```\n' >> "$GITHUB_STEP_SUMMARY"
+          done
+
+      - name: Upload reports
+        if: always() && vars.SAVEGEO_UPLOAD_ARTIFACTS == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: disaster-analysis-${{ github.run_id }}

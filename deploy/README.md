@@ -72,12 +72,15 @@ authorized maintenance window:
 - frontend workflow builds with `VITE_API_BASE_URL=/api`, syncs only `dist/`,
   and performs an HTTP smoke test.
 
-Backend build metadata is always preserved in GitHub job summaries. Artifact
-uploads are an additional copy with seven-day retention. If GitHub artifact
-storage is unavailable, the deployment job recreates metadata from the exact
-validated checkout and GitHub run context; the SHA/environment/workflow checks
-remain mandatory. A final deployment-record upload failure is reported as a
-warning after the container, Ollama, health, and revision checks have passed.
+Backend build metadata and deployment records are preserved in GitHub job
+summaries, with deployment metadata also retained on the server. Artifact
+uploads are optional because GitHub storage has a separate quota. Set the
+repository variable `SAVEGEO_UPLOAD_ARTIFACTS` to `true` only when storage is
+available to retain an additional seven-day copy. Otherwise the deployment
+job recreates metadata from the validated checkout and rebuilds the frontend
+from the locked dependencies; SHA, environment and workflow checks still run.
+Wildfire and disaster operation reports are also retained on the server and in
+their job summaries.
 
 ## Operations
 

@@ -87,6 +87,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Upload production build metadata
         id: metadata_artifact
+        if: vars.SAVEGEO_UPLOAD_ARTIFACTS == 'true'
         continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -130,10 +131,10 @@ jobs:
           name: savegeo-backend-production-build-metadata
           path: build-metadata-artifact
 
-      - name: Recreate metadata from validated source when artifact storage is unavailable
-        if: needs.validate.outputs.metadata_artifact_outcome == 'failure'
+      - name: Recreate metadata from validated source when no artifact is available
+        if: needs.validate.outputs.metadata_artifact_outcome != 'success'
         run: |
-          echo '::warning::Metadata artifact upload failed; recreating provenance from this validated commit and workflow context.'
+          echo 'Creating build metadata from the validated commit and workflow context.'
           python3 scripts/write_build_metadata.py --output build-metadata-artifact/build-metadata.json
 
       - name: Load product version and build time from metadata
@@ -321,6 +322,7 @@ jobs:
 
       - name: Upload production deployment record
         id: deployment_record_artifact
+        if: vars.SAVEGEO_UPLOAD_ARTIFACTS == 'true'
         continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
