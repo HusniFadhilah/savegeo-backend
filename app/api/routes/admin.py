@@ -7,7 +7,11 @@ intentionally left out of this pass - see migration summary.
 from __future__ import annotations
 
 import json
+import csv
+import hashlib
+import io
 import logging
+import math
 import os
 import re
 import tempfile
@@ -21,6 +25,7 @@ from urllib.parse import urlparse
 import requests
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.concurrency import run_in_threadpool
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -43,14 +48,16 @@ from app.core.security import (
     verify_password,
     ensure_current_session,
     revoke_account_sessions,
+    require_recent_mfa,
 )
 from app.db.models.admin_user import AdminUser
+from app.db.models.audit_log import AuditLog
 from app.db.models.company_boundary import CompanyBoundary
 from app.db.models.gee_credential import GEECredential
 from app.db.models.role import Permission, Role
 from app.db.models.satellite_provider_entry import SatelliteProviderEntry
 from app.db.models.system_config import SystemConfig
-from app.db.models.uploaded_model import UploadedModel
+from app.db.models.uploaded_model import UploadedModel, UploadedModelEvaluation
 from app.db.session import SessionLocal, get_db
 from app.registries.satellite_provider_registry import SATELLITE_PROVIDERS
 from app.repositories.satellite_provider_repo import apply_override, get_overrides_by_key
@@ -64,11 +71,13 @@ from app.schemas.admin import (
     ChangePasswordRequest,
     LoginRequest,
     ModelUpdateRequest,
+    ModelReviewRequest,
     PasswordForgotRequest,
     PasswordResetRequest,
     SatelliteProviderUpdateRequest,
 )
-from app.services import audit_service, config_service, gee_service, storage_service
+from app.services import audit_service, config_service, gee_service, storage_service, model_lifecycle
+from app.services import model_evaluation_storage
 from app.services.imagery_provider_config import admin_connection_view, effective_settings, save_connection
 from app.services.commercial_imagery_service import COMMERCIAL_PROVIDER_KEYS
 from app.core.viewer_features import (
@@ -421,7 +430,7 @@ def gee_reinitialize(request: Request, admin: AdminUser = Depends(require_permis
 # -- ArcGIS --
 @router.get("/arcgis/status")
 def arcgis_status(admin: AdminUser = Depends(require_permission("credential.read")), db: Session = Depends(get_db)):
-    return configure_arcgis_from_db(db).get_status()
+    return configure_arcgis_from_db(db, force=True).get_status()
 
 
 @router.put("/arcgis/config")
@@ -474,7 +483,7 @@ async def update_arcgis_config(
     for key, value in updates:
         config_service.upsert_setting(db, key, value, updated_by=admin.id)
 
-    client = configure_arcgis_from_db(db)
+    client = configure_arcgis_from_db(db, force=True)
     audit_service.log_audit(db, admin.id, "arcgis.config.update", "arcgis_config", detail={"updated_keys": [key for key, _ in updates]})
     return {"message": "ArcGIS settings saved", "status": client.get_status()}
 
@@ -548,7 +557,7 @@ async def config_update(request: Request, admin: AdminUser = Depends(require_per
     if updated:
         audit_service.log_audit(db, admin.id, "config.update", "system_config", detail={"updated_keys": updated})
         if any(key.startswith("arcgis.") for key in updated):
-            configure_arcgis_from_db(db)
+            configure_arcgis_from_db(db, force=True)
     return {"message": "Config updated", "updated": updated, "errors": errors, "warnings": warnings}
 
 
@@ -564,11 +573,102 @@ def config_reset(
         raise HTTPException(status_code=403, detail="Secret configuration is restricted to full-access administrators")
     count = config_service.reset_setting(db, key, include_secrets=can_write_secrets)
     if key is None or key.startswith("arcgis."):
-        configure_arcgis_from_db(db)
+        configure_arcgis_from_db(db, force=True)
     return {"message": f"Reset {count} config value(s) to defaults"}
 
 
 # -- Model manager --
+def _compute_uploaded_model_evaluation(
+    raw: bytes,
+    model_path: Path,
+    feature_names: list[str],
+    target_column: str,
+    group_column: str,
+    training_groups: set[str],
+    model_type: str,
+) -> tuple[str, dict, dict]:
+    try:
+        text_data = raw.decode("utf-8-sig")
+        reader = csv.DictReader(io.StringIO(text_data, newline=""))
+        headers = reader.fieldnames or []
+    except (UnicodeDecodeError, csv.Error) as exc:
+        raise HTTPException(400, "Evaluation file must be a valid UTF-8 CSV") from exc
+    required = set(feature_names) | {target_column, group_column}
+    if len(headers) != len(set(headers)) or set(headers) != required:
+        raise HTTPException(422, detail={"code": "evaluation_schema_mismatch", "expected_columns": sorted(required)})
+    if target_column in feature_names or group_column in feature_names or target_column == group_column:
+        raise HTTPException(422, "Feature, target and independent-group columns must be distinct")
+
+    rows: list[list[float]] = []
+    targets: list[float] = []
+    groups: set[str] = set()
+    try:
+        for row in reader:
+            if (len(rows) + 1) * len(feature_names) > 1_000_000:
+                raise HTTPException(413, "Evaluation matrix may contain at most 1,000,000 feature values")
+            values = [float(row[name]) for name in feature_names]
+            target = float(row[target_column])
+            group = str(row[group_column] or "").strip()
+            if not group or not all(math.isfinite(value) for value in [*values, target]):
+                raise ValueError("empty group or non-finite numeric value")
+            rows.append(values)
+            targets.append(target)
+            groups.add(group)
+    except (TypeError, ValueError, KeyError, csv.Error) as exc:
+        raise HTTPException(422, "Evaluation CSV contains missing or non-numeric values") from exc
+    if len(rows) < 10 or len(groups) < 5:
+        raise HTTPException(422, detail={"code": "insufficient_independent_samples", "minimum_rows": 10, "minimum_groups": 5})
+    if len(training_groups) < 5:
+        raise HTTPException(422, detail={"code": "insufficient_training_groups", "minimum_training_groups": 5})
+    if len(groups & training_groups) > 0:
+        raise HTTPException(422, detail={"code": "evaluation_leakage", "message": "Evaluation group IDs overlap the declared training groups"})
+
+    raw_model = model_path.read_bytes()
+    from app.inference.safe_model import OnnxRegressor
+    import numpy as np
+
+    model = OnnxRegressor(raw_model, {})
+    observed = np.asarray(targets, dtype=float)
+    predicted = model.predict(np.asarray(rows, dtype=float))
+    if model_type == "landcover":
+        classes = sorted(set(observed.tolist()))
+        predicted_classes = np.rint(predicted)
+        if not np.allclose(predicted, predicted_classes, atol=1e-5) or not set(predicted_classes.tolist()).issubset(set(classes)):
+            raise ValueError("Land-cover ONNX output must be encoded class labels present in the evaluation data")
+        recalls = []
+        matrix = []
+        for actual_class in classes:
+            row_counts = [int(np.sum((observed == actual_class) & (predicted_classes == predicted_class))) for predicted_class in classes]
+            matrix.append(row_counts)
+            total = int(np.sum(observed == actual_class))
+            recalls.append(row_counts[classes.index(actual_class)] / total if total else 0.0)
+        metrics = {"metric_type": "classification", "sample_count": len(rows),
+            "independent_group_count": len(groups), "class_labels": classes,
+            "accuracy": float(np.mean(predicted_classes == observed)),
+            "balanced_accuracy": float(np.mean(recalls)), "confusion_matrix": matrix,
+            "status": "computed"}
+    else:
+        residual = predicted - observed
+        mse = float(np.mean(residual ** 2))
+        denominator = float(np.sum((observed - np.mean(observed)) ** 2))
+        metrics = {"metric_type": "regression", "sample_count": len(rows),
+            "independent_group_count": len(groups), "rmse": float(np.sqrt(mse)),
+            "mae": float(np.mean(np.abs(residual))),
+            "bias_prediction_minus_observed": float(np.mean(residual)),
+            "r2": float(1 - np.sum(residual ** 2) / denominator) if denominator > 0 else None,
+            "status": "computed"}
+    return hashlib.sha256(raw_model).hexdigest(), metrics, {
+        "feature_names": feature_names,
+        "target_column": target_column,
+        "group_column": group_column,
+        "group_count": len(groups),
+        "evaluation_group_ids_sha256": hashlib.sha256("\n".join(sorted(groups)).encode()).hexdigest(),
+        "declared_training_group_count": len(training_groups),
+        "declared_training_group_ids_sha256": hashlib.sha256("\n".join(sorted(training_groups)).encode()).hexdigest(),
+        "provenance_status": "declared_by_evaluator_not_independently_verified",
+    }
+
+
 @router.get("/models")
 def admin_models_list(
     request: Request,
@@ -601,14 +701,15 @@ async def upload_model(
     algorithm: str | None = Form(None),
     description: str | None = Form(None),
     version: str | None = Form(None),
-    metrics: str | None = Form(None),
     feature_names: str | None = Form(None),
-    metadata_json: str | None = Form(None),
     set_default: bool = Form(False),
     admin: AdminUser = Depends(require_permission("model.write")),
     db: Session = Depends(get_db),
 ):
     _ensure_model_execution_permission(admin)
+    name, display_name = name.strip(), display_name.strip()
+    if not name or not display_name or len(name) > 255 or len(display_name) > 255 or not re.fullmatch(r"[A-Za-z0-9._-]+", name):
+        raise HTTPException(status_code=422, detail="Model slug and display name are required; slug may use letters, numbers, dot, underscore and hyphen")
     if model_type not in ("carbon", "vegetation", "landcover"):
         raise HTTPException(status_code=400, detail="model_type must be carbon, vegetation, or landcover")
 
@@ -640,12 +741,14 @@ async def upload_model(
         except json.JSONDecodeError:
             return default
 
-    model_metadata = _parse_json(metadata_json, {})
     names = _parse_json(feature_names, [])
-    if not isinstance(model_metadata, dict) or not isinstance(names, list) or len(names) > 512 or not all(isinstance(n, str) and 0 < len(n) <= 100 for n in names):
-        raise HTTPException(status_code=400, detail="Invalid model metadata or feature names")
+    if not isinstance(names, list) or len(names) > 512 or not all(isinstance(n, str) and 0 < len(n) <= 100 for n in names):
+        raise HTTPException(status_code=400, detail="Invalid model feature names")
     import hashlib
-    model_metadata = {**model_metadata, "algorithm": algorithm or "linear", "feature_names": names, "format": "onnx", "artifact_sha256": hashlib.sha256(raw).hexdigest()}
+    model_algorithm = algorithm or "linear"
+    model_metadata = {"algorithm": model_algorithm, "feature_names": names,
+                      "format": "onnx", "artifact_sha256": hashlib.sha256(raw).hexdigest(),
+                      "provenance_status": "artifact_uploaded_by_admin_unverified"}
     if set_default:
         raise HTTPException(status_code=400, detail="Review and activate the uploaded model before setting a default")
     await run_in_threadpool(dest.write_bytes, raw)
@@ -655,16 +758,17 @@ async def upload_model(
         name=name,
         display_name=display_name,
         model_type=model_type,
-        algorithm=algorithm,
+        algorithm=model_algorithm,
         filename=dest.name,
         filepath=str(dest.resolve()),
         file_size_kb=round(len(raw) / 1024, 2),
-        is_default=set_default,
+        is_default=False,
         is_active=False,
+        lifecycle_state="experimental",
         is_legacy=False,
         description=description,
         version=version,
-        metrics=_parse_json(metrics, {}),
+        metrics=None,
         feature_names=_parse_json(feature_names, []),
         metadata_json=model_metadata,
         artifact_sha256=model_metadata["artifact_sha256"],
@@ -675,6 +779,153 @@ async def upload_model(
     db.refresh(model)
     audit_service.log_audit(db, admin.id, "model.create", "uploaded_model", model.id, detail={"name": name, "model_type": model_type})
     return {"message": "Model uploaded", "model": model.to_dict(include_path=True)}
+
+
+@router.post("/models/{model_id}/evaluations", status_code=201)
+async def admin_model_evaluate(
+    model_id: int,
+    file: UploadFile = File(...),
+    dataset_name: str = Form(..., min_length=1, max_length=255),
+    target_column: str = Form(..., min_length=1, max_length=128),
+    target_unit: str = Form(..., min_length=1, max_length=64),
+    training_groups_json: str = Form(..., min_length=2, max_length=1_000_000),
+    group_column: str = Form("group_id", min_length=1, max_length=128),
+    split_method: str = Form(...),
+    dataset_source: str | None = Form(None, max_length=1000),
+    admin: AdminUser = Depends(require_permission("model.write")),
+    db: Session = Depends(get_db),
+):
+    model = db.execute(select(UploadedModel).where(UploadedModel.id == model_id).with_for_update()
+                       .execution_options(populate_existing=True)).scalar_one_or_none()
+    if model is None:
+        raise HTTPException(404, "Model not found")
+    if (model.metadata_json or {}).get("format") != "onnx":
+        raise HTTPException(409, "This model uses an internal evaluation pipeline and cannot be evaluated with the uploaded ONNX CSV endpoint")
+    if model.lifecycle_state not in {"experimental", "evaluated"}:
+        raise HTTPException(409, "This model version is no longer editable or evaluable")
+    if split_method not in {"grouped_holdout", "spatial_holdout", "temporal_holdout", "independent_dataset"}:
+        raise HTTPException(422, "Unsupported evaluation split method")
+    feature_names = model.feature_names or []
+    if not feature_names or len(feature_names) > 512 or len(set(feature_names)) != len(feature_names):
+        raise HTTPException(409, "A unique feature_names schema is required before evaluation")
+    try:
+        training_groups_value = json.loads(training_groups_json)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(422, "training_groups_json must be a JSON array of group IDs") from exc
+    if not isinstance(training_groups_value, list) or not training_groups_value or len(training_groups_value) > 100_000:
+        raise HTTPException(422, "At least one and at most 100,000 training group IDs are required")
+    training_groups = {str(value).strip() for value in training_groups_value if str(value).strip()}
+    if len(training_groups) != len(training_groups_value):
+        raise HTTPException(422, "Training group IDs must be unique and non-empty")
+    filename = (file.filename or "").lower()
+    if not filename.endswith(".csv"):
+        raise HTTPException(400, "Evaluation data must be uploaded as CSV")
+    raw = await file.read(32 * 1024 * 1024 + 1)
+    if not raw or len(raw) > 32 * 1024 * 1024:
+        raise HTTPException(413, "Evaluation CSV must be between 1 byte and 32 MiB")
+    from app.services.model_lifecycle import artifact_path
+    exact_path = artifact_path(model)
+    from app.inference.safe_model import validate_onnx
+    try:
+        await run_in_threadpool(validate_onnx, exact_path.read_bytes())
+        dataset_sha, metrics_out, manifest = await run_in_threadpool(
+            _compute_uploaded_model_evaluation, raw, exact_path, feature_names, target_column,
+            group_column, training_groups, model.model_type,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - return a bounded inference/evaluation error
+        raise HTTPException(422, "The ONNX model could not evaluate this dataset schema") from exc
+    if dataset_sha != model.artifact_sha256:
+        raise HTTPException(409, "Model artifact changed during evaluation")
+    manifest.update({"split_method": split_method, "target_unit": target_unit.strip(),
+                     "target_unit_status": "declared_by_evaluator_not_independently_verified"})
+    if dataset_source:
+        manifest["dataset_source"] = dataset_source.strip()
+    evaluation = UploadedModelEvaluation(
+        model_id=model.id,
+        artifact_sha256=model.artifact_sha256,
+        dataset_name=dataset_name.strip(),
+        dataset_sha256=hashlib.sha256(raw).hexdigest(),
+        dataset_source=dataset_source.strip() if dataset_source else None,
+        manifest=manifest,
+        metrics=metrics_out,
+        evaluated_by=admin.id,
+    )
+    db.add(evaluation)
+    db.flush()
+    try:
+        evaluation.dataset_storage_path = model_evaluation_storage.store(
+            evaluation.id, evaluation.dataset_sha256, raw
+        )
+    except Exception as exc:  # noqa: BLE001 - do not accept a review dataset unless encrypted retention works
+        db.rollback()
+        raise HTTPException(503, "Encrypted storage for evaluation data is not configured") from exc
+    model.lifecycle_state = "evaluated"
+    model.approved_by = model.approved_at = model.approval_digest = None
+    db.add(AuditLog(admin_user_id=admin.id, action="model.evaluate", resource_type="uploaded_model",
+        resource_id=str(model.id), detail={"artifact_sha256": model.artifact_sha256,
+            "dataset_sha256": hashlib.sha256(raw).hexdigest(), "metrics": metrics_out,
+            "provenance_status": manifest["provenance_status"]}))
+    db.commit()
+    db.refresh(evaluation)
+    return {"evaluation_id": evaluation.id, "artifact_sha256": evaluation.artifact_sha256,
+            "dataset_sha256": evaluation.dataset_sha256, "manifest": evaluation.manifest,
+            "metrics": evaluation.metrics, "dataset_retained_encrypted": True,
+            "evaluated_at": evaluation.created_at.isoformat()}
+
+
+@router.get("/models/{model_id}/lifecycle")
+def admin_model_lifecycle(model_id: int, admin: AdminUser = Depends(require_permission("model.read")), db: Session = Depends(get_db)):
+    model = db.get(UploadedModel, model_id)
+    if model is None:
+        raise HTTPException(404, "Model not found")
+    evaluations = db.query(UploadedModelEvaluation).filter_by(model_id=model.id).order_by(
+        UploadedModelEvaluation.created_at.desc(), UploadedModelEvaluation.id.desc()).limit(20).all()
+    from app.db.models.uploaded_model import UploadedModelReview
+    reviews = db.query(UploadedModelReview).filter_by(model_id=model.id).order_by(
+        UploadedModelReview.created_at.desc(), UploadedModelReview.id.desc()).limit(50).all()
+    return {
+        "model": model.to_dict(),
+        "evaluations": [{"id": item.id, "artifact_sha256": item.artifact_sha256,
+            "dataset_name": item.dataset_name, "dataset_sha256": item.dataset_sha256,
+            "dataset_source": item.dataset_source, "manifest": item.manifest,
+            "metrics": item.metrics, "evaluated_by": item.evaluated_by,
+            "dataset_retained_encrypted": bool(item.dataset_storage_path),
+            "created_at": item.created_at.isoformat()} for item in evaluations],
+        "reviews": [{"id": item.id, "evaluation_id": item.evaluation_id,
+            "artifact_sha256": item.artifact_sha256, "decision": item.decision,
+            "reason": item.reason, "reviewer_id": item.reviewer_id,
+            "created_at": item.created_at.isoformat()} for item in reviews],
+    }
+
+
+@router.post("/models/{model_id}/request-review")
+def admin_model_request_review(model_id: int, admin: AdminUser = Depends(require_permission("model.write")), db: Session = Depends(get_db)):
+    model = db.get(UploadedModel, model_id)
+    if model is None:
+        raise HTTPException(404, "Model not found")
+    model_lifecycle.request_review(db, model, admin.id)
+    return {"message": "Model submitted for independent review", "lifecycle_state": "review_pending"}
+
+
+@router.post("/models/{model_id}/review")
+def admin_model_review(model_id: int, payload: ModelReviewRequest,
+                       admin: AdminUser = Depends(require_permission("model.approve")), db: Session = Depends(get_db)):
+    model = db.get(UploadedModel, model_id)
+    if model is None:
+        raise HTTPException(404, "Model not found")
+    reviewed = model_lifecycle.review(db, model, admin.id, payload.decision, payload.reason)
+    return {"message": f"Model review recorded: {reviewed.lifecycle_state}", "model": reviewed.to_dict()}
+
+
+@router.post("/models/{model_id}/activate")
+def admin_model_activate(model_id: int, admin: AdminUser = Depends(require_permission("model.approve")), db: Session = Depends(get_db)):
+    model = db.get(UploadedModel, model_id)
+    if model is None:
+        raise HTTPException(404, "Model not found")
+    activated = model_lifecycle.activate(db, model, admin.id)
+    return {"message": "Approved model activated", "model": activated.to_dict()}
 
 
 @router.get("/models/{model_id}")
@@ -695,10 +946,13 @@ def admin_model_update(
     model = db.get(UploadedModel, model_id)
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
-    for field, value in payload.model_dump(exclude_unset=True).items():
-        setattr(model, field, value)
+    changes = payload.model_dump(exclude_unset=True)
+    for field, value in changes.items():
+        setattr(model, field, value.strip() if isinstance(value, str) else value)
     db.commit()
     db.refresh(model)
+    audit_service.log_audit(db, admin.id, "model.metadata.update", "uploaded_model", model.id,
+                            detail={"fields": sorted(changes)})
     return {"message": "Model updated", "model": model.to_dict(include_path=True)}
 
 
@@ -707,27 +961,17 @@ def admin_model_delete(model_id: int, admin: AdminUser = Depends(require_permiss
     model = db.get(UploadedModel, model_id)
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
-    if not model.is_legacy:
-        try:
-            Path(model.filepath).unlink(missing_ok=True)
-        except Exception as exc:  # noqa: BLE001 - best-effort cleanup; the DB row is still deleted below regardless
-            logger.warning("Failed to delete model file %s: %s", model.filepath, type(exc).__name__)
-    model_id_val, model_name = model.id, model.name
-    db.delete(model)
-    db.commit()
-    audit_service.log_audit(db, admin.id, "model.delete", "uploaded_model", model_id_val, detail={"name": model_name})
-    return {"message": "Model deleted"}
+    model_lifecycle.archive(db, model, admin.id)
+    return {"message": "Model archived; artifact and review history retained"}
 
 
 @router.post("/models/{model_id}/set-default")
-def admin_model_set_default(model_id: int, admin: AdminUser = Depends(require_permission("model.write")), db: Session = Depends(get_db)):
+def admin_model_set_default(model_id: int, admin: AdminUser = Depends(require_permission("model.approve")), db: Session = Depends(get_db)):
     model = db.get(UploadedModel, model_id)
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
-    db.query(UploadedModel).filter_by(model_type=model.model_type, is_default=True).update({"is_default": False})
-    model.is_default = True
-    db.commit()
-    return {"message": f"{model.name!r} set as default {model.model_type} model"}
+    default_model = model_lifecycle.set_default(db, model, admin.id)
+    return {"message": f"{default_model.name!r} set as default {default_model.model_type} model"}
 
 
 @router.post("/models/import-legacy")
@@ -863,6 +1107,7 @@ def admin_user_create(
         password_hash=hash_password(payload.password),
         is_active=payload.is_active,
         is_superuser=payload.is_superuser,
+        mfa_required=payload.mfa_required,
         role_id=payload.role_id,
     )
     db.add(new_user)
@@ -914,6 +1159,12 @@ def admin_user_update(
         raise HTTPException(status_code=400, detail="Cannot deactivate your own account")
 
     changes = {}
+    if "mfa_required" in payload.model_fields_set and target.mfa_required != payload.mfa_required:
+        require_recent_mfa(admin)
+        target.mfa_required = payload.mfa_required
+        target.session_version = (target.session_version or 0) + 1
+        changes["mfa_required"] = payload.mfa_required
+        changes["sessions"] = "revoked"
     if "full_name" in payload.model_fields_set:
         target.full_name = payload.full_name
         changes["full_name"] = payload.full_name

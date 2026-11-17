@@ -15,6 +15,8 @@ from app.db.models.admin_user import AdminUser
 from app.db.models.audit_log import AuditLog
 from sqlalchemy import select
 from app.services import admin_mfa
+from app.schemas.admin import AdminUserUpdateRequest
+from app.api.routes.admin import admin_user_update
 
 pytest_plugins = ["tests.test_organizations"]
 NOW = dt.datetime(2026, 11, 13, 10, 0, tzinfo=dt.UTC)
@@ -135,6 +137,73 @@ def test_required_policy_rejects_legacy_token_and_step_up_expires(env):
         with pytest.raises(HTTPException) as error:
             security.require_recent_mfa(account)
         assert error.value.detail["code"] == "mfa_step_up_required"
+
+
+def test_per_account_mfa_requirement_and_privileged_production_floor(env):
+    _, factory, _ = env
+    with factory() as db:
+        optional_account = AdminUser(
+            id=3,
+            username="read-only-reviewer",
+            password_hash="x",
+            is_superuser=False,
+            mfa_enabled=False,
+            mfa_required=False,
+        )
+        db.add(optional_account)
+        db.commit()
+        assert not security.requires_admin_mfa(optional_account)
+
+        optional_account.mfa_required = True
+        db.flush()
+        assert security.requires_admin_mfa(optional_account)
+        optional_account.mfa_required = False
+        optional_account.mfa_enabled = True
+        db.flush()
+        assert not security.requires_admin_mfa(optional_account)
+        optional_account.mfa_required = None
+        db.flush()
+        assert security.requires_admin_mfa(optional_account)
+        optional_account.mfa_required = False
+        optional_account.is_superuser = True
+        db.flush()
+        assert security.requires_admin_mfa(optional_account)
+
+
+def test_admin_user_mfa_requirement_update_is_audited(env):
+    _, factory, _ = env
+    with factory() as db:
+        actor = db.get(AdminUser, 1)
+        target = AdminUser(
+            id=3,
+            username="read-only-reviewer",
+            password_hash="x",
+            is_superuser=False,
+            mfa_enabled=False,
+            mfa_required=False,
+        )
+        db.add(target)
+        db.commit()
+        actor._mfa_verified_at = int(dt.datetime.now(dt.UTC).timestamp())
+        stale_target_session = security.create_access_token(target)
+
+        response = admin_user_update(
+            user_id=target.id,
+            payload=AdminUserUpdateRequest(mfa_required=True),
+            admin=actor,
+            db=db,
+        )
+
+        assert response["user"]["mfa_required"] is True
+        assert target.session_version == 1
+        with pytest.raises(HTTPException):
+            security.ensure_current_session(security.decode_access_token(stale_target_session), target)
+        event = db.scalar(select(AuditLog).where(
+            AuditLog.action == "user.update",
+            AuditLog.resource_type == "admin_user",
+            AuditLog.resource_id == "3",
+        ))
+        assert event.detail["mfa_required"] is True
 
 
 def test_concurrent_recovery_code_can_only_be_used_once(env):

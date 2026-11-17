@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from app.schemas.profile import FullNameFields
 
 
@@ -88,14 +88,25 @@ class SatelliteProviderUpdateRequest(BaseModel):
 
 
 class ModelUpdateRequest(BaseModel):
-    display_name: str | None = None
-    algorithm: str | None = None
-    description: str | None = None
-    version: str | None = None
-    is_active: bool | None = None
-    metrics: dict | None = None
-    feature_names: list | None = None
-    metadata_json: dict | None = None
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str | None = Field(default=None, min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=5000)
+
+    @field_validator("display_name")
+    @classmethod
+    def trim_model_display_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("display_name cannot be blank")
+        return value
+
+
+class ModelReviewRequest(BaseModel):
+    decision: str = Field(pattern="^(approved|rejected)$")
+    reason: str = Field(min_length=10, max_length=2000)
 
 
 class AdminUserCreateRequest(BaseModel):
@@ -106,6 +117,7 @@ class AdminUserCreateRequest(BaseModel):
     email: str | None = None
     role_id: int | None = None
     is_active: bool = True
+    mfa_required: bool = False
 
     @field_validator("full_name")
     @classmethod
@@ -120,6 +132,7 @@ class AdminUserUpdateRequest(FullNameFields):
     is_superuser: bool | None = None
     email: str | None = None
     is_active: bool | None = None
+    mfa_required: bool | None = None
     role_id: int | None = None
     # Admin-initiated password reset for another account (distinct from the
     # self-service "old_password + new_password" change-password flow).

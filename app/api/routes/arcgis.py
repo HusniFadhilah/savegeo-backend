@@ -14,12 +14,15 @@ import math
 from app.core.public_http import public_http as requests
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
+from sqlalchemy.orm import Session
 
 from app.core.security import get_current_app_viewer
-from app.providers.arcgis_client import _is_allowed_domain, get_arcgis_client
+from app.db.session import get_db
+from app.providers.arcgis_client import _is_allowed_domain
 from app.registries.carbon_dataset_registry import get_arcgis_carbon_meta, is_arcgis_carbon_dataset
 from app.registries.landcover_dataset_registry import LAND_COVER_DATASET_OPTIONS, LAND_COVER_LEGENDS
 from app.services.arcgis_helpers import _get_clip_poly, _year_ms_range
+from app.services.arcgis_service import configure_arcgis_from_db
 
 # The proxy spends the server-side ArcGIS credential, so it is limited to
 # signed-in application users. Leaflet tile requests are same-origin and carry
@@ -42,6 +45,7 @@ def arcgis_tile_proxy(
     clip_east: float | None = None,
     clip_north: float | None = None,
     clip_key: str | None = None,
+    db: Session = Depends(get_db),
 ):
     """
     Proxy ArcGIS ImageServer as XYZ tiles via exportImage.
@@ -64,7 +68,7 @@ def arcgis_tile_proxy(
     if not service_url or not _is_allowed_domain(service_url):
         raise HTTPException(status_code=403, detail="Service URL not allowed")
 
-    client = get_arcgis_client()
+    client = configure_arcgis_from_db(db)
     if not client.is_enabled():
         raise HTTPException(status_code=503, detail="ArcGIS integration not enabled")
 

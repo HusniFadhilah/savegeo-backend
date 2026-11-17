@@ -1,0 +1,25 @@
+stages:
+  train_grouped_carbon:
+    cmd: >-
+      python -m scripts.train_reproducible_model
+      --dataset ${training.dataset}
+      --target ${training.target}
+      --target-unit ${training.target_unit}
+      --group ${training.group}
+      --features ${training.features}
+      --algorithm ${training.algorithm}
+      --seed ${training.seed}
+      --trees ${training.trees}
+      --max-depth ${training.max_depth}
+      --mlflow ${tracking.mlflow_enabled}
+      --output-dir ${training.output_dir}
+    deps:
+      - scripts/train_reproducible_model.py
+      - ${training.dataset}
+    params:
+      - training
+    outs:
+      - ${training.output_dir}/model.onnx
+      - ${training.output_dir}/manifest.json
+      - ${training.output_dir}/metrics.json
+      - ${training.output_dir}/mlflow-run.json

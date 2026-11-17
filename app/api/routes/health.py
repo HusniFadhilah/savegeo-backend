@@ -45,7 +45,7 @@ def health(request: Request, db: Session = Depends(get_db)):
     active_models = 0
     try:
         active_cred = db.query(GEECredential).filter_by(is_active=True).first()
-        active_models = db.query(UploadedModel).filter_by(is_active=True).count()
+        active_models = db.query(UploadedModel).filter_by(is_active=True, lifecycle_state="active").count()
     except SQLAlchemyError as exc:
         database_connected = False
         logger.warning("Health check database probe failed: %s", type(exc).__name__)

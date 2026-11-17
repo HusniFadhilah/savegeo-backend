@@ -52,7 +52,7 @@ def build_capabilities_document(
     landcover_datasets = get_dataset_list(module="landcover")
     models = [
         model.to_dict_public(include_path=False)
-        for model in db.query(UploadedModel).filter_by(model_type="carbon", is_active=True).all()
+        for model in db.query(UploadedModel).filter_by(model_type="carbon", is_active=True, lifecycle_state="active").all()
     ]
     features = allowed_features or set()
     if allowed_features is not None:

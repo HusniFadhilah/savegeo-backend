@@ -215,3 +215,21 @@ journalctl -u savegeo-backend.service -n 150 --no-pager
 4. ZIP manifests and entry checksums are checked on verify and download. This is not object-lock/WORM storage and does not replace a retention policy or restore drill. No production restore drill has been completed for this feature.
 5. Evidence packages built from the current field-summary snapshot are intentionally incomplete. Submission is blocked until every required component is provided and reviewed. `approved` means internal reviewer approval only; external verification and issuance require separately documented authorized records.
 6. A rollback below migration `0043_dmrv_evidence_packages` removes submission/review tables; a rollback below `0042_dmrv_monitoring_periods` also removes evidence package metadata. Restore the database and evidence files from the same verified backup rather than downgrading production data in place.
+
+## Reproducible model training (DVC and MLflow)
+
+The optional `mlops` extra installs DVC and MLflow without adding them to the production API runtime. The committed `dvc.yaml` pipeline reads a field/reference CSV whose location and training parameters are set in `params.yaml`; sensitive measurements must be stored in a private DVC remote, not Git. Configure that remote in the operator's local DVC config before pushing data.
+
+```bash
+pip install -e '.[mlops]'
+dvc remote add --local --default savegeo <private-object-storage-uri>
+dvc add data/training/carbon.csv
+dvc push
+dvc repro train_grouped_carbon
+```
+
+The trainer rejects missing/non-finite values, fewer than five independent plot groups, constant targets, and models that fail the mean-baseline quality preflight when `--register` is used. GroupKFold out-of-fold metrics, dataset and artifact SHA-256 values, feature/target schema, seed, estimator settings, library versions and Git revision are written to the run manifest. `--mlflow` additionally logs those parameters, metrics and artifacts to `MLFLOW_TRACKING_URI`; credentials and tracking URI belong in the deployment secret store.
+
+Without DVC, a candidate can be trained directly with `python -m scripts.train_reproducible_model` and the same CLI arguments. `--register` stores a content-addressed ONNX artifact as an inactive candidate; it never activates or makes the model default. Evaluation and independent review in Admin are still required before activation. DVC execution and MLflow connectivity require the operator's dataset, private remote and tracking service, so they are not claimed as production-verified here.
+
+Reference-raster GEE training follows the same lifecycle: new saved ensembles receive content-derived version names, encrypted spatial out-of-fold evidence and the `evaluated` state. Training no longer switches the serving version. A reviewer still needs to inspect that evidence and activate the exact artifact in Admin.

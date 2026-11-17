@@ -46,6 +46,23 @@ def _verified_database_artifact(model: UploadedModel, path: Path) -> bool:
     return hmac.compare_digest(digest.hexdigest(), expected)
 
 
+def _has_current_review(db: Session, model: UploadedModel) -> bool:
+    if model.approved_by is None or not model.approval_digest or not model.artifact_sha256:
+        return False
+    from app.db.models.uploaded_model import UploadedModelEvaluation
+    from app.services import model_evaluation_storage
+    from app.services.model_lifecycle import has_current_approval
+
+    evaluation = db.query(UploadedModelEvaluation).filter_by(model_id=model.id).order_by(
+        UploadedModelEvaluation.created_at.desc(), UploadedModelEvaluation.id.desc()).first()
+    return bool(
+        evaluation
+        and evaluation.artifact_sha256 == model.artifact_sha256
+        and model_evaluation_storage.exists(evaluation.dataset_storage_path)
+        and has_current_approval(db, model, evaluation)
+    )
+
+
 def get_active_model_path(db: Session, model_type: str, model_name: str | None = None) -> str | None:
     """Resolve which model file to load for inference.
 
@@ -66,11 +83,17 @@ def get_active_model_path(db: Session, model_type: str, model_name: str | None =
         return None
 
     if model_name:
-        m = db.query(UploadedModel).filter_by(name=model_name, is_active=True).first()
+        m = db.query(UploadedModel).filter_by(
+            name=model_name, model_type=model_type, is_active=True, lifecycle_state="active"
+        ).first()
     else:
-        m = db.query(UploadedModel).filter_by(model_type=model_type, is_default=True, is_active=True).first()
+        m = db.query(UploadedModel).filter_by(
+            model_type=model_type, is_default=True, is_active=True, lifecycle_state="active"
+        ).first()
 
     if m:
+        if not _has_current_review(db, m):
+            return None
         registered_path = Path(m.filepath)
         safe_path = safe_model_file(registered_path)
         if safe_path and _verified_database_artifact(m, Path(safe_path)):
@@ -110,7 +133,7 @@ def import_legacy_models(db: Session, saved_models_dir: str) -> dict:
             continue
         try:
             model_name = model_file.stem
-            metadata = _safe_json_load_file(model_file.with_suffix(".json"))
+            metadata = {**_safe_json_load_file(model_file.with_suffix(".json")), "format": "onnx"}
             if metadata.get("training_source") == "arcgis_living_atlas":
                 skipped += 1
                 continue
@@ -137,6 +160,8 @@ def import_legacy_models(db: Session, saved_models_dir: str) -> dict:
                 # preserving administrator-controlled active/default flags.
                 if existing.artifact_sha256 and existing.artifact_sha256 != digest:
                     existing.is_active, existing.is_default = False, False
+                    existing.lifecycle_state = "experimental"
+                    existing.approved_by = existing.approved_at = existing.approval_digest = None
                 existing.artifact_sha256 = digest
                 existing.display_name = existing.display_name or model_name
                 existing.algorithm = metadata.get("algorithm") or existing.algorithm
@@ -162,6 +187,7 @@ def import_legacy_models(db: Session, saved_models_dir: str) -> dict:
                     is_default=False,
                     is_active=False,
                     is_legacy=True,
+                    lifecycle_state="experimental",
                     description=f"Imported from legacy saved_models: {model_file.name}",
                     version=metadata.get("version"),
                     metrics=metrics,

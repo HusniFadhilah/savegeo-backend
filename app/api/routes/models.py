@@ -22,7 +22,9 @@ router = APIRouter(
 def models_list_legacy(model_type: str = "carbon", db: Session = Depends(get_db),
                        offset: int = Query(default=0, ge=0, le=100000), limit: int = Query(default=100, ge=1, le=200)):
     """Legacy route with the same safe metadata contract as /api/models."""
-    models = db.query(UploadedModel).filter_by(model_type=model_type, is_active=True).order_by(UploadedModel.id).offset(offset).limit(limit + 1).all()
+    models = db.query(UploadedModel).filter_by(model_type=model_type, is_active=True, lifecycle_state="active").filter(
+        UploadedModel.metadata_json["format"].as_string() == "onnx"
+    ).order_by(UploadedModel.id).offset(offset).limit(limit + 1).all()
     return {"models": [m.to_dict_public() for m in models[:limit]], "count": min(len(models), limit),
         "offset": offset, "limit": limit, "has_more": len(models) > limit}
 
@@ -43,7 +45,8 @@ def models_list(
     if model_type:
         query = query.filter_by(model_type=model_type)
     if not include_inactive:
-        query = query.filter_by(is_active=True)
+        query = query.filter_by(is_active=True, lifecycle_state="active")
+    query = query.filter(UploadedModel.metadata_json["format"].as_string() == "onnx")
     models = query.order_by(UploadedModel.id).offset(offset).limit(limit + 1).all()
     has_more = len(models) > limit
     models = models[:limit]
@@ -79,7 +82,7 @@ def models_list(
 @router.get("/models/{model_id}")
 def model_detail(model_id: int, db: Session = Depends(get_db)):
     model = db.get(UploadedModel, model_id)
-    if not model or not model.is_active:
+    if not model or not model.is_active or model.lifecycle_state != "active" or (model.metadata_json or {}).get("format") != "onnx":
         raise HTTPException(status_code=404, detail="Model not found")
     return model.to_dict_public(include_path=False)
 
@@ -92,7 +95,7 @@ def model_by_name(model_name: str, db: Session = Depends(get_db)):
     builtin = get_builtin_carbon_model(model_name, db=db)
     if builtin:
         return builtin
-    model = db.query(UploadedModel).filter_by(name=model_name, is_active=True).first()
-    if not model or not model.is_active:
+    model = db.query(UploadedModel).filter_by(name=model_name, is_active=True, lifecycle_state="active").first()
+    if not model or not model.is_active or model.lifecycle_state != "active" or (model.metadata_json or {}).get("format") != "onnx":
         raise HTTPException(status_code=404, detail="Model not found")
     return model.to_dict_public(include_path=False)

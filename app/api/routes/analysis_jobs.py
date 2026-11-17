@@ -175,6 +175,101 @@ def _carbon_cache_ttl(job_type: str) -> int:
     return ttl if job_type == "carbon_local" else min(ttl, 3600)
 
 
+def _model_pin_for_job(db: Session, job_type: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Resolve selected DB-backed model to an immutable identity at submission."""
+    model_name = payload.get("model_name")
+    if job_type not in {"carbon", "carbon_local", "carbon_delta"}:
+        return None
+    row = None
+    if isinstance(model_name, str) and model_name:
+        row = db.query(UploadedModel).filter_by(name=model_name, model_type="carbon").first()
+    else:
+        # The automatic litter/deadwood adapter selects the active saved model
+        # with the strongest recorded spatial holdout score. Resolve that same
+        # choice now so a queued job cannot silently switch to a later model.
+        dataset_key = payload.get("reference_dataset")
+        if job_type == "carbon" and dataset_key in {"TROPICAL_LITTER_REFERENCE", "TROPICAL_DEADWOOD_REFERENCE"} and not payload.get("reference_only") and not payload.get("load_only"):
+            candidates = [
+                candidate for candidate in db.query(UploadedModel).filter_by(
+                    model_type="carbon", lifecycle_state="active", is_active=True
+                ).all()
+                if (candidate.metadata_json or {}).get("method") == "saved_reference_ensemble"
+                and dataset_key in (candidate.metadata_json or {}).get("compatible_reference_datasets", [])
+            ]
+            model_row = max(candidates, key=lambda candidate: float(
+                ((candidate.metadata_json or {}).get("validation_metrics") or {}).get("r2", -1e9)
+            )) if candidates else None
+            row = model_row
+        else:
+            return None
+    if row is None:
+        return None  # code-defined built-ins are pinned by the application revision
+    if row.lifecycle_state != "active" or not row.is_active:
+        raise HTTPException(409, detail={"code": "model_not_active", "message": "Versi model yang dipilih tidak aktif."})
+    metadata = row.metadata_json or {}
+    artifact_format = metadata.get("format")
+    try:
+        if artifact_format == "onnx":
+            from app.repositories.uploaded_model_repo import get_active_model_path
+
+            if get_active_model_path(db, "carbon", row.name) is None:
+                raise ValueError("active ONNX artifact could not be verified")
+        elif artifact_format == "gee_saved_ensemble":
+            from app.services import model_lifecycle
+
+            evaluation = model_lifecycle.latest_evaluation(db, row)
+            if not model_lifecycle.has_current_approval(db, row, evaluation):
+                raise ValueError("GEE model review is not current")
+            model_lifecycle.artifact_path(row)
+        else:
+            return None
+    except Exception as exc:  # noqa: BLE001 - reject unverifiable serving identities
+        raise HTTPException(409, detail={"code": "model_not_approved", "message": "Artefak/approval model tidak dapat diverifikasi."}) from exc
+    return {
+        "id": row.id,
+        "name": row.name,
+        "version": row.version,
+        "artifact_sha256": row.artifact_sha256,
+        "approval_digest": row.approval_digest,
+        "format": artifact_format,
+    }
+
+
+def _verify_job_model_pin(db: Session, payload: dict[str, Any]) -> dict[str, Any] | None:
+    pin = payload.get("_server_model_pin")
+    if not isinstance(pin, dict):
+        return None
+    row = db.get(UploadedModel, pin.get("id"))
+    if (
+        row is None
+        or row.name != pin.get("name")
+        or row.version != pin.get("version")
+        or row.artifact_sha256 != pin.get("artifact_sha256")
+        or row.approval_digest != pin.get("approval_digest")
+        or row.lifecycle_state != "active"
+        or not row.is_active
+    ):
+        raise AnalysisError("Versi model berubah setelah job dibuat. Jalankan ulang analisis agar memakai versi yang disetujui.", 409)
+    try:
+        if pin.get("format") == "onnx":
+            from app.repositories.uploaded_model_repo import get_active_model_path
+
+            valid = get_active_model_path(db, "carbon", row.name) is not None
+        elif pin.get("format") == "gee_saved_ensemble":
+            from app.services import model_lifecycle
+
+            evaluation = model_lifecycle.latest_evaluation(db, row)
+            valid = model_lifecycle.has_current_approval(db, row, evaluation)
+            model_lifecycle.artifact_path(row)
+        else:
+            valid = False
+    except Exception as exc:  # noqa: BLE001 - checksum/review drift blocks serving
+        raise AnalysisError("Artefak model tidak lolos pemeriksaan integritas saat job dijalankan.", 409) from exc
+    if not valid:
+        raise AnalysisError("Approval versi model tidak lagi berlaku saat job dijalankan.", 409)
+    return pin
+
+
 def _carbon_cache_key(db: Session, job_type: str, payload: dict[str, Any], owner: str) -> str:
     """Hash exact inputs and model identity so AOIs/years never share results."""
     model_name = str(payload.get("model_name") or "")
@@ -188,6 +283,8 @@ def _carbon_cache_key(db: Session, job_type: str, payload: dict[str, Any], owner
                 "updated_at": uploaded.updated_at.isoformat() if uploaded.updated_at else None,
                 "file_size_kb": uploaded.file_size_kb,
                 "artifact_sha256": uploaded.artifact_sha256,
+                "lifecycle_state": uploaded.lifecycle_state,
+                "approval_digest": uploaded.approval_digest,
                 "metadata": uploaded.metadata_json or {},
             })
             try:
@@ -316,6 +413,9 @@ def _complete_cached_job(
         "result": result,
     })
     output_registry_service.register_action_outputs(db, job_id, result)
+    provenance_service.record_analysis_execution(
+        db, job_id, result, payload.get("_server_model_pin") if isinstance(payload.get("_server_model_pin"), dict) else None
+    )
     provenance_service.update_analysis_provenance(
         db, job_id, status="succeeded", started_at=now, completed_at=now
     )
@@ -344,6 +444,7 @@ def _run_job(
         started_at=datetime.now(UTC),
     )
     try:
+        pinned_model = _verify_job_model_pin(db, payload)
         if job_type in {"vegetation", "landcover", "landcover_change", "landcover_transition", "landcover_change_map", "landcover_hotspots", "landcover_fusion"}:
             payload = resolve_known_aoi(payload)
         if job_type == "carbon":
@@ -381,6 +482,7 @@ def _run_job(
                 job_type=job_type, status="completed", result=cached_result,
             )
         output_registry_service.register_action_outputs(db, job_id, result)
+        provenance_service.record_analysis_execution(db, job_id, result, pinned_model)
         provenance_service.update_analysis_provenance(
             db,
             job_id,
@@ -493,7 +595,22 @@ def _create_analysis_job_sync(request: Request, data: dict[str, Any], viewer: ob
         raise HTTPException(status_code=400, detail=f"Unsupported analysis job type: {job_type}")
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Missing required field: payload")
+    payload = dict(payload)
+    # Never trust model identity pins supplied by a browser. The API resolves a
+    # current, reviewed identity and stores that server-side on the queued job.
+    payload.pop("_server_model_pin", None)
     ensure_job_feature_access(viewer, job_type, db, payload)
+
+    model_pin = _model_pin_for_job(db, job_type, payload)
+    if model_pin is not None:
+        payload["_server_model_pin"] = model_pin
+
+    if job_type in _CARBON_CACHEABLE_TYPES and payload.get("model_name"):
+        uploaded = db.query(UploadedModel).filter_by(name=payload["model_name"], model_type="carbon").first()
+        if uploaded is not None:
+            from app.repositories.uploaded_model_repo import get_active_model_path
+            if get_active_model_path(db, "carbon", uploaded.name) is None:
+                raise HTTPException(409, detail={"code": "model_not_approved", "message": "Model belum memiliki evaluasi, approval, dan artefak aktif yang valid."})
 
     # Pure local/reference jobs do not need an Earth Engine session. Keep the
     # gate for all GEE workflows, but allow COG/SoilGrids references to work

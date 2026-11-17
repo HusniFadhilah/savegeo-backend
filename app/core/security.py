@@ -217,7 +217,10 @@ def ensure_current_session(payload: dict, account: User | AdminUser) -> None:
 
 def requires_admin_mfa(admin: AdminUser) -> bool:
     privileged = bool(admin.is_superuser) or any(p.code.endswith(".write") for p in (admin.role.permissions if admin.role else []))
-    return bool(getattr(admin, "mfa_enabled", False) or (privileged and get_settings().privileged_mfa_required))
+    if privileged and get_settings().privileged_mfa_required:
+        return True
+    override = getattr(admin, "mfa_required", None)
+    return bool(override if override is not None else getattr(admin, "mfa_enabled", False))
 
 
 def ensure_admin_mfa(payload: dict, admin: AdminUser) -> None:

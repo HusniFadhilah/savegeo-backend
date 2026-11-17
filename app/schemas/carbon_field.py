@@ -173,3 +173,12 @@ class FieldAssessmentRequest(BaseModel):
         ):
             raise ValueError("Pilih kedalaman SOC yang sama untuk semua pasangan validasi.")
         return self
+
+
+class FieldPredictionExtractionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+    pool: Literal["agb", "bgb", "soc", "litter", "deadwood"]
+    analysis_year: int = Field(ge=1984, le=2100)
+    model_name: str | None = Field(default=None, min_length=1, max_length=255)
+    offset: int = Field(default=0, ge=0, le=100000)
+    limit: int = Field(default=250, ge=1, le=500)
