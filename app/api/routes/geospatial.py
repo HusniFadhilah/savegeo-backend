@@ -11,9 +11,6 @@ from __future__ import annotations
 import ipaddress
 import math
 import re
-import uuid
-from copy import deepcopy
-from threading import Lock
 from typing import Any, Literal
 from urllib.parse import urlparse
 
@@ -22,7 +19,6 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from app.core.security import get_current_app_viewer, require_permission
-from app.core.chat_ownership import chat_session_owner_key
 from app.core.viewer_features import (
     FEATURE_ACCESS_DENIED_DETAIL,
     ensure_feature_access,
@@ -32,7 +28,6 @@ from app.core.viewer_features import (
 from app.db.models.admin_user import AdminUser
 from app.db.models.user import User
 from app.db.session import get_db
-from app.core.temporal import format_rfc3339, utc_now
 from app.schemas.metadata import DatasetMetadata
 
 router = APIRouter(
@@ -65,9 +60,6 @@ def _dataset_feature_allowed(principal: AdminUser | User, module: str | None, db
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _URL = re.compile(r"^https?://", re.IGNORECASE)
 _catalog: dict[str, dict[str, Any]] = {}
-_jobs: dict[str, dict[str, Any]] = {}
-_jobs_lock = Lock()
-_MAX_JOBS = 2000
 
 
 def _safe_remote_url(value: str) -> str:
@@ -147,29 +139,6 @@ class QueryRequest(BaseModel):
     sql: str = Field(min_length=1, max_length=50_000)
     params: list[Any] = Field(default_factory=list, max_length=100)
     limit: int = Field(default=1000, ge=1, le=10_000)
-
-
-def _public_job(job: dict[str, Any]) -> dict[str, Any]:
-    return deepcopy({key: value for key, value in job.items() if key != "owner"})
-
-
-def _new_job(kind: str, request: ExportRequest | QueryRequest, feature_code: str, viewer: AdminUser | User) -> dict[str, Any]:
-    job_id = str(uuid.uuid4())
-    job = {
-        "id": job_id,
-        "kind": kind,
-        "status": "queued",
-        "mode": "server",
-        "featureCode": feature_code,
-        "owner": chat_session_owner_key(viewer),
-        "createdAt": format_rfc3339(utc_now()),
-        "request": request.model_dump(exclude_none=True),
-    }
-    with _jobs_lock:
-        if len(_jobs) >= _MAX_JOBS:
-            raise HTTPException(status_code=503, detail="Geospatial job capacity reached")
-        _jobs[job_id] = job
-    return _public_job(job)
 
 
 @router.get("/datasets")
@@ -284,33 +253,3 @@ def geospatial_query(
     # DuckDB remains available; enabling a server executor requires a separate
     # read-only role, structural validation and a real durable worker.
     raise HTTPException(status_code=501, detail="Server Spatial SQL is unavailable; use browser processing")
-
-
-@router.get("/jobs/{job_id}")
-def get_geospatial_job(
-    job_id: str,
-    viewer: AdminUser | User = Depends(get_current_app_viewer),
-    db: Session = Depends(get_db),
-):
-    job = _jobs.get(job_id)
-    if job is None or job.get("owner") != chat_session_owner_key(viewer):
-        raise HTTPException(status_code=404, detail="Job not found")
-    ensure_feature_access(viewer, job.get("featureCode"), db)
-    return _public_job(job)
-
-
-@router.post("/jobs/{job_id}/cancel")
-def cancel_geospatial_job(
-    job_id: str,
-    viewer: AdminUser | User = Depends(get_current_app_viewer),
-    db: Session = Depends(get_db),
-):
-    with _jobs_lock:
-        job = _jobs.get(job_id)
-        if job is None or job.get("owner") != chat_session_owner_key(viewer):
-            raise HTTPException(status_code=404, detail="Job not found")
-        ensure_feature_access(viewer, job.get("featureCode"), db)
-        if job.get("status") not in {"queued", "running"}:
-            raise HTTPException(status_code=409, detail="Job is no longer cancellable")
-        job["status"] = "cancelled"
-        return _public_job(job)
