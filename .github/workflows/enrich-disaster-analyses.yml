@@ -136,8 +136,9 @@ jobs:
         run: |
           for report in operation-report/*.json; do
             [ -s "$report" ] || continue
-            printf '### %s\n\n```json\n' "$(basename "$report")" >> "$GITHUB_STEP_SUMMARY"
-            cat "$report" >> "$GITHUB_STEP_SUMMARY"
+            printf '### %s\n\n```\n' "$(basename "$report")" >> "$GITHUB_STEP_SUMMARY"
+            sha256sum "$report" >> "$GITHUB_STEP_SUMMARY"
+            wc -c < "$report" >> "$GITHUB_STEP_SUMMARY"
             printf '\n```\n' >> "$GITHUB_STEP_SUMMARY"
           done
 

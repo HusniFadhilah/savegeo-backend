@@ -79,8 +79,8 @@ repository variable `SAVEGEO_UPLOAD_ARTIFACTS` to `true` only when storage is
 available to retain an additional seven-day copy. Otherwise the deployment
 job recreates metadata from the validated checkout and rebuilds the frontend
 from the locked dependencies; SHA, environment and workflow checks still run.
-Wildfire and disaster operation reports are also retained on the server and in
-their job summaries.
+Wildfire and disaster operation reports are retained on the server; their job
+summaries record filenames, byte counts and SHA-256 hashes.
 
 ## Operations
 
