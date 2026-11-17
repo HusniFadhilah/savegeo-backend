@@ -112,3 +112,5 @@ __all__ = [
     "DmrvReviewFinding",
 ]
 from app.db.models.request_rate_bucket import RequestRateBucket  # noqa: F401
+from app.db.models.provider_cache import ProviderCache  # noqa: F401
+from app.db.models.analysis_job import AnalysisJob  # noqa: F401

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import hmac
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -33,6 +35,17 @@ def _safe_json_load_file(path: Path) -> dict:
         return {}
 
 
+def _verified_database_artifact(model: UploadedModel, path: Path) -> bool:
+    expected = model.artifact_sha256
+    if not isinstance(expected, str) or len(expected) != 64 or path.stat().st_size > 128 * 1024 * 1024:
+        return False
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return hmac.compare_digest(digest.hexdigest(), expected)
+
+
 def get_active_model_path(db: Session, model_type: str, model_name: str | None = None) -> str | None:
     """Resolve which model file to load for inference.
 
@@ -60,7 +73,7 @@ def get_active_model_path(db: Session, model_type: str, model_name: str | None =
     if m:
         registered_path = Path(m.filepath)
         safe_path = safe_model_file(registered_path)
-        if safe_path:
+        if safe_path and _verified_database_artifact(m, Path(safe_path)):
             return safe_path
 
         # Database rows created on Windows or by the legacy app can contain
@@ -69,7 +82,7 @@ def get_active_model_path(db: Session, model_type: str, model_name: str | None =
         # resolve it from the mounted production model directory as a fallback.
         portable_path = settings.model_path / m.filename
         safe_path = safe_model_file(portable_path)
-        if safe_path:
+        if safe_path and _verified_database_artifact(m, Path(safe_path)):
             return safe_path
 
     return None
@@ -111,6 +124,9 @@ def import_legacy_models(db: Session, saved_models_dir: str) -> dict:
                 "trained_at": metadata.get("trained_at"),
                 "scaled_features": metadata.get("scaled_features"),
             }
+            digest = hashlib.sha256(model_file.read_bytes()).hexdigest()
+            if metadata.get("artifact_sha256") != digest:
+                raise ValueError("Model export integrity does not match its metadata")
             file_size_kb = round(model_file.stat().st_size / 1024, 2)
 
             existing = db.query(UploadedModel).filter_by(name=model_name).first()
@@ -119,6 +135,9 @@ def import_legacy_models(db: Session, saved_models_dir: str) -> dict:
                 # retraining/export job without changing the model name. Keep
                 # the DB registry in lock-step with the sidecar metadata while
                 # preserving administrator-controlled active/default flags.
+                if existing.artifact_sha256 and existing.artifact_sha256 != digest:
+                    existing.is_active, existing.is_default = False, False
+                existing.artifact_sha256 = digest
                 existing.display_name = existing.display_name or model_name
                 existing.algorithm = metadata.get("algorithm") or existing.algorithm
                 existing.filename = model_file.name
@@ -148,6 +167,7 @@ def import_legacy_models(db: Session, saved_models_dir: str) -> dict:
                     metrics=metrics,
                     feature_names=metadata.get("feature_names", []),
                     metadata_json=metadata or None,
+                    artifact_sha256=digest,
                     uploaded_by=None,
                 )
             )

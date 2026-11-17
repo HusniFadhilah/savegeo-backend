@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     api_prefix: str = "/api"
     port: int = 8086
     app_name: str = "SAVEGEO"
+    analysis_queue_backend: Literal["auto", "postgres", "inline"] = "auto"
     frontend_base_url: str = "http://localhost:5501"
 
     # --- Database ---
@@ -97,6 +98,7 @@ class Settings(BaseSettings):
     gee_service_account: str = ""
     gee_key_file: str = ""
     gee_project_id: str = ""
+    gee_allow_legacy_plaintext_file_fallback: bool | None = None
 
     # --- Local storage ---
     upload_dir: str = "./var/uploads"
@@ -272,7 +274,11 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def require_production_secrets(self) -> Settings:
+        if self.gee_allow_legacy_plaintext_file_fallback is None:
+            self.gee_allow_legacy_plaintext_file_fallback = self.app_env in {"development", "test"}
         if self.app_env in {"production", "staging"}:
+            if self.gee_allow_legacy_plaintext_file_fallback:
+                raise ValueError("Plaintext Earth Engine key-file fallback is disabled in hosted environments")
             key = self.jwt_secret_key
             repeated = any(key == (key[:n] * (len(key) // n + 1))[:len(key)] for n in range(1, 17)) if key else True
             if len(key) < 64 or len(set(key)) < 12 or repeated or key.startswith(("eyJ", "pk.", "sk.")):

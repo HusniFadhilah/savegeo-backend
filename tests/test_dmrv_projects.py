@@ -77,8 +77,8 @@ def env():
         seed.add(Role(id=1, name="limited"))
         seed.add_all([
             User(id=1, username="field-user", email="f@x.test", password_hash="x"),
-            AdminUser(id=1, username="owner-a", password_hash="x"),
-            AdminUser(id=2, username="owner-b", password_hash="x"),
+            AdminUser(id=1, username="owner-a", password_hash="x", is_superuser=True),
+            AdminUser(id=2, username="owner-b", password_hash="x", is_superuser=True),
             AdminUser(id=3, username="no-permission", password_hash="x", role_id=1),
         ])
         seed.commit()

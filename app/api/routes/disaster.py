@@ -18,8 +18,17 @@ from fastapi.responses import Response
 from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import require_ee
+from app.core.bounded_json import read_typed_json_object
 from app.core.security import get_current_disaster_viewer
 from app.core.viewer_features import require_feature
+from app.schemas.disaster_requests import (
+    AoiRequest,
+    EventMapRequest,
+    FireBoundariesRequest,
+    FireImportRequest,
+    FireMultiSourceRequest,
+    FireSamRequest,
+)
 from app.services import disaster_service, fire_multi_source_service, firms_service, wind_service
 from app.services.gee_common import AnalysisError, public_analysis_error
 
@@ -112,7 +121,7 @@ async def load_fire_multi_source(request: Request):
     try:
         return await run_in_threadpool(
             fire_multi_source_service.load_sources,
-            await request.json(),
+            await read_typed_json_object(request, FireMultiSourceRequest),
             bool(getattr(request.app.state, "ee_initialized", False)),
         )
     except (AnalysisError, ValueError) as exc:
@@ -124,7 +133,10 @@ async def load_fire_multi_source(request: Request):
 @router.post("/fire-big-boundaries", dependencies=[Depends(get_current_disaster_viewer)])
 async def load_fire_big_boundaries(request: Request):
     try:
-        return await run_in_threadpool(fire_multi_source_service.load_big_boundaries, await request.json())
+        return await run_in_threadpool(
+            fire_multi_source_service.load_big_boundaries,
+            await read_typed_json_object(request, FireBoundariesRequest),
+        )
     except (AnalysisError, ValueError) as exc:
         raise HTTPException(
             status_code=exc.status_code if isinstance(exc, AnalysisError) else 400, detail=public_analysis_error(exc)
@@ -136,7 +148,10 @@ async def load_fire_big_boundaries(request: Request):
 @router.post("/fire-import", dependencies=[Depends(get_current_disaster_viewer)])
 async def import_fire_observations(request: Request):
     try:
-        return await run_in_threadpool(fire_multi_source_service.import_observations, await request.json())
+        return await run_in_threadpool(
+            fire_multi_source_service.import_observations,
+            await read_typed_json_object(request, FireImportRequest, max_bytes=2_250_000),
+        )
     except (AnalysisError, ValueError) as exc:
         raise HTTPException(
             status_code=exc.status_code if isinstance(exc, AnalysisError) else 400, detail=public_analysis_error(exc)
@@ -158,7 +173,7 @@ def get_bmkg_alerts(limit: int = Query(default=30, ge=1, le=100), viewer=Depends
 
 @router.post("/dem-slope", dependencies=[Depends(get_current_disaster_viewer), Depends(require_ee)])
 async def get_disaster_dem_slope(request: Request):
-    data = await request.json()
+    data = await read_typed_json_object(request, AoiRequest)
     try:
         return await run_in_threadpool(disaster_service.get_disaster_dem_slope, data)
     except AnalysisError as e:
@@ -172,7 +187,7 @@ async def get_disaster_event_map(request: Request):
     The fire path returns Sentinel-2 dNBR tiles and MODIS FireMask point
     detections in addition to the legacy flood/landslide response shape.
     """
-    data = await request.json()
+    data = await read_typed_json_object(request, EventMapRequest)
     try:
         return await run_in_threadpool(disaster_service.get_disaster_event_map, data)
     except AnalysisError as e:
@@ -187,7 +202,10 @@ async def get_disaster_event_map(request: Request):
 async def start_fire_sam_job(request: Request):
     """Segment candidate burn objects using MODIS thermal seeds + SamGeo."""
     try:
-        return await run_in_threadpool(disaster_service.start_fire_sam_job, await request.json())
+        return await run_in_threadpool(
+            disaster_service.start_fire_sam_job,
+            await read_typed_json_object(request, FireSamRequest),
+        )
     except AnalysisError as e:
         raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
 

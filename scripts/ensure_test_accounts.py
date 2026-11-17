@@ -84,6 +84,7 @@ def ensure_test_accounts() -> None:
 
             admin.password_hash = hash_password(passwords[account.username])
             admin.is_active = True
+            admin.is_superuser = account.role_name is None
             admin.role_id = roles[account.role_name].id if account.role_name else None
             print(f"{action} {account.username} ({account.role_name or 'full-access'})")
 

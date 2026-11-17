@@ -10,11 +10,11 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 
-import requests
 from fastapi import APIRouter, HTTPException, Query
 from shapely.geometry import shape as shapely_shape
 
 from app.core.config import get_settings
+from app.core.public_http import public_http as requests
 
 router = APIRouter(prefix="/regions/global", tags=["regions"])
 logger = logging.getLogger(__name__)
@@ -53,22 +53,39 @@ def _cache_path(key: str) -> Path:
 
 def _download_json(url: str, *, max_bytes: int) -> object:
     try:
-        with requests.get(url, timeout=(10, 60), stream=True, headers={"User-Agent": "SAVEGEO/1.0 (geoBoundaries cache)"}) as response:
-            if response.status_code == 404:
-                raise BoundaryNotFound
-            response.raise_for_status()
-            body = bytearray()
-            for chunk in response.iter_content(chunk_size=1024 * 1024):
-                if not chunk:
-                    continue
-                body.extend(chunk)
-                if len(body) > max_bytes:
-                    raise BoundaryUnavailable("Upstream boundary file exceeds the configured size limit")
-        return json.loads(body)
+        target = _trusted_download_url(url)
+        response = requests.get(
+            target,
+            timeout=60,
+            max_bytes=max_bytes,
+            headers={"User-Agent": "SAVEGEO/1.0 (geoBoundaries cache)", "Accept": "application/json"},
+        )
+        if response.status_code == 404:
+            raise BoundaryNotFound
+        response.raise_for_status()
+        return response.json()
     except BoundaryNotFound:
         raise
     except (requests.RequestException, ValueError, BoundaryUnavailable) as exc:
         raise BoundaryUnavailable from exc
+
+
+def _trusted_download_url(url: str) -> str:
+    """Allow only the fixed metadata API or geoBoundaries' canonical raw files.
+
+    The API can return GitHub's redirecting ``github.com/.../raw/...`` URL.
+    Convert that known path to the corresponding raw content host so the
+    transport can keep redirects disabled and revalidate DNS before connecting.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or parsed.username or parsed.password or parsed.port not in {None, 443}:
+        raise BoundaryUnavailable("geoBoundaries returned an unsupported URL")
+    if parsed.hostname == "www.geoboundaries.org" and parsed.path.startswith("/api/current/gbOpen/"):
+        return url
+    prefix = "/wmgeolab/geoBoundaries/raw/"
+    if parsed.hostname == "github.com" and parsed.path.startswith(prefix):
+        return parsed._replace(netloc="raw.githubusercontent.com", path=parsed.path.replace(prefix, "/wmgeolab/geoBoundaries/", 1)).geturl()
+    raise BoundaryUnavailable("geoBoundaries returned an unsupported URL")
 
 
 def _cached_json(key: str, url: str, *, ttl: int, max_bytes: int) -> object:

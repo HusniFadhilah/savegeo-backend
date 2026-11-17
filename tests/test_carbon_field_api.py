@@ -69,7 +69,11 @@ def client(tmp_path, monkeypatch):
         if not token:
             raise HTTPException(401)
         return SimpleNamespace(
-            id=1, username="test-admin", role_id=None if token == "admin" else 1, role=None
+            id=1,
+            username="test-admin",
+            role_id=None if token == "admin" else 1,
+            role=None,
+            is_superuser=token == "admin",
         )
 
     app.dependency_overrides[get_db] = session

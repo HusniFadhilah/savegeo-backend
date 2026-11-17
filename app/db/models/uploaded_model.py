@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime as dt
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 
 class UploadedModel(Base):
     __tablename__ = "uploaded_models"
+    __table_args__ = (Index("ix_models_active_type_id", "is_active", "model_type", "id"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
@@ -29,12 +30,13 @@ class UploadedModel(Base):
     is_legacy: Mapped[bool] = mapped_column(Boolean, default=False)
     description: Mapped[str | None] = mapped_column(Text)
     version: Mapped[str | None] = mapped_column(String(50))
+    artifact_sha256: Mapped[str | None] = mapped_column(String(64))
     metrics: Mapped[dict | None] = mapped_column(JSONB)
     feature_names: Mapped[list | None] = mapped_column(JSONB)
     # Native JSONB (legacy stored this double-encoded as a Text column) — nothing outside
     # this codebase reads the raw column, so switching representation is safe.
     metadata_json: Mapped[dict | None] = mapped_column(JSONB)
-    uploaded_by: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id"))
+    uploaded_by: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id", ondelete="SET NULL"))
     uploaded_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.UTC))
     updated_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: dt.datetime.now(dt.UTC), onupdate=lambda: dt.datetime.now(dt.UTC)

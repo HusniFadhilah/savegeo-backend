@@ -1,7 +1,7 @@
 """Feature-authorized model catalog with scientific public metadata only."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.db.models.uploaded_model import UploadedModel
@@ -19,10 +19,12 @@ router = APIRouter(
 
 
 @router.get("/models/list")
-def models_list_legacy(model_type: str = "carbon", db: Session = Depends(get_db)):
+def models_list_legacy(model_type: str = "carbon", db: Session = Depends(get_db),
+                       offset: int = Query(default=0, ge=0, le=100000), limit: int = Query(default=100, ge=1, le=200)):
     """Legacy route with the same safe metadata contract as /api/models."""
-    models = db.query(UploadedModel).filter_by(model_type=model_type, is_active=True).all()
-    return {"models": [m.to_dict_public() for m in models], "count": len(models)}
+    models = db.query(UploadedModel).filter_by(model_type=model_type, is_active=True).order_by(UploadedModel.id).offset(offset).limit(limit + 1).all()
+    return {"models": [m.to_dict_public() for m in models[:limit]], "count": min(len(models), limit),
+        "offset": offset, "limit": limit, "has_more": len(models) > limit}
 
 
 @router.get("/models")
@@ -32,6 +34,8 @@ def models_list(
     target_dataset: str | None = None,
     gee_deployable: bool | None = None,
     db: Session = Depends(get_db),
+    offset: int = Query(default=0, ge=0, le=100000),
+    limit: int = Query(default=100, ge=1, le=200),
 ):
     if include_inactive:
         raise HTTPException(status_code=403, detail="Inactive models are available only through the admin API")
@@ -40,7 +44,9 @@ def models_list(
         query = query.filter_by(model_type=model_type)
     if not include_inactive:
         query = query.filter_by(is_active=True)
-    models = query.all()
+    models = query.order_by(UploadedModel.id).offset(offset).limit(limit + 1).all()
+    has_more = len(models) > limit
+    models = models[:limit]
 
     results = []
     for m in models:
@@ -51,7 +57,7 @@ def models_list(
             continue
         results.append(m.to_dict_public())
 
-    if model_type in (None, "carbon") and gee_deployable is not True:
+    if offset == 0 and model_type in (None, "carbon") and gee_deployable is not True:
         granite_model = granite_biomass_model()
         if granite_model:
             existing_names = {m["name"] for m in results}
@@ -64,10 +70,10 @@ def models_list(
             ):
                 results.append(granite_model)
 
-    if model_type in (None, "carbon") and gee_deployable is not False:
+    if offset == 0 and model_type in (None, "carbon") and gee_deployable is not False:
         existing_names = {m["name"] for m in results}
         results.extend(m for m in builtin_carbon_models(target_dataset, db=db) if m["name"] not in existing_names)
-    return {"models": results, "count": len(results)}
+    return {"models": results, "count": len(results), "offset": offset, "limit": limit, "has_more": has_more}
 
 
 @router.get("/models/{model_id}")

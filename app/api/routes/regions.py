@@ -17,7 +17,7 @@ from collections import OrderedDict
 from threading import Lock, BoundedSemaphore
 from pathlib import Path
 
-import requests
+from app.core.public_http import public_http as requests
 from fastapi import APIRouter, HTTPException, Query
 
 from app.core.config import get_settings

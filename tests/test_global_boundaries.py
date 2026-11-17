@@ -50,3 +50,51 @@ def test_adm3_and_adm4_require_the_parent_index():
             assert "parent_index is required" in exc.detail
         else:
             raise AssertionError(f"{level} unexpectedly accepted a missing parent_index")
+
+
+def test_geo_boundaries_download_urls_are_restricted_and_github_raw_is_canonicalized():
+    assert global_boundaries._trusted_download_url(
+        "https://github.com/wmgeolab/geoBoundaries/raw/main/releaseData/IDN/ADM1/data.geojson"
+    ) == "https://raw.githubusercontent.com/wmgeolab/geoBoundaries/main/releaseData/IDN/ADM1/data.geojson"
+    assert global_boundaries._trusted_download_url(
+        "https://www.geoboundaries.org/api/current/gbOpen/IDN/ADM1/"
+    ).startswith("https://www.geoboundaries.org/")
+    for url in (
+        "http://www.geoboundaries.org/api/current/gbOpen/IDN/ADM1/",
+        "https://127.0.0.1/api/current/gbOpen/IDN/ADM1/",
+        "https://github.com/attacker/repo/raw/main/data.geojson",
+        "https://github.com/wmgeolab/geoBoundaries/archive/main.zip",
+    ):
+        try:
+            global_boundaries._trusted_download_url(url)
+        except global_boundaries.BoundaryUnavailable:
+            pass
+        else:
+            raise AssertionError(f"unsupported geoBoundaries URL accepted: {url}")
+
+
+def test_geo_boundaries_download_uses_shared_bounded_transport(monkeypatch):
+    calls = {}
+
+    class Response:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"type": "FeatureCollection", "features": []}
+
+    def fake_get(url, **kwargs):
+        calls.update(url=url, kwargs=kwargs)
+        return Response()
+
+    monkeypatch.setattr(global_boundaries.requests, "get", fake_get)
+    result = global_boundaries._download_json(
+        "https://github.com/wmgeolab/geoBoundaries/raw/main/data.geojson",
+        max_bytes=1024,
+    )
+    assert result["type"] == "FeatureCollection"
+    assert calls["url"] == "https://raw.githubusercontent.com/wmgeolab/geoBoundaries/main/data.geojson"
+    assert calls["kwargs"]["max_bytes"] == 1024
+    assert calls["kwargs"]["timeout"] == 60

@@ -55,4 +55,11 @@ def downgrade() -> None:
     for table in ("carbon_calibration_models", "carbon_calibration_runs", "carbon_field_trees", "carbon_field_plots", "carbon_calibration_files", "carbon_calibration_datasets"):
         op.drop_table(table)
     for code in ("calibration.read", "calibration.write"):
+        bind.execute(
+            sa.text(
+                "DELETE FROM role_permissions WHERE permission_id = "
+                "(SELECT id FROM permissions WHERE code = :code)"
+            ),
+            {"code": code},
+        )
         bind.execute(sa.text("DELETE FROM permissions WHERE code = :code"), {"code": code})

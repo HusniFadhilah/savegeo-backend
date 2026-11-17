@@ -113,7 +113,7 @@ def _role_is_sensitive(role: Role) -> bool:
 
 def _ensure_user_role_scope(admin: AdminUser, role: Role | None) -> None:
     """Prevent explicit admins from delegating or inheriting sensitive access."""
-    if admin.role_id is None:
+    if admin.is_superuser:
         return
     if role is None:
         raise HTTPException(status_code=403, detail="Explicit Admin tidak dapat memberikan atau mengubah akun Full Access")
@@ -667,6 +667,7 @@ async def upload_model(
         metrics=_parse_json(metrics, {}),
         feature_names=_parse_json(feature_names, []),
         metadata_json=model_metadata,
+        artifact_sha256=model_metadata["artifact_sha256"],
         uploaded_by=admin.id,
     )
     db.add(model)
@@ -749,7 +750,7 @@ def get_viewer_feature_settings(
     admin: AdminUser = Depends(require_permission(VIEWER_FEATURES_MANAGE_PERMISSION)),
     db: Session = Depends(get_db),
 ):
-    role = db.query(Role).filter(Role.name.ilike("viewer")).first()
+    role = db.query(Role).filter(Role.is_viewer.is_(True)).first()
     if role is None:
         raise HTTPException(status_code=404, detail="Viewer role is unavailable")
     enabled = {permission.code for permission in role.permissions if permission.code in VIEWER_FEATURE_CODES}
@@ -775,7 +776,7 @@ def update_viewer_feature_settings(
     if len(enabled) != len(requested) or not enabled.issubset(VIEWER_FEATURE_CODES):
         raise HTTPException(status_code=422, detail="One or more feature permission codes are invalid")
 
-    role = db.query(Role).filter(Role.name.ilike("viewer")).with_for_update().first()
+    role = db.query(Role).filter(Role.is_viewer.is_(True)).with_for_update().first()
     if role is None:
         raise HTTPException(status_code=404, detail="Viewer role is unavailable")
     permission_rows = {
@@ -821,6 +822,21 @@ def admin_users_list(request: Request, admin: AdminUser = Depends(require_permis
     return {"users": [u.to_dict() for u in users]}
 
 
+def _ensure_active_superuser_remains(db: Session, target: AdminUser) -> None:
+    """Lock the active full-access set before removing one of its members."""
+    if not target.is_superuser or not target.is_active:
+        return
+    active_superusers = (
+        db.query(AdminUser.id)
+        .filter(AdminUser.is_superuser.is_(True), AdminUser.is_active.is_(True))
+        .order_by(AdminUser.id)
+        .with_for_update()
+        .all()
+    )
+    if len(active_superusers) <= 1:
+        raise HTTPException(status_code=400, detail="At least one active full-access administrator must remain")
+
+
 @router.post("/users", status_code=201)
 def admin_user_create(
     payload: AdminUserCreateRequest,
@@ -834,6 +850,10 @@ def admin_user_create(
     assigned_role = db.get(Role, payload.role_id) if payload.role_id is not None else None
     if payload.role_id is not None and assigned_role is None:
         raise HTTPException(status_code=400, detail="role_id does not exist")
+    if payload.is_superuser and not admin.is_superuser:
+        raise HTTPException(403, "Only a superuser can grant full access")
+    if payload.is_superuser and payload.role_id is not None:
+        raise HTTPException(422, "Full access and an explicit role are mutually exclusive")
     _ensure_user_role_scope(admin, assigned_role)
 
     new_user = AdminUser(
@@ -842,6 +862,7 @@ def admin_user_create(
         email=payload.email,
         password_hash=hash_password(payload.password),
         is_active=payload.is_active,
+        is_superuser=payload.is_superuser,
         role_id=payload.role_id,
     )
     db.add(new_user)
@@ -861,15 +882,34 @@ def admin_user_update(
     target = db.get(AdminUser, user_id)
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
-    if admin.role_id is not None and target.role_id is None:
+    if not admin.is_superuser and target.is_superuser:
         raise HTTPException(status_code=403, detail="Explicit Admin tidak dapat mengubah akun Full Access")
-    if admin.role_id is not None and target.role is not None and _role_is_sensitive(target.role):
+    if not admin.is_superuser and target.role is not None and _role_is_sensitive(target.role):
         raise HTTPException(status_code=403, detail="Explicit Admin tidak dapat mengubah akun dengan akses credential atau secret")
     assigned_role = db.get(Role, payload.role_id) if payload.role_id is not None else None
     if payload.role_id is not None and assigned_role is None:
         raise HTTPException(status_code=400, detail="role_id does not exist")
-    if payload.role_id is not None:
-        _ensure_user_role_scope(admin, assigned_role)
+    if "role_id" in payload.model_fields_set:
+        if assigned_role is not None:
+            _ensure_user_role_scope(admin, assigned_role)
+        elif not admin.is_superuser:
+            raise HTTPException(403, "Only a superuser can clear a role")
+    if payload.is_superuser is not None:
+        if not admin.is_superuser and payload.is_superuser != bool(target.is_superuser):
+            raise HTTPException(403, "Only a superuser can change full access")
+        if payload.is_superuser and payload.role_id is not None:
+            raise HTTPException(422, "Full access and an explicit role are mutually exclusive")
+        if target.id == admin.id and not payload.is_superuser:
+            raise HTTPException(400, "Cannot revoke your own full access")
+    removes_target_superuser = target.is_superuser and (
+        payload.is_superuser is False
+        or payload.is_active is False
+        or ("role_id" in payload.model_fields_set and payload.role_id is not None)
+    )
+    if removes_target_superuser:
+        if target.id == admin.id:
+            raise HTTPException(status_code=400, detail="Cannot remove your own full-access role")
+        _ensure_active_superuser_remains(db, target)
     if payload.is_active is False and target.id == admin.id:
         raise HTTPException(status_code=400, detail="Cannot deactivate your own account")
 
@@ -883,9 +923,16 @@ def admin_user_update(
     if payload.is_active is not None:
         target.is_active = payload.is_active
         changes["is_active"] = payload.is_active
-    if payload.role_id is not None:
+    if "role_id" in payload.model_fields_set:
         target.role_id = payload.role_id
         changes["role_id"] = payload.role_id
+    if payload.is_superuser is not None:
+        target.is_superuser = payload.is_superuser
+        changes["is_superuser"] = payload.is_superuser
+        if payload.is_superuser:
+            target.role_id = None
+    elif "role_id" in payload.model_fields_set and payload.role_id is not None:
+        target.is_superuser = False
     if payload.new_password:
         if len(payload.new_password) < 8:
             raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
@@ -905,10 +952,11 @@ def admin_user_delete(user_id: int, admin: AdminUser = Depends(require_permissio
         raise HTTPException(status_code=404, detail="User not found")
     if target.id == admin.id:
         raise HTTPException(status_code=400, detail="Cannot delete your own account")
-    if admin.role_id is not None and target.role_id is None:
+    if not admin.is_superuser and target.is_superuser:
         raise HTTPException(status_code=403, detail="Explicit Admin tidak dapat menghapus akun Full Access")
-    if admin.role_id is not None and target.role is not None and _role_is_sensitive(target.role):
+    if not admin.is_superuser and target.role is not None and _role_is_sensitive(target.role):
         raise HTTPException(status_code=403, detail="Explicit Admin tidak dapat menghapus akun dengan akses credential atau secret")
+    _ensure_active_superuser_remains(db, target)
     if db.query(AdminUser).filter_by(is_active=True).count() <= 1:
         raise HTTPException(status_code=400, detail="Cannot delete the last active admin account")
 

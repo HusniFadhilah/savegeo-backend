@@ -256,8 +256,8 @@ def export_cog(
     dataset = _catalog.get(request.datasetId)
     if dataset is None:
         raise HTTPException(status_code=404, detail="Dataset not found")
-    feature_code = _ensure_dataset_feature_access(viewer, dataset.get("module"), db)
-    return _new_job("cog", request, feature_code, viewer)
+    _ensure_dataset_feature_access(viewer, dataset.get("module"), db)
+    raise HTTPException(501, "Server COG export is unavailable; use browser processing")
 
 
 @router.post("/export/geoparquet", status_code=status.HTTP_202_ACCEPTED)
@@ -269,8 +269,8 @@ def export_geoparquet(
     dataset = _catalog.get(request.datasetId)
     if dataset is None:
         raise HTTPException(status_code=404, detail="Dataset not found")
-    feature_code = _ensure_dataset_feature_access(viewer, dataset.get("module"), db)
-    return _new_job("geoparquet", request, feature_code, viewer)
+    _ensure_dataset_feature_access(viewer, dataset.get("module"), db)
+    raise HTTPException(501, "Server GeoParquet export is unavailable; use browser processing")
 
 
 @router.post("/query", status_code=status.HTTP_202_ACCEPTED)

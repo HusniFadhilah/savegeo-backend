@@ -29,11 +29,8 @@ class AdminUser(Base):
     session_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     mfa_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
-    # Nullable and NOT backfilled on existing rows on purpose: NULL means
-    # "legacy full-access admin" (the only mode that existed before this
-    # column was added), so no existing admin's access changes. Only admins
-    # explicitly assigned a role get the narrower, permission-checked path -
-    # see app/core/security.py::require_permission.
+    is_superuser: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    # A missing role grants nothing; full access is a separate explicit grant.
     role_id: Mapped[int | None] = mapped_column(ForeignKey("roles.id"))
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.UTC))
     last_login: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
@@ -48,11 +45,13 @@ class AdminUser(Base):
             "email": self.email,
             "is_active": self.is_active,
             "mfa_enabled": self.mfa_enabled,
+            "is_superuser": bool(self.is_superuser),
+            "is_viewer": bool(self.role and self.role.is_viewer),
             "role": self.role.name if self.role else None,
             # Expose only permission codes to the SPA. Credential values and
             # other sensitive fields remain server-side; this is used solely
             # for role-aware navigation and client-side UX.
-            "permissions": [p.code for p in self.role.permissions] if self.role else None,
+            "permissions": [p.code for p in self.role.permissions] if self.role else [],
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "last_login": self.last_login.isoformat() if self.last_login else None,
         }

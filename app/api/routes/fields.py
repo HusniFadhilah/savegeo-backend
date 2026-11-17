@@ -1,7 +1,7 @@
 """Authenticated, owner-scoped Crop Monitoring boundary management."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
@@ -46,9 +46,11 @@ def create_field(payload: FieldCreateRequest, viewer: User | AdminUser = Depends
 
 
 @router.get("")
-def list_fields(viewer: User | AdminUser = Depends(get_current_app_viewer), db: Session = Depends(get_db)):
-    fields = field_repo.list_fields(db, chat_session_owner_key(viewer))
-    return {"fields": [f.to_dict() for f in fields], "count": len(fields)}
+def list_fields(viewer: User | AdminUser = Depends(get_current_app_viewer), db: Session = Depends(get_db),
+                offset: int = Query(default=0, ge=0, le=100000), limit: int = Query(default=100, ge=1, le=200)):
+    fields = field_repo.list_fields(db, chat_session_owner_key(viewer), offset=offset, limit=limit + 1)
+    return {"fields": [f.to_dict() for f in fields[:limit]], "count": min(len(fields), limit),
+        "offset": offset, "limit": limit, "has_more": len(fields) > limit}
 
 
 @router.get("/{field_id}")

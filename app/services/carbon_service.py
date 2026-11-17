@@ -968,6 +968,7 @@ def calculate_carbon_summary_for_year(
         # No raster to tile for sampled/server-side-only models (point predictions only).
 
     total_carbon = mean_carbon * area_ha
+    quality = inference_engine.inference_quality
     return {
         "year": int(year),
         "mean_density": round(mean_carbon, 2),
@@ -983,9 +984,9 @@ def calculate_carbon_summary_for_year(
         # change. `images_used` reset per-call in both inference paths (see
         # CarbonInferenceEngine) so this is this year's own count, not a
         # cross-year cumulative total.
-        "images_used": inference_engine.last_s2_image_count,
-        "valid_pixel_pct": inference_engine.last_valid_pixel_pct,
-        "gap_filled": inference_engine.last_gap_filled,
+        "images_used": quality.images_used,
+        "valid_pixel_pct": quality.valid_pixel_pct,
+        "gap_filled": quality.gap_filled,
     }
 
 
@@ -1729,6 +1730,7 @@ def analyze_carbon(db: Session, data: dict) -> dict:
     statistics_available = any(
         stats_out.get(key) is not None for key in ("mean", "std_dev", "min", "max")
     )
+    quality = inference_engine.inference_quality
 
     return {
         "carbon_estimated": {
@@ -1785,7 +1787,7 @@ def analyze_carbon(db: Session, data: dict) -> dict:
             "analysis_year_mode": "annual_covariate_inference",
             "reference_dataset": reference_dataset,
             "scale": carbon_scale,
-            "images_used": inference_engine.last_s2_image_count,
+            "images_used": quality.images_used,
             "statistics_available": statistics_available,
             "co2_conversion_factor": co2_factor,
             "gee_deployable": is_gee_deployable,
@@ -1798,9 +1800,9 @@ def analyze_carbon(db: Session, data: dict) -> dict:
         # CI would falsely assume spatially independent pixels, which isn't
         # true for imagery (neighboring pixels are strongly correlated).
         "data_quality": {
-            "valid_pixel_pct": inference_engine.last_valid_pixel_pct,
-            "gap_filled": inference_engine.last_gap_filled,
-            "images_used": inference_engine.last_s2_image_count,
+            "valid_pixel_pct": quality.valid_pixel_pct,
+            "gap_filled": quality.gap_filled,
+            "images_used": quality.images_used,
             "coefficient_of_variation_pct": _cv_pct,
             "model_r2": (model_info.get("cv_metrics") or {}).get("r2_mean"),
             "model_rmse": (model_info.get("cv_metrics") or {}).get("rmse_mean"),

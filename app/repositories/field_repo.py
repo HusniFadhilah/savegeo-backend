@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import datetime as dt
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, defer
 
 from app.db.models.field import Field
 from app.registries.crop_registry import estimate_harvest_days
@@ -18,10 +18,10 @@ def _compute_estimated_harvest_date(commodity: str, planting_date: dt.date | Non
     return planting_date + dt.timedelta(days=duration)
 
 
-def list_fields(db: Session, owner_key: str) -> list[Field]:
+def list_fields(db: Session, owner_key: str, *, offset: int = 0, limit: int = 100) -> list[Field]:
     if not owner_key:
         return []
-    return db.query(Field).filter(Field.owner_key == owner_key).order_by(Field.created_at.desc()).all()
+    return db.query(Field).options(defer(Field.geojson)).filter(Field.owner_key == owner_key).order_by(Field.created_at.desc(), Field.id.desc()).offset(offset).limit(limit).all()
 
 
 def get_field(db: Session, field_id: int, owner_key: str) -> Field | None:

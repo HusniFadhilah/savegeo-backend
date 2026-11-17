@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import datetime as dt
 
-from sqlalchemy import Date, DateTime, Float, String, JSON
+from sqlalchemy import Date, DateTime, Float, Index, String, JSON
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -12,9 +12,10 @@ from app.db.base import Base
 
 class Field(Base):
     __tablename__ = "fields"
+    __table_args__ = (Index("ix_fields_owner_created_id", "owner_key", "created_at", "id"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    owner_key: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    owner_key: Mapped[str | None] = mapped_column(String(32), nullable=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     geojson: Mapped[dict] = mapped_column(JSONB().with_variant(JSON(), "sqlite"), nullable=False)
     area_ha: Mapped[float] = mapped_column(Float, nullable=False)

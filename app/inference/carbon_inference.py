@@ -4,8 +4,10 @@ Inference engine for carbon estimation using pre-trained models
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
+from threading import local
 from typing import ClassVar
 
 import ee
@@ -30,6 +32,13 @@ GEDI_L4D_PROXY_BANDS = [
 GEE_LINEAR_ALGORITHMS = {'linear', 'ridge', 'lasso', 'elasticnet', 'elastic_net'}
 
 
+@dataclass(frozen=True, slots=True)
+class InferenceQuality:
+    images_used: int | None
+    valid_pixel_pct: float | None
+    gap_filled: bool | None
+
+
 class CarbonInferenceEngine:
     """
     Perform carbon estimation inference using pre-trained models
@@ -51,9 +60,10 @@ class CarbonInferenceEngine:
                 they add two large reduce/collection requests without changing the
                 prediction itself; callers that need diagnostics can opt in.
         """
-        self.registry = ModelRegistry()
+        self.registry = ModelRegistry() if model_path is None else None
         self.cloud_mask_technique = resolve_cloud_mask_technique(cloud_mask_technique)
         self.quality_checks = bool(quality_checks)
+        self._quality_state = local()
         
         if model_name is None:
             model_name = self.registry.registry.get('default')
@@ -69,6 +79,8 @@ class CarbonInferenceEngine:
         self.model_path = str(Path(model_path).resolve())
         self.model = CarbonEstimationModel.load(model_path)
         self.last_s2_image_count = None
+        self.last_valid_pixel_pct = None
+        self.last_gap_filled = None
         self._s2_image_counts = []
         # Data-quality signals for the last composite built (see _safe_s2_composite):
         # valid_pct = % of AOI covered by cloud-free pixels in the *primary* date-range
@@ -77,6 +89,51 @@ class CarbonInferenceEngine:
         self.last_valid_pixel_pct = None
         self.last_gap_filled = None
         logger.info("Inference engine ready")
+
+    @property
+    def _s2_image_counts(self) -> list[int]:
+        counts = getattr(self._quality_state, "s2_image_counts", None)
+        if counts is None:
+            counts = []
+            self._quality_state.s2_image_counts = counts
+        return counts
+
+    @_s2_image_counts.setter
+    def _s2_image_counts(self, value: list[int]) -> None:
+        self._quality_state.s2_image_counts = value
+
+    @property
+    def last_s2_image_count(self) -> int | None:
+        return getattr(self._quality_state, "last_s2_image_count", None)
+
+    @last_s2_image_count.setter
+    def last_s2_image_count(self, value: int | None) -> None:
+        self._quality_state.last_s2_image_count = value
+
+    @property
+    def last_valid_pixel_pct(self) -> float | None:
+        return getattr(self._quality_state, "last_valid_pixel_pct", None)
+
+    @last_valid_pixel_pct.setter
+    def last_valid_pixel_pct(self, value: float | None) -> None:
+        self._quality_state.last_valid_pixel_pct = value
+
+    @property
+    def last_gap_filled(self) -> bool | None:
+        return getattr(self._quality_state, "last_gap_filled", None)
+
+    @last_gap_filled.setter
+    def last_gap_filled(self, value: bool | None) -> None:
+        self._quality_state.last_gap_filled = value
+
+    @property
+    def inference_quality(self) -> InferenceQuality:
+        """Immutable per-thread snapshot for the analysis currently using this engine."""
+        return InferenceQuality(
+            images_used=self.last_s2_image_count,
+            valid_pixel_pct=self.last_valid_pixel_pct,
+            gap_filled=self.last_gap_filled,
+        )
 
     def _get_expected_features(self) -> list:
         features = self.model.feature_names or self.model.metadata.get('feature_names') or []
@@ -526,7 +583,7 @@ class CarbonInferenceEngine:
                 "but no gee_classifier_path in metadata. Run upgrade_gee_native.py first."
             )
         # Resolve path relative to the loaded model file. Some models are loaded
-        # from the upload database and are intentionally absent from registry.json.
+        # from the same upload database as all executable artifacts.
         saved_models_dir = Path(self.model_path).parent
         clf_path = saved_models_dir / clf_path_rel
         if not clf_path.exists():
@@ -588,6 +645,8 @@ class CarbonInferenceEngine:
         )
         self._s2_image_counts = []
         self.last_s2_image_count = None
+        self.last_valid_pixel_pct = None
+        self.last_gap_filled = None
 
         if gee_algo_type not in ("linear_expression", "native_classifier"):
             raise ValueError(
@@ -854,6 +913,8 @@ class CarbonInferenceEngine:
         # reporting each year's own scene count.
         self._s2_image_counts = []
         self.last_s2_image_count = None
+        self.last_valid_pixel_pct = None
+        self.last_gap_filled = None
 
         predictors = self._build_predictors(
             roi=roi,
@@ -920,42 +981,6 @@ class CarbonInferenceEngine:
             },
         }
 
-    def _get_model_coefficients_for_gee(self) -> list:
-        """
-        Back-transform coefficients from scaled to original feature space.
-        
-        Model: y = coef @ X_scaled + intercept
-            X_scaled = (X - mean) / std
-        
-        So in original space:
-            y = (coef / std) @ X - (coef / std) @ mean + intercept
-        """
-        if not (hasattr(self.model, 'coef_') and hasattr(self.model, 'intercept_')):
-            logger.warning("Non-linear model, attempting surrogate...")
-            return self._create_linear_surrogate()
-        
-        coef_scaled = self.model.coef_.copy()
-        intercept   = float(self.model.intercept_)
-        
-        # Jika scaler sudah di-fit, transform balik ke original space
-        if (hasattr(self.scaler, 'mean_') and 
-                self.metadata.get('scaled_features', True)):
-            
-            mean = self.scaler.mean_          # shape: (n_features,)
-            std  = self.scaler.scale_         # shape: (n_features,)
-            
-            # Koefisien di original space
-            coef_orig      = coef_scaled / std
-            intercept_orig = intercept - float(np.dot(coef_scaled / std, mean))
-            
-            # Susun: [intercept, coef_B2, coef_B3, ..., coef_brightness]
-            # Ini harus match dengan urutan band di GEE predictor image
-            coefficients = [intercept_orig] + coef_orig.tolist()
-        else:
-            coefficients = [intercept] + coef_scaled.tolist()
-        
-        return coefficients
-        
     def _create_linear_surrogate(self) -> list:
         """
         Create a linear surrogate model for non-linear models.

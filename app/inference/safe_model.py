@@ -4,9 +4,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-# Load ONNX Runtime before optional ML libraries. Some Windows OpenMP builds
-# otherwise collide with LightGBM's native runtime during lazy DLL loading.
-import onnxruntime as ort
+import tempfile
+from app.core.isolated_process import run_isolated
+
 
 
 def validate_onnx(raw: bytes):
@@ -33,16 +33,14 @@ def validate_onnx(raw: bytes):
 
 class OnnxRegressor:
     def __init__(self, raw: bytes, metadata: dict):
-        validate_onnx(raw)
-        options = ort.SessionOptions()
-        options.intra_op_num_threads = 2
-        options.inter_op_num_threads = 1
-        self.session = ort.InferenceSession(raw, sess_options=options, providers=["CPUExecutionProvider"])
-        inputs = self.session.get_inputs()
-        if len(inputs) != 1 or inputs[0].type not in {"tensor(float)", "tensor(double)"}:
-            raise ValueError("Model must accept one numeric feature matrix")
-        self.input = inputs[0]
-        self.dtype = np.float64 if self.input.type == "tensor(double)" else np.float32
+        if len(raw) > 128 * 1024 * 1024:
+            raise ValueError("Model exceeds 128 MiB")
+        self.raw = raw
+        with tempfile.TemporaryDirectory(prefix="savegeo-model-") as directory:
+            path = Path(directory) / "model.onnx"
+            path.write_bytes(raw)
+            info = run_isolated("onnx-inspect", {"model": str(path)}, timeout=60)
+        self.dtype = np.float64 if info["dtype"] == "float64" else np.float32
         linear = metadata.get("linear_parameters")
         if isinstance(linear, dict):
             self.coef_ = np.asarray(linear["coef"], dtype=float)
@@ -52,7 +50,13 @@ class OnnxRegressor:
         values = np.asarray(X, dtype=self.dtype)
         if values.ndim != 2 or values.size > 20_000_000 or not np.isfinite(values).all():
             raise ValueError("Expected a finite bounded feature matrix")
-        output = np.asarray(self.session.run(None, {self.input.name: values})[0]).reshape(-1)
+        with tempfile.TemporaryDirectory(prefix="savegeo-predict-") as directory:
+            root = Path(directory)
+            (root / "model.onnx").write_bytes(self.raw)
+            np.save(root / "input.npy", values, allow_pickle=False)
+            run_isolated("onnx-predict", {"model": str(root / "model.onnx"),
+                "input": str(root / "input.npy"), "output": str(root / "output.npy")}, timeout=120)
+            output = np.load(root / "output.npy", allow_pickle=False).reshape(-1)
         if output.size != values.shape[0] or not np.isfinite(output).all():
             raise ValueError("Model returned invalid predictions")
         return output

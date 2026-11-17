@@ -15,6 +15,9 @@ services:
       - savegeo_pgdata:/var/lib/postgresql/data
 
   api:
+    mem_limit: 12g
+    pids_limit: 512
+    cpus: 4
     security_opt:
       - no-new-privileges:true
     cap_drop: [ALL]
@@ -112,6 +115,53 @@ services:
       - app.workers.dmrv_worker
       - --poll-interval
       - ${DMRV_WORKER_POLL_INTERVAL:-2}
+
+  analysis-worker:
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SAVEGEO_PRODUCT_VERSION: ${SAVEGEO_PRODUCT_VERSION:-}
+        SAVEGEO_COMMIT_SHA: ${SAVEGEO_COMMIT_SHA:-}
+        SAVEGEO_BUILD_NUMBER: ${SAVEGEO_BUILD_NUMBER:-}
+    restart: unless-stopped
+    mem_limit: 10g
+    pids_limit: 256
+    cpus: 4
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - .env
+    environment:
+      APP_ENV: production
+      DEBUG: "false"
+      DATABASE_URL: ${RUNTIME_DATABASE_URL:?Run scripts/prepare_runtime_database.py before deploying}
+      POSTGRES_PASSWORD: ""
+      MIGRATION_DATABASE_URL: ""
+      ANALYSIS_QUEUE_BACKEND: postgres
+      CARBON_TILE_CACHE_DIR: /app/var/carbon_tile_cache
+      CAMS_ARCHIVE_DIR: /app/var/cams/archive
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
+      UPLOAD_DIR: /app/var/uploads
+      MODEL_DIR: /app/var/saved_models
+      DMRV_EVIDENCE_DIR: /app/var/dmrv/evidence
+    volumes:
+      - ./var:/app/var
+    # A queue worker has no HTTP listener. API readiness is checked separately.
+    healthcheck:
+      disable: true
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    command:
+      - python
+      - -m
+      - app.workers.analysis_worker
 
   migrate:
     build:

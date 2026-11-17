@@ -14,6 +14,15 @@ class Query:
     def filter_by(self, **_kwargs):
         return self
 
+    def order_by(self, *_columns):
+        return self
+
+    def offset(self, _value):
+        return self
+
+    def limit(self, _value):
+        return self
+
     def all(self):
         return []
 
@@ -58,15 +67,15 @@ def test_granite_model_listing_obeys_dataset_and_gee_filters(monkeypatch):
     monkeypatch.setattr(model_routes, "builtin_carbon_models", lambda *_args, **_kwargs: [])
 
     listed = model_routes.models_list(
-        model_type="carbon", target_dataset=registry.TARGET_DATASET, gee_deployable=False, db=EmptyDB()
+        model_type="carbon", target_dataset=registry.TARGET_DATASET, gee_deployable=False, db=EmptyDB(), offset=0, limit=100
     )
     assert [item["name"] for item in listed["models"]] == [registry.MODEL_NAME]
     excluded = model_routes.models_list(
-        model_type="carbon", target_dataset="GEDI_L4B_STACK", gee_deployable=False, db=EmptyDB()
+        model_type="carbon", target_dataset="GEDI_L4B_STACK", gee_deployable=False, db=EmptyDB(), offset=0, limit=100
     )
     assert excluded["count"] == 0
     gee_only = model_routes.models_list(
-        model_type="carbon", target_dataset=registry.TARGET_DATASET, gee_deployable=True, db=EmptyDB()
+        model_type="carbon", target_dataset=registry.TARGET_DATASET, gee_deployable=True, db=EmptyDB(), offset=0, limit=100
     )
     assert gee_only["count"] == 0
 

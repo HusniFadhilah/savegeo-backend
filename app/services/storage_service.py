@@ -95,7 +95,8 @@ def download_credential(path: str) -> bytes:
     data = _read_object(path)
     if data.startswith(secret_encryption.MAGIC):
         return secret_encryption.decrypt(data, purpose="gee-credential:" + path)
-    if not get_settings().credential_allow_legacy_plaintext_read:
+    settings = get_settings()
+    if settings.app_env in {"production", "staging"} or not settings.credential_allow_legacy_plaintext_read:
         raise secret_encryption.SecretEncryptionError("Kredensial lama perlu dimigrasikan ke penyimpanan terenkripsi.")
     return data
 

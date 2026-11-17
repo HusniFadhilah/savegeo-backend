@@ -99,6 +99,7 @@ class ModelUpdateRequest(BaseModel):
 
 
 class AdminUserCreateRequest(BaseModel):
+    is_superuser: bool = False
     full_name: str = Field(max_length=160)
     username: str
     password: str
@@ -116,6 +117,7 @@ class AdminUserCreateRequest(BaseModel):
 
 
 class AdminUserUpdateRequest(FullNameFields):
+    is_superuser: bool | None = None
     email: str | None = None
     is_active: bool | None = None
     role_id: int | None = None

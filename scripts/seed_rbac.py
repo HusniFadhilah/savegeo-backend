@@ -119,7 +119,7 @@ def seed_rbac() -> None:
         for name, description, is_default, perm_codes in ROLES:
             role = db.query(Role).filter_by(name=name).first()
             if role is None:
-                role = Role(name=name, description=description, is_default=is_default)
+                role = Role(name=name, description=description, is_default=is_default, is_viewer=name == "viewer")
                 db.add(role)
                 db.flush()
             if name == "viewer":

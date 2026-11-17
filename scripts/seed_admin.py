@@ -30,7 +30,7 @@ def seed_default_admin() -> None:
             print("Username required and password must be at least 8 characters.", file=sys.stderr)
             sys.exit(1)
 
-        admin = AdminUser(username=username, password_hash=hash_password(password), is_active=True)
+        admin = AdminUser(username=username, password_hash=hash_password(password), is_active=True, is_superuser=True)
         db.add(admin)
         db.commit()
         print(f"Created admin user '{username}'.")

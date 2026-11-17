@@ -26,6 +26,7 @@ def _admin(role_name: str, permissions: set[str], role_id: int = 1):
     role = Role(
         id=role_id,
         name=role_name,
+        is_viewer=role_name == "viewer",
         permissions=[Permission(code=code) for code in permissions],
     )
     return AdminUser(
@@ -34,6 +35,7 @@ def _admin(role_name: str, permissions: set[str], role_id: int = 1):
         password_hash="unused",
         is_active=True,
         role_id=role_id,
+        is_superuser=role_id is None,
         role=role,
     )
 
@@ -157,6 +159,9 @@ def test_viewer_without_role_features_fails_closed_when_role_lookup_is_empty():
         def filter(self, *_args):
             return self
 
+        def order_by(self, *_args):
+            return self
+
         def first(self):
             return None
 
@@ -188,7 +193,7 @@ def test_viewer_api_gates_alternate_user_auth_and_analysis_payload(monkeypatch):
     with local_sessions() as db:
         carbon = Permission(code="app.feature.carbon_stock", description="carbon")
         disaster = Permission(code="app.feature.disaster_mapping", description="disaster")
-        viewer_role = Role(name="viewer", feature_permissions_configured=True, permissions=[carbon])
+        viewer_role = Role(name="viewer", is_viewer=True, feature_permissions_configured=True, permissions=[carbon])
         db.add_all([viewer_role, disaster])
         db.flush()
         admin = AdminUser(
@@ -315,12 +320,8 @@ def test_viewer_api_gates_alternate_user_auth_and_analysis_payload(monkeypatch):
             cookies={USER_SESSION_COOKIE: user_token},
             json={"datasetId": carbon_dataset_id},
         )
-        assert export.status_code == 202
-        geospatial_job_id = export.json()["id"]
-        assert client.get(
-            f"/api/geospatial/jobs/{geospatial_job_id}",
-            cookies={USER_SESSION_COOKIE: user_token},
-        ).status_code == 200
+        assert export.status_code == 501
+        assert not geospatial._jobs
 
         with local_sessions() as db:
             role = db.query(Role).filter_by(name="viewer").one()
@@ -332,19 +333,18 @@ def test_viewer_api_gates_alternate_user_auth_and_analysis_payload(monkeypatch):
             f"/api/geospatial/datasets/{carbon_dataset_id}",
             cookies={USER_SESSION_COOKIE: user_token},
         ).status_code == 403
-        for path, method in (
-            (f"/api/geospatial/jobs/{geospatial_job_id}", "get"),
-            (f"/api/geospatial/jobs/{geospatial_job_id}/cancel", "post"),
-        ):
-            response = getattr(client, method)(path, cookies={USER_SESSION_COOKIE: user_token})
-            assert response.status_code == 403
+        unavailable_job = client.get(
+            "/api/geospatial/jobs/nonexistent-job",
+            cookies={USER_SESSION_COOKIE: user_token},
+        )
+        assert unavailable_job.status_code == 404
         disaster_export = client.post(
             "/api/geospatial/export/cog",
             cookies={USER_SESSION_COOKIE: user_token},
             json={"datasetId": disaster_dataset_id},
         )
-        assert disaster_export.status_code == 202
-        disaster_job_id = disaster_export.json()["id"]
+        assert disaster_export.status_code == 501
+        assert not geospatial._jobs
 
         with local_sessions() as db:
             role = db.query(Role).filter_by(name="viewer").one()
@@ -428,7 +428,7 @@ def test_narrow_viewer_manager_and_full_access_can_update_without_sensitive_acce
             for code in VIEWER_FEATURE_CODES
         }
         carbon = feature_permissions["app.feature.carbon_stock"]
-        viewer = Role(name="viewer", feature_permissions_configured=True, permissions=[carbon])
+        viewer = Role(name="viewer", is_viewer=True, feature_permissions_configured=True, permissions=[carbon])
         limited_role = Role(name="admin", permissions=[viewer_manager])
         old_broad_role = Role(name="geospatial_expert", permissions=[old_broad_manager])
         db.add_all([viewer_manager, old_broad_manager, *feature_permissions.values(), viewer, limited_role, old_broad_role])
@@ -441,6 +441,7 @@ def test_narrow_viewer_manager_and_full_access_can_update_without_sensitive_acce
         )
         full_access = AdminUser(
             username="full-access-admin-test",
+            is_superuser=True,
             password_hash="unused",
             is_active=True,
             role_id=None,

@@ -220,10 +220,10 @@ def test_analysis_job_queue_rejects_overload(monkeypatch):
     monkeypatch.setattr(analysis_jobs, "_job_slots", slots)
 
     with pytest.raises(HTTPException) as error:
-        analysis_jobs.create_analysis_job(
+        analysis_jobs._create_analysis_job_sync(
             request=SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(ee_initialized=False))),
             data={"type": "carbon_local", "payload": {}},
-            viewer=AdminUser(id=1, username="test-admin", password_hash="", role_id=None),
+            viewer=AdminUser(id=1, username="test-admin", password_hash="", role_id=None, is_superuser=True),
             db=object(),
         )
     assert error.value.status_code == 429
@@ -240,10 +240,10 @@ def test_analysis_job_slot_released_after_invalid_provenance(monkeypatch):
     db = SimpleNamespace(rollback=lambda: None)
     monkeypatch.setattr(analysis_jobs.provenance_service, "create_analysis_provenance", invalid)
     with pytest.raises(HTTPException) as error:
-        analysis_jobs.create_analysis_job(
+        analysis_jobs._create_analysis_job_sync(
             request=SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(ee_initialized=False))),
             data={"type": "carbon_local", "payload": {}},
-            viewer=AdminUser(id=1, username="test-admin", password_hash="", role_id=None),
+            viewer=AdminUser(id=1, username="test-admin", password_hash="", role_id=None, is_superuser=True),
             db=db,
         )
     assert error.value.status_code == 422
@@ -275,14 +275,14 @@ def test_analysis_job_result_is_visible_only_to_its_owner(monkeypatch, tmp_path)
     analysis_jobs._write_job(job_id, {"type": "carbon_local", "status": "succeeded", "result": {"value": 7}})
 
     db = SimpleNamespace(get=lambda _model, _key: None)
-    owner = AdminUser(id=1, username="test-admin", password_hash="", role_id=None)
+    owner = AdminUser(id=1, username="test-admin", password_hash="", role_id=None, is_superuser=True)
     own_result = analysis_jobs.get_analysis_job(job_id, viewer=owner, db=db)
     assert own_result["result"] == {"value": 7}
     assert "owner" not in own_result
     with pytest.raises(HTTPException) as denied:
         analysis_jobs.get_analysis_job(
             job_id,
-            viewer=AdminUser(id=2, username="other-admin", password_hash="", role_id=None),
+            viewer=AdminUser(id=2, username="other-admin", password_hash="", role_id=None, is_superuser=True),
             db=db,
         )
     assert denied.value.status_code == 404

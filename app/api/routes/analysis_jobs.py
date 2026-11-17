@@ -21,7 +21,8 @@ from typing import Any
 
 import ee
 import requests
-from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -49,6 +50,10 @@ from app.services.gee_common import AnalysisError, public_analysis_error
 from app.services.carbon_retry import run_carbon_with_retry
 from app.services.aoi_reference import resolve_known_aoi
 from app.services.analysis_requirements import requires_earth_engine
+from app.services import analysis_queue
+from app.db.models.analysis_job import AnalysisJob
+from app.core.bounded_json import read_typed_json_object
+from app.schemas.analysis_jobs import AnalysisJobRequest
 
 router = APIRouter(tags=["analysis-jobs"])
 logger = logging.getLogger(__name__)
@@ -102,6 +107,11 @@ def viewer_owns_job(job_id: str, viewer: object, created_by_user_id: int | None 
     ``created_by_user_id`` from provenance is a fallback for user jobs whose
     status file is unavailable.
     """
+    if analysis_queue.enabled():
+        with SessionLocal() as db:
+            record = db.get(AnalysisJob, job_id)
+            if record is not None:
+                return record.owner == job_owner_key(viewer)
     try:
         path = _job_path(job_id)
     except HTTPException:
@@ -117,6 +127,11 @@ def _now() -> str:
 
 
 def _write_job(job_id: str, data: dict[str, Any]) -> None:
+    if analysis_queue.enabled():
+        with SessionLocal() as db:
+            if analysis_queue.write_document(db, job_id, {**data, "updated_at": _now()},
+                    os.getenv("SAVEGEO_ANALYSIS_LEASE")):
+                return
     path = _job_path(job_id)
     if path.exists() and "owner" not in data:
         with path.open("r", encoding="utf-8") as previous_file:
@@ -135,6 +150,11 @@ def _write_job(job_id: str, data: dict[str, Any]) -> None:
 
 
 def _read_job(job_id: str) -> dict[str, Any]:
+    if analysis_queue.enabled():
+        with SessionLocal() as db:
+            record = db.get(AnalysisJob, job_id)
+            if record is not None:
+                return record.document
     path = _job_path(job_id)
     if not path.exists():
         raise HTTPException(status_code=404, detail="Job not found")
@@ -167,6 +187,7 @@ def _carbon_cache_key(db: Session, job_type: str, payload: dict[str, Any], owner
                 "version": uploaded.version,
                 "updated_at": uploaded.updated_at.isoformat() if uploaded.updated_at else None,
                 "file_size_kb": uploaded.file_size_kb,
+                "artifact_sha256": uploaded.artifact_sha256,
                 "metadata": uploaded.metadata_json or {},
             })
             try:
@@ -352,17 +373,6 @@ def _run_job(
             result = crop_monitoring_service.run_crop_monitoring(db, payload, owner)
         else:  # defensive; validated before submit
             raise ValueError(f"Unsupported job type: {job_type}")
-        _write_job(
-            job_id,
-            {
-                "job_id": job_id,
-                "type": job_type,
-                "status": "succeeded",
-                "started_at": _read_job(job_id).get("started_at"),
-                "finished_at": _now(),
-                "result": result,
-            },
-        )
         if cache_key and owner:
             # Result payloads have already been JSON-serialized by the job store.
             cached_result = json.loads(json.dumps(result, ensure_ascii=False, default=str))
@@ -376,6 +386,17 @@ def _run_job(
             job_id,
             status="succeeded",
             completed_at=datetime.now(UTC),
+        )
+        _write_job(
+            job_id,
+            {
+                "job_id": job_id,
+                "type": job_type,
+                "status": "succeeded",
+                "started_at": _read_job(job_id).get("started_at"),
+                "finished_at": _now(),
+                "result": result,
+            },
         )
     except AnalysisError as exc:
         if cache_key and owner:
@@ -456,13 +477,17 @@ def _run_job(
 
 
 @router.post("/analysis-jobs", dependencies=[Depends(get_current_app_viewer)])
-def create_analysis_job(
+async def create_analysis_job(
     request: Request,
-    data: dict[str, Any] = Body(...),
     viewer: object = Depends(get_current_app_viewer),
     db: Session = Depends(get_db),
 ):
-    job_type = str(data.get("type") or "")
+    data = await read_typed_json_object(request, AnalysisJobRequest)
+    return await run_in_threadpool(_create_analysis_job_sync, request, data, viewer, db)
+
+
+def _create_analysis_job_sync(request: Request, data: dict[str, Any], viewer: object, db: Session):
+    job_type = data["type"]
     payload = data.get("payload")
     if job_type not in _ALLOWED_JOB_TYPES:
         raise HTTPException(status_code=400, detail=f"Unsupported analysis job type: {job_type}")
@@ -499,6 +524,24 @@ def create_analysis_job(
 
     if needs_ee and not getattr(request.app.state, "ee_initialized", False):
         raise HTTPException(status_code=503, detail="Google Earth Engine belum diinisialisasi. Cek kredensial di Admin Panel.")
+
+    if analysis_queue.enabled():
+        record, created = analysis_queue.prepare(db, job_type, payload, owner, cache_key,
+            request.headers.get("Idempotency-Key"))
+        if created:
+            try:
+                provenance_service.create_analysis_provenance(db, analysis_id=record.id,
+                    analysis_type=job_type, payload=payload,
+                    user_id=viewer.id if isinstance(viewer, User) else None)
+                output_registry_service.register_action_outputs(db, record.id)
+                analysis_queue.activate(db, record.id)
+            except Exception:
+                db.rollback()
+                analysis_queue.write_document(db, record.id, {"job_id": record.id, "type": job_type,
+                    "status": "failed", "error": "Pekerjaan tidak dapat disiapkan.", "status_code": 500})
+                raise
+        return {"job_id": record.id, "status": record.status,
+            "status_url": f"/analysis-jobs/{record.id}", "idempotent_replay": not created}
 
     if not _job_slots.acquire(blocking=False):
         raise HTTPException(
@@ -560,3 +603,10 @@ def get_analysis_job(
         status_code = int(job.get("status_code") or 500)
         return {k: v for k, v in job.items() if k != "status_code"} | {"http_status": status_code}
     return job
+
+
+@router.post("/analysis-jobs/{job_id}/cancel")
+def cancel_analysis_job(job_id: str, viewer: object = Depends(get_current_app_viewer), db: Session = Depends(get_db)):
+    if not analysis_queue.enabled():
+        raise HTTPException(501, "Cancellation requires the durable queue")
+    return analysis_queue.cancel(db, job_id, job_owner_key(viewer))

@@ -216,7 +216,7 @@ def ensure_current_session(payload: dict, account: User | AdminUser) -> None:
 
 
 def requires_admin_mfa(admin: AdminUser) -> bool:
-    privileged = admin.role_id is None or bool(admin.role and admin.role.name == "geospatial_expert")
+    privileged = bool(admin.is_superuser) or any(p.code.endswith(".write") for p in (admin.role.permissions if admin.role else []))
     return bool(getattr(admin, "mfa_enabled", False) or (privileged and get_settings().privileged_mfa_required))
 
 
@@ -283,7 +283,7 @@ def _credential_or_cookie(
 
 def is_admin_panel_viewer(admin: AdminUser) -> bool:
     """Return whether an admin account is explicitly assigned the viewer role."""
-    return bool(admin.role and admin.role.name and admin.role.name.strip().casefold() == "viewer")
+    return bool(admin.role and admin.role.is_viewer)
 
 
 def ensure_admin_panel_access(admin: AdminUser) -> AdminUser:
@@ -426,15 +426,7 @@ def get_current_app_viewer(
 
 
 def require_permission(code: str):
-    """Additive permission gate, layered on top of `get_current_admin`.
-
-    An admin with `role_id IS NULL` (every admin created before this RBAC
-    layer existed, and any admin created without an explicit role since) is
-    treated as legacy full-access and always passes - this column was added
-    nullable specifically so introducing roles/permissions cannot lock out
-    an existing deployment's admin account. Only admins explicitly assigned a
-    role are checked against that role's permission list.
-    """
+    """Require explicit permission or an explicit superuser grant."""
 
     def _dependency(admin: AdminUser = Depends(get_current_admin_panel)) -> AdminUser:
         if not admin_has_permission(admin, code):
@@ -447,13 +439,8 @@ def require_permission(code: str):
 
 
 def admin_has_permission(admin: AdminUser, code: str) -> bool:
-    """Return whether an admin may perform an explicitly gated operation.
+    """Missing roles deny access; only explicit superusers bypass permissions."""
 
-    ``role_id IS NULL`` is the legacy Full Access state. It intentionally
-    bypasses every permission gate so existing owners keep unrestricted access.
-    Explicit roles, including the built-in ``admin`` role, are evaluated only
-    from their assigned permission rows.
-    """
-    if admin.role_id is None:
+    if bool(getattr(admin, "is_superuser", False)):
         return True
     return code in {p.code for p in (admin.role.permissions if admin.role else [])}

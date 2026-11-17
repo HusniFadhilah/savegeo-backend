@@ -7,12 +7,12 @@ import json
 import logging
 import zipfile
 
-import requests
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Query
 from pydantic import BaseModel
 
 from app.core.security import get_current_app_viewer
 from app.services import geocode_service
+from app.services.location_provider import search_places, imagery_date_metadata
 
 # Geocoding proxies a third-party service under SAVEGEO's identity and the
 # converters parse uploaded archives, so every utility requires a signed-in user.
@@ -31,23 +31,12 @@ _SHP_MAX_FEATURES = 100_000
 
 
 @router.get("/geocode")
-def geocode(q: str = ""):
+def geocode(q: str = Query(default="", max_length=200)):
     q = q.strip()
     if not q:
         raise HTTPException(status_code=400, detail="Parameter q wajib diisi.")
 
-    try:
-        r = requests.get(
-            "https://nominatim.openstreetmap.org/search",
-            params={"q": q, "format": "json", "limit": 3, "addressdetails": 1},
-            headers={"User-Agent": _UA},
-            timeout=10,
-        )
-        r.raise_for_status()
-        results = r.json()
-    except Exception as e:
-        logger.warning("Nominatim error: %s", e)
-        raise HTTPException(status_code=502, detail="Layanan geocoding tidak tersedia. Coba lagi.") from e
+    results = search_places(q, limit=3)
 
     if not results:
         raise HTTPException(status_code=404, detail=f"Lokasi {q!r} tidak ditemukan.")
@@ -85,7 +74,7 @@ def geocode(q: str = ""):
 
 
 @router.get("/geocode/search")
-def geocode_search(q: str = "", limit: int = 8):
+def geocode_search(q: str = Query(default="", max_length=200), limit: int = Query(default=8, ge=1, le=10)):
     """Multi-result geocoding for the async region/address search box (AOI
     'Seluruh Indonesia' tab) - distinct from /geocode above, which returns a
     single best match + up to 2 alternatives for the chatbot's "fly to this
@@ -98,34 +87,19 @@ def geocode_search(q: str = "", limit: int = 8):
         return {"results": []}
 
     limit = max(1, min(limit, 10))
-    try:
-        r = requests.get(
-            "https://nominatim.openstreetmap.org/search",
-            params={
-                "q": q,
-                "format": "json",
-                "limit": limit,
-                "addressdetails": 1,
-                "polygon_geojson": 1,
-                # Server-side simplification (~50 m) keeps city/regency polygons
-                # small enough for the browser; geocode_service still caps vertices.
-                "polygon_threshold": 0.0005,
-                "countrycodes": "id",
-            },
-            headers={"User-Agent": _UA},
-            timeout=10,
-        )
-        r.raise_for_status()
-        results = r.json()
-    except Exception as e:
-        logger.warning("Nominatim search error: %s", e)
-        raise HTTPException(status_code=502, detail="Layanan pencarian lokasi tidak tersedia. Coba lagi.") from e
+    results = search_places(q, limit=limit, polygon=True)
 
     if not isinstance(results, list):
         raise HTTPException(status_code=502, detail="Layanan pencarian lokasi mengembalikan respons tidak valid.")
 
     normalized = [c for c in (geocode_service.normalize_candidate(d) for d in results if isinstance(d, dict)) if c]
     return {"results": geocode_service.rank_candidates(normalized, q)}
+
+
+@router.get("/imagery-date")
+def imagery_date(lat: float = Query(ge=-90, le=90, allow_inf_nan=False),
+                 lng: float = Query(ge=-180, le=180, allow_inf_nan=False)):
+    return imagery_date_metadata(lat, lng)
 
 
 class ParseAoiRequest(BaseModel):

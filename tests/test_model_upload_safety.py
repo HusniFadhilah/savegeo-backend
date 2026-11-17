@@ -3,6 +3,7 @@ from fastapi import HTTPException
 from types import SimpleNamespace
 import pytest
 from app.repositories import uploaded_model_repo
+import hashlib
 
 
 def test_model_stem_cannot_escape_model_directory():
@@ -32,9 +33,12 @@ def test_model_lookup_accepts_only_files_under_model_root(tmp_path, monkeypatch)
     root = tmp_path / "models"
     root.mkdir()
     model = root / "valid.onnx"
-    model.write_bytes(b"trusted")
+    model_bytes = b"trusted"
+    model.write_bytes(model_bytes)
     monkeypatch.setattr(uploaded_model_repo, "get_settings", lambda: SimpleNamespace(model_path=root))
-    query = SimpleNamespace(first=lambda: SimpleNamespace(filepath=str(model), filename=model.name))
+    query = SimpleNamespace(first=lambda: SimpleNamespace(
+        filepath=str(model), filename=model.name, artifact_sha256=hashlib.sha256(model_bytes).hexdigest()
+    ))
     query.filter_by = lambda **_kwargs: query
     db = SimpleNamespace(query=lambda _model: query)
     assert uploaded_model_repo.get_active_model_path(db, "carbon", "valid") == str(model.resolve())
@@ -68,4 +72,4 @@ def test_catalog_editor_cannot_upload_executable_model():
     with pytest.raises(HTTPException) as error:
         _ensure_model_execution_permission(editor)
     assert error.value.status_code == 403
-    _ensure_model_execution_permission(SimpleNamespace(role_id=None, role=None))
+    _ensure_model_execution_permission(SimpleNamespace(role_id=None, role=None, is_superuser=True))

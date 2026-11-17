@@ -146,6 +146,17 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     bind = op.get_bind()
+    assigned = bind.execute(
+        sa.text(
+            "SELECT COUNT(*) FROM admin_users "
+            "WHERE role_id = (SELECT id FROM roles WHERE name = 'geospatial_expert')"
+        )
+    ).scalar_one()
+    if assigned:
+        raise RuntimeError(
+            "Cannot downgrade geospatial_expert while administrator accounts still use it; "
+            "reassign those accounts explicitly first."
+        )
     bind.execute(
         sa.text(
             "DELETE FROM role_permissions WHERE role_id = "

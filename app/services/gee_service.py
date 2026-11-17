@@ -59,13 +59,15 @@ def initialize_ee(db: Session) -> bool:
     key_file = settings.gee_key_file
     client_email = settings.gee_service_account
 
-    if key_file and client_email and Path(key_file).exists():
+    if settings.gee_allow_legacy_plaintext_file_fallback and key_file and client_email and Path(key_file).exists():
         try:
             _init_from_key_file(client_email, key_file)
-            logger.info("Earth Engine initialized from env: %s", client_email)
+            logger.info("Earth Engine initialized from the explicitly enabled local key-file fallback")
             return True
         except Exception as exc:  # noqa: BLE001
             logger.error("GEE init from env failed: %s", type(exc).__name__)
+    elif key_file and not settings.gee_allow_legacy_plaintext_file_fallback:
+        logger.warning("Plaintext Earth Engine key-file fallback is disabled; configure an encrypted DB credential")
 
     logger.warning("Earth Engine could not be initialized (no active DB credential or valid env fallback).")
     return False

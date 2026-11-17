@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import socket
+import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -56,12 +57,42 @@ def test_public_https_response_cap_and_close(monkeypatch):
         def __init__(self, *a, **k): pass
         def urlopen(self, *a, **k):
             stream = io.BytesIO(b'x' * 32)
-            return SimpleNamespace(status=200, headers={}, read=lambda n, **k: stream.read(n), close=lambda: calls.append('response'))
+            return SimpleNamespace(status=200, headers={}, read1=lambda n, **k: stream.read(n), close=lambda: calls.append('response'))
         def close(self): calls.append('pool')
     monkeypatch.setattr(public_http.urllib3, 'HTTPSConnectionPool', Pool)
     with pytest.raises(ValueError, match='size limit'):
         public_http.public_http.get('https://example.com/', max_bytes=8)
     assert calls == ['response', 'pool']
+
+
+def test_public_https_enforces_total_deadline_on_a_slow_stream(monkeypatch):
+    monkeypatch.setattr(public_http, 'public_addresses', lambda _: ['93.184.215.14'])
+
+    class SlowResponse:
+        status = 200
+        headers = {}
+        def __init__(self):
+            self.reads = 0
+        def read1(self, _size, **_kwargs):
+            self.reads += 1
+            time.sleep(0.025)
+            return b'x' if self.reads <= 10 else b''
+        def close(self):
+            return None
+
+    class Pool:
+        def __init__(self, *args, **kwargs):
+            return None
+        def urlopen(self, *args, **kwargs):
+            return SlowResponse()
+        def close(self):
+            return None
+
+    monkeypatch.setattr(public_http.urllib3, 'HTTPSConnectionPool', Pool)
+    started = time.monotonic()
+    with pytest.raises(Exception, match='deadline|timed out|timeout'):
+        public_http.public_http.get('https://example.com/', timeout=0.06)
+    assert time.monotonic() - started < 0.3
 
 
 def test_public_model_metadata_is_allowlisted():

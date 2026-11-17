@@ -32,7 +32,7 @@ def public_addresses(host: str) -> list[str]:
 
 class PublicHTTPS:
     def request(self, method: str, url: str, *, params=None, data=None, timeout=30,
-                allow_redirects=False, max_bytes=16 * 1024 * 1024) -> requests.Response:
+                allow_redirects=False, max_bytes=16 * 1024 * 1024, headers=None) -> requests.Response:
         parsed = urlsplit(url)
         if (parsed.scheme != "https" or not parsed.hostname or parsed.username is not None
                 or parsed.password is not None or parsed.port not in {None, 443}
@@ -45,7 +45,10 @@ class PublicHTTPS:
             query += ("&" if query else "") + urlencode(params, doseq=True)
         target = urlunsplit(("", "", parsed.path or "/", query, ""))
         body = urlencode(data, doseq=True).encode() if data is not None else None
-        headers = {"Host": hostname, "Accept-Encoding": "identity"}
+        supplied_headers = headers or {}
+        if any(key.lower() not in {"user-agent", "accept"} for key in supplied_headers):
+            raise ValueError("Public HTTPS accepts only application identification headers")
+        headers = {**supplied_headers, "Host": hostname, "Accept-Encoding": "identity"}
         if body is not None:
             headers["Content-Type"] = "application/x-www-form-urlencoded"
         seconds = min(max(float(timeout), 0.1), 60.0)
@@ -65,7 +68,9 @@ class PublicHTTPS:
             while True:
                 if time.monotonic() >= deadline:
                     raise requests.Timeout("Public HTTPS deadline exceeded")
-                chunk = upstream.read(64 * 1024, decode_content=True)
+                # read1 returns after one socket read. read(amount) can wait forever
+                # for a full chunk when a peer drips bytes just below read_timeout.
+                chunk = upstream.read1(64 * 1024, decode_content=True)
                 if not chunk:
                     break
                 size += len(chunk)

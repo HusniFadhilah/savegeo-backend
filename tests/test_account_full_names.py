@@ -24,7 +24,7 @@ def accounts(monkeypatch):
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     Base.metadata.create_all(engine, tables=[Role.__table__, Permission.__table__, role_permissions, AdminUser.__table__, User.__table__])
     with Session(engine) as db:
-        owner = AdminUser(username="owner", password_hash="unused", full_name="Nama Awal")
+        owner = AdminUser(username="owner", password_hash="unused", full_name="Nama Awal", is_superuser=True)
         target = AdminUser(username="viewer", password_hash="unused", full_name="Viewer Lama")
         ordinary = User(username="member", email="member@example.test", password_hash="unused")
         other = User(username="other", email="other@example.test", password_hash="unused", full_name="Tidak diubah")
