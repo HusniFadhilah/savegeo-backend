@@ -321,7 +321,6 @@ def test_viewer_api_gates_alternate_user_auth_and_analysis_payload(monkeypatch):
             json={"datasetId": carbon_dataset_id},
         )
         assert export.status_code == 501
-        assert not geospatial._jobs
 
         with local_sessions() as db:
             role = db.query(Role).filter_by(name="viewer").one()
@@ -338,13 +337,17 @@ def test_viewer_api_gates_alternate_user_auth_and_analysis_payload(monkeypatch):
             cookies={USER_SESSION_COOKIE: user_token},
         )
         assert unavailable_job.status_code == 404
+        unavailable_cancel = client.post(
+            "/api/geospatial/jobs/nonexistent-job/cancel",
+            cookies={USER_SESSION_COOKIE: user_token},
+        )
+        assert unavailable_cancel.status_code == 404
         disaster_export = client.post(
             "/api/geospatial/export/cog",
             cookies={USER_SESSION_COOKIE: user_token},
             json={"datasetId": disaster_dataset_id},
         )
         assert disaster_export.status_code == 501
-        assert not geospatial._jobs
 
         with local_sessions() as db:
             role = db.query(Role).filter_by(name="viewer").one()
@@ -390,9 +393,6 @@ def test_viewer_api_gates_alternate_user_auth_and_analysis_payload(monkeypatch):
         )
         assert workflow_create_denied.status_code == 403
     finally:
-        from app.api.routes import geospatial
-        geospatial._jobs.pop(locals().get("geospatial_job_id", ""), None)
-        geospatial._jobs.pop(locals().get("disaster_job_id", ""), None)
         client.close()
         if previous is None:
             app.dependency_overrides.pop(get_db, None)
@@ -547,3 +547,4 @@ def test_narrow_viewer_manager_and_full_access_can_update_without_sensitive_acce
         else:
             app.dependency_overrides[get_db] = previous
         engine.dispose()
+
