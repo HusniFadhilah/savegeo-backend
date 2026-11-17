@@ -17,7 +17,6 @@ from app.api.routes import fields, geospatial, user_auth
 from app.core.security import create_user_access_token
 from app.db.models.field import Field
 from app.db.models.user import User
-from app.db.models.admin_user import AdminUser
 from app.db.session import get_db
 from app.providers import arcgis_client
 from app.services import crop_monitoring_service
@@ -96,34 +95,12 @@ def test_field_migration_preserves_existing_data():
     engine.dispose()
 
 
-def test_geospatial_job_access_and_cancel_are_owner_scoped(monkeypatch):
-    monkeypatch.setattr(geospatial, "_jobs", {})
-    monkeypatch.setattr(geospatial, "ensure_feature_access", lambda *_: None)
-    owner = User(id=1)
-    other = User(id=2)
-    job = geospatial._new_job("cog", geospatial.ExportRequest(datasetId="scene"), "app.feature.carbon_stock", owner)
-    assert "owner" not in job
-    for principal in (other, AdminUser(id=1)):
-        for operation in (geospatial.get_geospatial_job, geospatial.cancel_geospatial_job):
-            with pytest.raises(HTTPException) as error:
-                operation(job["id"], viewer=principal, db=None)
-            assert error.value.status_code == 404
-    assert geospatial.get_geospatial_job(job["id"], viewer=owner, db=None)["status"] == "queued"
-    job["request"]["datasetId"] = "tampered"
-    assert geospatial.get_geospatial_job(job["id"], viewer=owner, db=None)["request"]["datasetId"] == "scene"
-    assert geospatial.cancel_geospatial_job(job["id"], viewer=owner, db=None)["status"] == "cancelled"
-    with pytest.raises(HTTPException) as error:
-        geospatial.cancel_geospatial_job(job["id"], viewer=owner, db=None)
-    assert error.value.status_code == 409
-
-
 @pytest.mark.parametrize("sql", ["SELECT * FROM scenes", "WITH x AS (SELECT * FROM admin_users) SELECT * FROM x", "SELECT 1 UNION SELECT 1", "SELECT * FROM (SELECT 1) s", "SELECT pg_sleep(30)"])
-def test_server_sql_creates_no_jobs(sql, monkeypatch):
-    monkeypatch.setattr(geospatial, "_jobs", {})
+def test_server_sql_creates_no_jobs(sql):
     with pytest.raises(HTTPException) as error:
         geospatial.geospatial_query(geospatial.QueryRequest(datasetId="scene", sql=sql), viewer=User(id=1), db=None)
     assert error.value.status_code == 501
-    assert geospatial._jobs == {}
+    assert not hasattr(geospatial, "_jobs")
 
 
 def test_registration_closed_by_default_without_touching_database(monkeypatch):
