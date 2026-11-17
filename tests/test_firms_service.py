@@ -16,12 +16,12 @@ CSV = """latitude,longitude,bright_ti4,bright_ti5,scan,track,acq_date,acq_time,s
 """
 
 
-def settings(map_key: str = "test-map-key"):
+def settings(map_key: str = "test-map-key", timeout: int = 20):
     return SimpleNamespace(
         nasa_firms_map_key=map_key,
         nasa_firms_base_url="https://firms.modaps.eosdis.nasa.gov",
         nasa_firms_cache_ttl_seconds=900,
-        nasa_firms_request_timeout_seconds=20,
+        nasa_firms_request_timeout_seconds=timeout,
         nasa_firms_max_day_range=7,
     )
 
@@ -81,6 +81,7 @@ def test_get_fires_uses_cache_and_never_returns_map_key(monkeypatch):
     cached = firms_service.get_fires(**query)
 
     assert len(calls) == 1
+    assert calls[0][1]["timeout"] == (5, 20)
     assert payload["metadata"]["count"] == 1
     assert cached["metadata"]["cached"] is True
     assert "test-map-key" not in json.dumps(payload)
@@ -173,3 +174,8 @@ def test_upstream_request_error_traceback_never_contains_map_key(monkeypatch, re
     assert key not in str(captured.value)
     assert key not in rendered
     assert captured.value.__suppress_context__ is True
+
+
+def test_firms_timeout_is_clamped_to_finite_connect_and_read_budgets():
+    assert firms_service._request_timeout(settings(timeout=-5)) == (1, 1)
+    assert firms_service._request_timeout(settings(timeout=200)) == (5, 60)

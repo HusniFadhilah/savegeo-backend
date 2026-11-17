@@ -34,7 +34,7 @@ def run_isolated(kind: str, payload: dict, *, timeout: float = 120, memory_mib: 
                 process = subprocess.run([sys.executable, "-m", "app.workers.native_task", str(spec), str(output)],
                     cwd=directory, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL, timeout=timeout, check=False,
-                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+                    creationflags=int(getattr(subprocess, "CREATE_NO_WINDOW", 0)) if os.name == "nt" else 0)
             except subprocess.TimeoutExpired as exc:
                 raise ValueError("Native processing exceeded the time budget") from exc
             if process.returncode or not output.is_file() or output.stat().st_size > 65536:

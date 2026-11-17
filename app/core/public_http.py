@@ -64,13 +64,20 @@ class PublicHTTPS:
                 redirect=False, retries=False, preload_content=False)
             if 300 <= upstream.status < 400:
                 raise ValueError("Public HTTPS redirects are not allowed")
+            content_encoding = str(upstream.headers.get("Content-Encoding", "identity")).lower()
+            if content_encoding not in {"", "identity"}:
+                raise ValueError("Encoded public HTTPS responses are not allowed")
+            raw_response = getattr(upstream, "_fp", None)
+            read_chunk = getattr(raw_response, "read1", None)
+            if not callable(read_chunk):
+                raise requests.RequestException("Streaming response does not support bounded reads")
             chunks, size = [], 0
             while True:
                 if time.monotonic() >= deadline:
                     raise requests.Timeout("Public HTTPS deadline exceeded")
-                # read1 returns after one socket read. read(amount) can wait forever
-                # for a full chunk when a peer drips bytes just below read_timeout.
-                chunk = upstream.read1(64 * 1024, decode_content=True)
+                # Read one socket buffer. read(amount) can wait for a full chunk
+                # when a peer drips bytes just below read_timeout.
+                chunk = read_chunk(64 * 1024)
                 if not chunk:
                     break
                 size += len(chunk)

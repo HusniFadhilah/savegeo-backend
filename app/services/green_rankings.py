@@ -340,12 +340,6 @@ def result_page(run, owner, page=1, page_size=50, search="", sort_by="rank", sor
         }
         if sort_by not in sort_columns and sort_by != "rank":
             sort_by = "rank"
-        direction = sort_dir.upper()
-        order_clause = (
-            f"eligible DESC, official_rank {direction}, code ASC"
-            if sort_by == "rank"
-            else f"CASE WHEN {sort_columns[sort_by]} IS NULL THEN 1 ELSE 0 END ASC, {sort_columns[sort_by]} {direction}, code ASC"
-        )
         summary = dict(
             db.execute(
                 """SELECT COUNT(*) AS processed, SUM(eligible) AS eligible,
@@ -366,12 +360,7 @@ def result_page(run, owner, page=1, page_size=50, search="", sort_by="rank", sor
             ).fetchone()
         )
         records_total = int(db.execute("SELECT COUNT(*) FROM rows WHERE run=?", (run,)).fetchone()[0])
-        search_clause = ""
-        query_params = [run]
-        if search:
-            search_clause = " AND (lower(COALESCE(name_sort,'')) LIKE ? OR lower(code) LIKE ?)"
-            pattern = f"%{search.lower()}%"
-            query_params.extend([pattern, pattern])
+        pattern = f"%{search.lower()}%" if search else ""
         records_filtered = records_total
         if search:
             records_filtered = int(
@@ -380,10 +369,22 @@ def result_page(run, owner, page=1, page_size=50, search="", sort_by="rank", sor
                     (run, pattern, pattern),
                 ).fetchone()[0]
             )
-        query_params.extend([page_size, (page - 1) * page_size])
+        query_params = [
+            run,
+            int(bool(search)),
+            pattern,
+            pattern,
+            sort_by,
+            sort_dir,
+            sort_by,
+            sort_dir,
+            sort_by,
+            page_size,
+            (page - 1) * page_size,
+        ]
         rows = []
         for item_row in db.execute(
-            f"""WITH ranked AS (
+            """WITH ranked AS (
                 SELECT code, payload, eligible, green, area, valid_area, green_area,
                     json_extract(payload,'$.name') AS name_sort,
                     json_extract(payload,'$.coverage_percent') AS coverage_sort,
@@ -396,8 +397,54 @@ def result_page(run, owner, page=1, page_size=50, search="", sort_by="rank", sor
                 FROM rows WHERE run=?
             )
             SELECT payload, official_rank FROM ranked
-            WHERE 1=1{search_clause}
-            ORDER BY {order_clause}
+            WHERE (? = 0 OR lower(COALESCE(name_sort,'')) LIKE ? OR lower(code) LIKE ?)
+            ORDER BY eligible DESC,
+                CASE WHEN CASE ?
+                    WHEN 'rank' THEN official_rank
+                    WHEN 'name' THEN name_sort
+                    WHEN 'code' THEN code
+                    WHEN 'green_percent' THEN green
+                    WHEN 'coverage_percent' THEN coverage_sort
+                    WHEN 'area_ha' THEN area
+                    WHEN 'green_area_ha' THEN green_area
+                    WHEN 'valid_area_ha' THEN valid_area
+                    WHEN 'trees_ha' THEN trees_sort
+                    WHEN 'grass_ha' THEN grass_sort
+                    WHEN 'crops_ha' THEN crops_sort
+                    WHEN 'shrubs_ha' THEN shrubs_sort
+                    WHEN 'flooded_ha' THEN flooded_sort
+                END IS NULL THEN 1 ELSE 0 END ASC,
+                CASE WHEN ? = 'asc' THEN CASE ?
+                    WHEN 'rank' THEN official_rank
+                    WHEN 'name' THEN name_sort
+                    WHEN 'code' THEN code
+                    WHEN 'green_percent' THEN green
+                    WHEN 'coverage_percent' THEN coverage_sort
+                    WHEN 'area_ha' THEN area
+                    WHEN 'green_area_ha' THEN green_area
+                    WHEN 'valid_area_ha' THEN valid_area
+                    WHEN 'trees_ha' THEN trees_sort
+                    WHEN 'grass_ha' THEN grass_sort
+                    WHEN 'crops_ha' THEN crops_sort
+                    WHEN 'shrubs_ha' THEN shrubs_sort
+                    WHEN 'flooded_ha' THEN flooded_sort
+                END END ASC,
+                CASE WHEN ? = 'desc' THEN CASE ?
+                    WHEN 'rank' THEN official_rank
+                    WHEN 'name' THEN name_sort
+                    WHEN 'code' THEN code
+                    WHEN 'green_percent' THEN green
+                    WHEN 'coverage_percent' THEN coverage_sort
+                    WHEN 'area_ha' THEN area
+                    WHEN 'green_area_ha' THEN green_area
+                    WHEN 'valid_area_ha' THEN valid_area
+                    WHEN 'trees_ha' THEN trees_sort
+                    WHEN 'grass_ha' THEN grass_sort
+                    WHEN 'crops_ha' THEN crops_sort
+                    WHEN 'shrubs_ha' THEN shrubs_sort
+                    WHEN 'flooded_ha' THEN flooded_sort
+                END END DESC,
+                code ASC
             LIMIT ? OFFSET ?""",
             query_params,
         ):

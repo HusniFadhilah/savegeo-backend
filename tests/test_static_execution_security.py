@@ -57,7 +57,8 @@ def test_public_https_response_cap_and_close(monkeypatch):
         def __init__(self, *a, **k): pass
         def urlopen(self, *a, **k):
             stream = io.BytesIO(b'x' * 32)
-            return SimpleNamespace(status=200, headers={}, read1=lambda n, **k: stream.read(n), close=lambda: calls.append('response'))
+            raw = SimpleNamespace(read1=lambda n: stream.read(n))
+            return SimpleNamespace(status=200, headers={}, _fp=raw, close=lambda: calls.append('response'))
         def close(self): calls.append('pool')
     monkeypatch.setattr(public_http.urllib3, 'HTTPSConnectionPool', Pool)
     with pytest.raises(ValueError, match='size limit'):
@@ -84,7 +85,7 @@ def test_public_https_enforces_total_deadline_on_a_slow_stream(monkeypatch):
         def __init__(self, *args, **kwargs):
             return None
         def urlopen(self, *args, **kwargs):
-            return SlowResponse()
+            return SimpleNamespace(status=200, headers={}, _fp=SlowResponse(), close=lambda: None)
         def close(self):
             return None
 
@@ -93,6 +94,20 @@ def test_public_https_enforces_total_deadline_on_a_slow_stream(monkeypatch):
     with pytest.raises(Exception, match='deadline|timed out|timeout'):
         public_http.public_http.get('https://example.com/', timeout=0.06)
     assert time.monotonic() - started < 0.3
+
+
+def test_public_https_rejects_unexpected_content_encoding(monkeypatch):
+    monkeypatch.setattr(public_http, 'public_addresses', lambda _: ['93.184.215.14'])
+
+    class Pool:
+        def __init__(self, *args, **kwargs): pass
+        def urlopen(self, *args, **kwargs):
+            return SimpleNamespace(status=200, headers={'Content-Encoding': 'gzip'}, close=lambda: None)
+        def close(self): pass
+
+    monkeypatch.setattr(public_http.urllib3, 'HTTPSConnectionPool', Pool)
+    with pytest.raises(ValueError, match='Encoded public HTTPS'):
+        public_http.public_http.get('https://example.com/')
 
 
 def test_public_model_metadata_is_allowlisted():
