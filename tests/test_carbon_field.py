@@ -115,6 +115,22 @@ def test_fit_excludes_independent_validation_and_aggregates_repeat_visits():
     assert result["calibrated_validation"]["rmse"] > 50
 
 
+def test_validation_only_assessment_does_not_create_calibration_candidate():
+    rows = [observation(f"P{i}", i, 2 * i + 3) for i in range(1, 5)]
+    rows += [observation("V1", 5, 99, "validation")]
+    result = assess(
+        rows,
+        FieldAssessmentRequest(
+            pool="agb", prediction_source="model-v1", create_calibration_candidate=False
+        ),
+    )
+
+    assert result["status"] == "computed"
+    assert result["validation_plots"] == 1
+    assert result["artifact"] is None
+    assert any("hanya untuk validasi" in warning for warning in result["warnings"])
+
+
 def test_same_plot_cannot_leak_across_calibration_and_validation():
     with pytest.raises(ValueError, match="Plot yang sama"):
         assess(

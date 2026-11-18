@@ -240,7 +240,7 @@ def get_direct_carbon_reference_layer(
 def active_carbon_model_compatibility(db: Session) -> dict[str, list[str]]:
     """Return active carbon model names grouped by compatible reference dataset key."""
     grouped: dict[str, list[str]] = {}
-    models = db.query(UploadedModel).filter_by(model_type="carbon", is_active=True).all()
+    models = db.query(UploadedModel).filter_by(model_type="carbon", is_active=True, lifecycle_state="active").all()
     for model in models:
         meta = model.metadata_json or {}
         meta = model_compatibility.backfill_legacy_metadata(meta, model.name)
@@ -1006,7 +1006,13 @@ def analyze_carbon(db: Session, data: dict) -> dict:
             raise AnalysisError("AOI diperlukan untuk estimasi serasah/kayu mati.", 422)
         pool = "litter" if "LITTER" in data["reference_dataset"] else "deadwood"
         model = ensure_model(db, pool)
-        data = {**data, "model_name": model["name"]}
+        if model.get("lifecycle_state") == "active":
+            data = {**data, "model_name": model["name"]}
+        else:
+            # A trained proxy model remains quarantined until independent
+            # review. Return the selected reference baseline instead of trying
+            # to load its JSON ensemble through the generic ONNX path.
+            data = {**data, "model_name": None, "reference_only": True}
     if data.get("simple_mode") and data.get("reference_only") and data.get("reference_dataset") in {"SPAWN", "ORNL_BGB", "SOILGRIDS_OCS_0_30CM"}:
         from app.services.carbon_pool_service import analyze_carbon_pool
 
@@ -1378,7 +1384,7 @@ def analyze_carbon(db: Session, data: dict) -> dict:
 
     # Validate model-dataset compatibility before any expensive GEE work.
     _db_model = db.query(UploadedModel).filter_by(
-        name=inference_engine.model_name, is_active=True
+        name=inference_engine.model_name, is_active=True, lifecycle_state="active"
     ).first()
     if _db_model and _db_model.metadata_json:
         _compat_meta = (

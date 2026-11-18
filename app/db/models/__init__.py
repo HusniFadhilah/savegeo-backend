@@ -28,7 +28,7 @@ from app.db.models.satellite_imagery import SatelliteImagery
 from app.db.models.satellite_provider_entry import SatelliteProviderEntry
 from app.db.models.imagery_provider_entry import ImageryProviderEntry
 from app.db.models.system_config import SystemConfig
-from app.db.models.uploaded_model import UploadedModel
+from app.db.models.uploaded_model import UploadedModel, UploadedModelEvaluation, UploadedModelReview
 from app.db.models.user import User
 from app.db.models.workflow import Workflow, WorkflowRun
 from app.db.models.dmrv_project import DmrvProject, ProjectMember
@@ -85,6 +85,8 @@ __all__ = [
     "ImageryProviderEntry",
     "SystemConfig",
     "UploadedModel",
+    "UploadedModelEvaluation",
+    "UploadedModelReview",
     "User",
     "Workflow",
     "WorkflowRun",

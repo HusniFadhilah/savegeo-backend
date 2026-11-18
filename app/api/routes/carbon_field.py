@@ -7,7 +7,7 @@ import json
 import uuid
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import Response
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -20,8 +20,14 @@ from app.db.models.carbon_calibration import (
     CarbonCalibrationRun,
     CarbonFieldObservation,
 )
+from app.db.models.uploaded_model import UploadedModel
 from app.db.session import get_db
-from app.schemas.carbon_field import FieldAssessmentRequest, FieldObservationBatch, FieldPrediction
+from app.schemas.carbon_field import (
+    FieldAssessmentRequest,
+    FieldObservationBatch,
+    FieldPrediction,
+    FieldPredictionExtractionRequest,
+)
 from app.db.models.audit_log import AuditLog
 from app.services.carbon_field_service import (
     CSV_COLUMNS,
@@ -78,6 +84,124 @@ def merge_prediction(existing, prediction):
             409, "Sumber prediksi sudah memiliki nilai berbeda. Gunakan ID sumber/versi baru."
         )
     return existing if same else [*existing, prediction]
+
+
+def _pool_model_candidates(db, pool: str, model_name: str | None):
+    target_pool = POOL_TARGETS[pool]
+    candidates = db.query(UploadedModel).filter_by(
+        model_type="carbon", is_active=True, lifecycle_state="active"
+    ).all()
+    candidates = [
+        model for model in candidates
+        if (model.metadata_json or {}).get("format") == "gee_saved_ensemble"
+        and (model.metadata_json or {}).get("method") == "saved_reference_ensemble"
+        and (model.metadata_json or {}).get("target_pool") in {pool, target_pool, f"{pool}_carbon"}
+    ]
+    if model_name:
+        candidates = [model for model in candidates if model.name == model_name]
+    from app.services import model_lifecycle
+
+    approved = []
+    for model in candidates:
+        try:
+            evaluation = model_lifecycle.latest_evaluation(db, model)
+            if not model_lifecycle.has_current_approval(db, model, evaluation):
+                continue
+            model_lifecycle.artifact_path(model)
+        except HTTPException:
+            continue
+        validation = (model.metadata_json or {}).get("validation_metrics") or {}
+        try:
+            recorded_r2 = float(validation.get("r2", -1e9))
+        except (TypeError, ValueError):
+            recorded_r2 = -1e9
+        if recorded_r2 <= 0:
+            continue
+        approved.append((recorded_r2, model))
+    return sorted(approved, key=lambda item: (item[0], item[1].id), reverse=True)
+
+
+def _run_field_prediction(run_id: str):
+    from app.db.session import SessionLocal
+    from app.services.field_prediction_service import run_field_prediction
+
+    db = SessionLocal()
+    try:
+        run_field_prediction(db, run_id)
+    finally:
+        db.close()
+
+
+@router.post("/datasets/{dataset_id}/field-predictions", status_code=202)
+def queue_field_predictions(
+    dataset_id: str,
+    payload: FieldPredictionExtractionRequest,
+    request: Request,
+    admin=Depends(require_permission("calibration.write")),
+    db: Session = Depends(get_db),
+):
+    dataset = dataset_or_404(db, dataset_id)
+    if payload.analysis_year > datetime.now(UTC).year:
+        raise HTTPException(422, "Tahun prediksi tidak boleh melebihi tahun berjalan.")
+    if not getattr(request.app.state, "ee_initialized", False):
+        raise HTTPException(503, "Earth Engine belum aktif; ekstraksi prediksi lapangan belum dimulai.")
+
+    selected = _pool_model_candidates(db, payload.pool, payload.model_name)
+    if not selected:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "approved_gee_model_unavailable",
+                "message": "Belum ada model GEE untuk pool ini yang memiliki evaluasi tersimpan, persetujuan independen, dan artefak aktif.",
+            },
+        )
+    _, model = selected[0]
+    from app.services.model_serving_identity import current_identity
+
+    rows_query = db.query(CarbonFieldObservation).filter_by(dataset_pk=dataset.id, pool=payload.pool)
+    total = rows_query.count()
+    rows = rows_query.order_by(CarbonFieldObservation.id).offset(payload.offset).limit(payload.limit).all()
+    if not rows:
+        raise HTTPException(404, "Tidak ada pengukuran untuk pool dan rentang batch ini.")
+
+    metadata = model.metadata_json or {}
+    run = CarbonCalibrationRun(
+        id=str(uuid.uuid4()),
+        dataset_pk=dataset.id,
+        method="gee_field_prediction",
+        target_pool=POOL_TARGETS[payload.pool],
+        status="queued",
+        progress=0,
+        parameters={
+            "pool": payload.pool,
+            "analysis_year": payload.analysis_year,
+            "offset": payload.offset,
+            "batch_size": payload.limit,
+            "total_observations": total,
+            "observation_ids": [row.id for row in rows],
+            "model_id": model.id,
+            "model_name": model.name,
+            "model_version": model.version,
+            "artifact_sha256": model.artifact_sha256,
+            "approval_digest": model.approval_digest,
+            "target_pool": metadata.get("target_pool"),
+            "serving_revision": current_identity(),
+        },
+        created_by=admin.id,
+    )
+    db.add(run)
+    record_audit(
+        db,
+        admin,
+        "calibration.field.predictions.queue",
+        "carbon_calibration_run",
+        run.id,
+        {"pool": payload.pool, "analysis_year": payload.analysis_year, "model_id": model.id,
+         "model_version": model.version, "offset": payload.offset, "batch_size": len(rows)},
+    )
+    db.commit()
+    db.refresh(run)
+    return {"run": run.to_dict(), "total_observations": total, "batch_count": len(rows)}
 
 
 def import_records(db, dataset, records, admin):

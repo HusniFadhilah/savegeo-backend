@@ -123,7 +123,7 @@ def saved_reference_models(target_dataset=None, name=None, db=None):
     from app.db.session import SessionLocal
 
     with (nullcontext(db) if db is not None else SessionLocal()) as db:
-        query = db.query(UploadedModel).filter_by(model_type="carbon", is_active=True)
+        query = db.query(UploadedModel).filter_by(model_type="carbon", is_active=True, lifecycle_state="active")
         if name:
             query = query.filter_by(name=name)
         models = []

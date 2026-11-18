@@ -17,21 +17,23 @@ from app.db.models.gee_credential import GEECredential
 logger = logging.getLogger(__name__)
 
 
-def _init_from_key_file(client_email: str, key_path: str) -> bool:
+def _init_from_key_file(client_email: str, key_path: str, project_id: str | None = None) -> bool:
     import ee
 
     credentials = ee.ServiceAccountCredentials(client_email, key_path)
     # Supplying the configured Cloud project avoids relying on the default
     # Earth Engine discovery context, which can time out for service accounts.
-    project_id = get_settings().gee_project_id or None
-    ee.Initialize(credentials, project=project_id)
+    effective_project_id = project_id or get_settings().gee_project_id or None
+    ee.Initialize(credentials, project=effective_project_id)
     return True
 
 
-def _init_from_key_data(client_email: str, key_bytes: bytes) -> bool:
+def _init_from_key_data(client_email: str, key_bytes: bytes, project_id: str | None = None) -> bool:
     import ee
+
     credentials = ee.ServiceAccountCredentials(client_email, key_data=key_bytes.decode("utf-8"))
-    ee.Initialize(credentials, project=get_settings().gee_project_id or None)
+    effective_project_id = project_id or get_settings().gee_project_id or None
+    ee.Initialize(credentials, project=effective_project_id)
     return True
 
 
@@ -46,7 +48,7 @@ def initialize_ee(db: Session) -> bool:
             from app.services import storage_service
 
             key_bytes = storage_service.download_credential(cred.bucket_path)
-            _init_from_key_data(cred.client_email, key_bytes)
+            _init_from_key_data(cred.client_email, key_bytes, project_id=cred.project_id)
             cred.last_used_at = __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
             db.commit()
             logger.info("Earth Engine initialized from DB credential id=%s", cred.id)

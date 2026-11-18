@@ -161,6 +161,7 @@ class FieldAssessmentRequest(BaseModel):
     prediction_source: str = Field(min_length=3, max_length=255)
     max_year_gap: int = Field(default=0, ge=0, le=5)
     allow_point_pixel: bool = False
+    create_calibration_candidate: bool = True
     depth_top_cm: float | None = Field(default=None, ge=0)
     depth_bottom_cm: float | None = Field(default=None, gt=0)
 
@@ -173,3 +174,12 @@ class FieldAssessmentRequest(BaseModel):
         ):
             raise ValueError("Pilih kedalaman SOC yang sama untuk semua pasangan validasi.")
         return self
+
+
+class FieldPredictionExtractionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+    pool: Literal["agb", "bgb", "soc", "litter", "deadwood"]
+    analysis_year: int = Field(ge=1984, le=2100)
+    model_name: str | None = Field(default=None, min_length=1, max_length=255)
+    offset: int = Field(default=0, ge=0, le=100000)
+    limit: int = Field(default=250, ge=1, le=500)
