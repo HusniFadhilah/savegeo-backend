@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
@@ -41,7 +40,6 @@ from app.services.carbon_field_service import (
 )
 
 router = APIRouter()
-_field_prediction_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="field-predictions")
 
 
 @router.get(
@@ -203,15 +201,6 @@ def queue_field_predictions(
     )
     db.commit()
     db.refresh(run)
-    try:
-        _field_prediction_executor.submit(_run_field_prediction, run.id)
-    except RuntimeError as exc:
-        run.status = "failed"
-        run.progress = 100
-        run.error = {"code": "field_prediction_worker_unavailable", "message": "Worker ekstraksi tidak tersedia; coba lagi nanti."}
-        run.completed_at = datetime.now(UTC)
-        db.commit()
-        raise HTTPException(503, "Worker ekstraksi prediksi belum tersedia.") from exc
     return {"run": run.to_dict(), "total_observations": total, "batch_count": len(rows)}
 
 

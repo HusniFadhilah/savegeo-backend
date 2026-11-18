@@ -280,7 +280,7 @@ def assess(observations: list[dict], request: FieldAssessmentRequest) -> dict:
         result["warnings"].append(
             "Piksel titik diizinkan eksplisit; dukungan spasialnya berbeda dari rerata plot."
         )
-    if len(train) >= 3 and np.ptp([r["predicted"] for r in train]) > 0:
+    if request.create_calibration_candidate and len(train) >= 3 and np.ptp([r["predicted"] for r in train]) > 0:
         slope, intercept = np.polyfit([r["predicted"] for r in train], [r["observed"] for r in train], 1)
         result["artifact"] = {
             "schema_version": "carbon-calibration-model/v1",
@@ -298,8 +298,13 @@ def assess(observations: list[dict], request: FieldAssessmentRequest) -> dict:
         )
     else:
         result["artifact"] = None
-        result["warnings"].append(
-            "Kalibrasi linear memerlukan minimal tiga plot kalibrasi dan variasi nilai prediktor."
-        )
+        if request.create_calibration_candidate:
+            result["warnings"].append(
+                "Kalibrasi linear memerlukan minimal tiga plot kalibrasi dan variasi nilai prediktor."
+            )
+        else:
+            result["warnings"].append(
+                "Run otomatis ini hanya untuk validasi; kandidat kalibrasi tidak dibuat. Jalankan evaluasi manual setelah cakupan batch lengkap bila memerlukan kandidat."
+            )
     result["status"] = "computed" if train or validation else "not_computed"
     return result

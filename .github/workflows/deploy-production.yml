@@ -266,7 +266,7 @@ jobs:
               pg_dump -U savegeo -Fc savegeo > "$dump_tmp"
             test -s "$dump_tmp"
             docker compose -f docker-compose.prod.yml exec -T db \
-              pg_restore --list - < "$dump_tmp" > /dev/null
+              pg_restore --list < "$dump_tmp" > /dev/null
             mv "$dump_tmp" "$backup_prefix.dump"
             dump_sha256="$(sha256sum "$backup_prefix.dump" | awk '{print $1}')"
             evidence_sha256="absent"
