@@ -2120,3 +2120,4 @@ async def ai_provider_health(
     return await run_in_threadpool(
         lambda: ai_provider_service.check_provider_health(chosen, cfg, chosen_model or "", force=force)
     )
+

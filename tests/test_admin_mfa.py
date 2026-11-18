@@ -294,3 +294,4 @@ def test_operator_reset_revokes_target_and_creates_private_security_notice(env):
         assert not any(event["action"] == "mfa.reset.operator" for event in own_events.json())
         with pytest.raises(HTTPException):
             admin_mfa.reset_other(db, actor, "root-admin", "operator-test-password", recovery[1], "Must use self reset instead", NOW)
+

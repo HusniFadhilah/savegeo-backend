@@ -449,3 +449,4 @@ def admin_has_permission(admin: AdminUser, code: str) -> bool:
     if bool(getattr(admin, "is_superuser", False)):
         return True
     return code in {p.code for p in (admin.role.permissions if admin.role else [])}
+
