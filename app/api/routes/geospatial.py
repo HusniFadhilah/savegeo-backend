@@ -253,3 +253,4 @@ def geospatial_query(
     # DuckDB remains available; enabling a server executor requires a separate
     # read-only role, structural validation and a real durable worker.
     raise HTTPException(status_code=501, detail="Server Spatial SQL is unavailable; use browser processing")
+

@@ -547,3 +547,4 @@ def test_narrow_viewer_manager_and_full_access_can_update_without_sensitive_acce
         else:
             app.dependency_overrides[get_db] = previous
         engine.dispose()
+

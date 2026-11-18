@@ -248,3 +248,4 @@ async def test_global_error_handlers_hide_exception_and_validation_inputs():
     response = await validation_exception_handler(request, validation)
     assert "private-password" not in response.body.decode()
     assert json.loads(response.body)["errors"][0]["loc"] == ["body", "password"]
+
