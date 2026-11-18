@@ -30,9 +30,8 @@ class AdminUser(Base):
     session_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     mfa_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
-    # Nullable preserves the legacy behavior for existing accounts: enrolled
-    # factors remain required unless an administrator explicitly overrides it.
-    # Production still enforces MFA for privileged roles regardless of override.
+    # Nullable supports databases migrated from older versions. A missing
+    # account policy is treated as optional; a superadmin can require MFA.
     mfa_required: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=None)
     is_superuser: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     # A missing role grants nothing; full access is a separate explicit grant.
@@ -57,7 +56,7 @@ class AdminUser(Base):
             "mfa_required": self.mfa_required,
             "mfa_required_effective": bool(
                 policy_locked
-                or (self.mfa_required if self.mfa_required is not None else self.mfa_enabled)
+                or self.mfa_required
             ),
             "mfa_policy_locked": policy_locked,
             "is_superuser": bool(self.is_superuser),
@@ -70,3 +69,4 @@ class AdminUser(Base):
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "last_login": self.last_login.isoformat() if self.last_login else None,
         }
+
