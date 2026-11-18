@@ -164,3 +164,10 @@ Licensed Chloris stock rasters for 2024/2025 are supported through dated COG URL
 or a reporting unit's downloads index. The year picker reflects actual available
 rasters; the public fallback remains 2003–2019. See [CHLORIS.md](CHLORIS.md) for
 configuration, raster units, authenticated tiles, and availability diagnostics.
+# Versi dan rilis
+
+Versi pada `pyproject.toml` adalah versi produk yang dirilis bersama frontend. Gunakan SemVer: MAJOR untuk perubahan tidak kompatibel, MINOR untuk kemampuan baru yang kompatibel, dan PATCH untuk perbaikan yang kompatibel. `1.1.0` merupakan baseline terkoordinasi pertama setelah `1.0.0`; nomor build sebelumnya bukan nomor versi rilis.
+
+Untuk setiap rilis, perbarui versi frontend dan backend bersama dan buat kandidat `release/v<VERSION>.json`. CI memeriksa bahwa versi produk dan kedua komponen di manifest kandidat cocok dengan versi backend. Catat SHA, run, percobaan, lingkungan, hasil uji dan waktu deployment dari workflow yang benar-benar selesai; biarkan nilainya kosong jika belum tersedia. Periksa integrasi kedua komponen dan kesehatan production sebelum menyatakan rilis tervalidasi. Kesamaan versi saja tidak membuktikan kompatibilitas.
+
+Nomor build berasal dari run workflow masing-masing dan tidak dapat dibandingkan langsung antar-workflow. Nomor ini, commit SHA dan ID run membedakan artefak; versi produk berubah melalui proses rilis, bukan secara otomatis untuk setiap build.
