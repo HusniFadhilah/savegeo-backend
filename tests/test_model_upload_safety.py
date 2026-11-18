@@ -36,6 +36,7 @@ def test_model_lookup_accepts_only_files_under_model_root(tmp_path, monkeypatch)
     model_bytes = b"trusted"
     model.write_bytes(model_bytes)
     monkeypatch.setattr(uploaded_model_repo, "get_settings", lambda: SimpleNamespace(model_path=root))
+    monkeypatch.setattr(uploaded_model_repo, "_has_current_review", lambda *_args: True)
     query = SimpleNamespace(first=lambda: SimpleNamespace(
         filepath=str(model), filename=model.name, artifact_sha256=hashlib.sha256(model_bytes).hexdigest()
     ))
@@ -62,6 +63,7 @@ def test_registered_model_outside_root_cannot_be_loaded(tmp_path, monkeypatch):
     row = SimpleNamespace(filepath=str(outside), filename="../outside.pkl")
     query = SimpleNamespace(first=lambda: row)
     query.filter_by = lambda **_kwargs: query
+    monkeypatch.setattr(uploaded_model_repo, "_has_current_review", lambda *_args: True)
     monkeypatch.setattr(uploaded_model_repo, "get_settings", lambda: SimpleNamespace(model_path=root))
     db = SimpleNamespace(query=lambda _model: query)
     assert uploaded_model_repo.get_active_model_path(db, "carbon") is None

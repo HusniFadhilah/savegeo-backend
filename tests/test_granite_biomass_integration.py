@@ -11,6 +11,9 @@ from app.services.gee_common import AnalysisError
 
 
 class Query:
+    def filter(self, *_conditions):
+        return self
+
     def filter_by(self, **_kwargs):
         return self
 

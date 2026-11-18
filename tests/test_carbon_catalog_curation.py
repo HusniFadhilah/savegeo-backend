@@ -58,6 +58,9 @@ class Query:
     def filter_by(self, **_kwargs):
         return self
 
+    def filter(self, *_conditions):
+        return self
+
     def order_by(self, *_columns):
         return self
 
