@@ -142,6 +142,8 @@ def _record_analysis_execution(
             for pool, value in pools.items()
             if isinstance(value, dict) and isinstance(value.get("data_quality"), dict)
         }
+    if isinstance(result.get("quality_assessment"), dict):
+        quality = {**quality, "general_preflight": result["quality_assessment"]}
 
     model_name = model_info.get("model_name") if isinstance(model_info, dict) else None
     model_version = model_info.get("model_version") if isinstance(model_info, dict) else None

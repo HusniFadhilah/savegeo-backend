@@ -317,7 +317,10 @@ class Settings(BaseSettings):
     def privileged_mfa_required(self) -> bool:
         if self.mfa_require_privileged_admins is not None:
             return self.mfa_require_privileged_admins
-        return self.app_env.lower() in {"prod", "production", "staging"}
+        # MFA can be required per account by a superadmin. Do not silently
+        # impose a production-only policy when the operator has not configured
+        # one explicitly.
+        return False
 
     @property
     def allowed_origins_list(self) -> list[str]:

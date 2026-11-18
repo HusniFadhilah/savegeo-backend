@@ -27,6 +27,7 @@ from app.services.dmrv.audit import record_audit
 from app.services.dmrv.authz import Principal, authorize
 from app.services.dmrv.errors import DmrvError
 from app.services import workspace_usage
+from app.services.analysis_preflight import preflight as run_analysis_preflight
 
 
 def digest(value: dict) -> str:
@@ -96,6 +97,20 @@ def _submit(db: Session, viewer, project_id: str, request: ProjectAnalysisCreate
                        "start_month": period.start_date.month, "end_month": period.end_date.month,
                        "start_date": period.start_date.isoformat(), "end_date": period.end_date.isoformat(),
                        "clip_to_aoi": True, "_request_owner": principal.key})
+    if request.kind in {"landcover", "landcover_transition"}:
+        from app.services.landcover_model_service import MODEL_KEYS, read_model_config
+        from app.services.gee_model_release_service import pin_active_landcover_release
+        dataset_key = str(parameters.get("dataset") or "Dynamic_World")
+        if dataset_key in MODEL_KEYS:
+            try:
+                pin = pin_active_landcover_release(db, dataset_key)
+            except Exception as exc:  # noqa: BLE001 - do not queue work against unverifiable releases
+                raise DmrvError(503, "model_lifecycle_unavailable", "Lifecycle model GEE tidak dapat diverifikasi.") from exc
+            configured = read_model_config().get(dataset_key, {})
+            if pin is None and (configured.get("classifier_asset") or configured.get("annual_asset_template")):
+                raise DmrvError(409, "model_not_approved", "Model GEE tutupan lahan belum dievaluasi, direview independen, dan diaktifkan.")
+            if pin:
+                parameters["_server_model_pin"] = pin
     baseline = None
     if request.kind == "landcover_transition":
         if not request.baseline_period_id:
@@ -113,6 +128,12 @@ def _submit(db: Session, viewer, project_id: str, request: ProjectAnalysisCreate
                "baseline": {"id": baseline.id, "revision": baseline.revision} if baseline else None,
                "boundary": {"id": boundary.id, "version": boundary.version, "checksum": boundary.checksum, "area_ha": boundary.area_ha},
                "parameters": parameters}
+    preflight = run_analysis_preflight(request.kind, parameters)
+    if preflight["status"] == "blocked":
+        raise DmrvError(422, preflight["blocking"][0]["code"],
+                        "Preflight mutu memblokir analisis karena masukan belum valid.",
+                        details=preflight["blocking"])
+    context["preflight"] = preflight
     job = jobs.enqueue(db, project_id=project_id, kind="analysis." + request.kind,
                        payload={"context": context}, created_by=principal.key, idempotency_key=key, request_hash=request_hash)
     db.add(WorkspaceAnalysisRun(job_id=job.id, organization_id=project.organization_id, project_id=project_id,

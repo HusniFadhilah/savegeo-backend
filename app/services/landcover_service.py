@@ -574,7 +574,7 @@ def get_landcover_image(
     dataset: str, year: int, aoi, start_month: int = 1, end_month: int = 12,
     dw_probability_threshold: float | None = None, start_date: str | None = None,
     end_date: str | None = None, include_diagnostics: bool = True,
-    statistics_scale: int | None = None,
+    statistics_scale: int | None = None, expected_release_pin: dict | None = None,
 ):
     """One categorical image contract for datasets, classifiers, and model assets."""
     from app.services.landcover_model_service import MODEL_KEYS, get_model_image, refresh_model_catalog
@@ -593,7 +593,8 @@ def get_landcover_image(
             start, end = start_date, _exclusive_end_date(end_date)
         else:
             start, end = build_date_range(int(year), start_month, end_month)
-        image, metadata = get_model_image(dataset, int(year), aoi, start, end, dw_probability_threshold)
+        image, metadata = get_model_image(dataset, int(year), aoi, start, end, dw_probability_threshold,
+                                           expected_release_pin=expected_release_pin)
     else:
         analysis_dataset = info.get("analysis_dataset", dataset)
         image, metadata = _load_landcover_image(
@@ -784,6 +785,7 @@ def analyze_landcover(data: dict) -> dict:
                 dw_probability_threshold=data.get("confidence_threshold", data.get("dw_probability_threshold")),
                 start_date=start, end_date=end,
                 statistics_scale=scale,
+                expected_release_pin=data.get("_server_model_pin"),
             )
             if scale > requested_scale:
                 note = f"Statistik AOI besar dihitung pada grid {scale} m; peta tetap memakai resolusi sumber {native_scale} m."
@@ -871,6 +873,7 @@ def analyze_landcover_transition(data: dict) -> dict:
             start_date=data.get(f"{prefix}_start_date") if prefix else None,
             end_date=data.get(f"{prefix}_end_date") if prefix else None,
             include_diagnostics=False,
+            expected_release_pin=data.get("_server_model_pin"),
         )
         images[year] = image
         metadata[year] = meta
@@ -1039,12 +1042,14 @@ def analyze_landcover_change_map(data: dict) -> dict:
             start_date=from_start, end_date=from_end,
             dw_probability_threshold=dw_probability_threshold,
             include_diagnostics=False,
+            expected_release_pin=data.get("_server_model_pin"),
         )
         to_image, to_meta = get_landcover_image(
             dataset, to_year, aoi,
             start_date=to_start, end_date=to_end,
             dw_probability_threshold=dw_probability_threshold,
             include_diagnostics=False,
+            expected_release_pin=data.get("_server_model_pin"),
         )
     elif explicit_start and explicit_end:
         from_image, from_meta = get_landcover_image(
@@ -1052,12 +1057,14 @@ def analyze_landcover_change_map(data: dict) -> dict:
             start_date=_reyear_date(explicit_start, from_year), end_date=_reyear_date(explicit_end, from_year),
             dw_probability_threshold=dw_probability_threshold,
             include_diagnostics=False,
+            expected_release_pin=data.get("_server_model_pin"),
         )
         to_image, to_meta = get_landcover_image(
             dataset, to_year, aoi,
             start_date=_reyear_date(explicit_start, to_year), end_date=_reyear_date(explicit_end, to_year),
             dw_probability_threshold=dw_probability_threshold,
             include_diagnostics=False,
+            expected_release_pin=data.get("_server_model_pin"),
         )
     else:
         from_image, from_meta = get_landcover_image(
@@ -1068,6 +1075,7 @@ def analyze_landcover_change_map(data: dict) -> dict:
             end_month,
             dw_probability_threshold=dw_probability_threshold,
             include_diagnostics=False,
+            expected_release_pin=data.get("_server_model_pin"),
         )
         to_image, to_meta = get_landcover_image(
             dataset,
@@ -1077,6 +1085,7 @@ def analyze_landcover_change_map(data: dict) -> dict:
             end_month,
             dw_probability_threshold=dw_probability_threshold,
             include_diagnostics=False,
+            expected_release_pin=data.get("_server_model_pin"),
         )
 
     source_from, source_to = from_image, to_image
@@ -1197,6 +1206,7 @@ def identify_landcover_point(data: dict) -> dict:
             start_date=_reyear_date(explicit_start, year),
             end_date=_reyear_date(explicit_end, year),
             dw_probability_threshold=threshold,
+            expected_release_pin=data.get("_server_model_pin"),
         )
     else:
         image, metadata = get_landcover_image(
@@ -1206,6 +1216,7 @@ def identify_landcover_point(data: dict) -> dict:
             int(data.get("start_month", 1)),
             int(data.get("end_month", 12)),
             dw_probability_threshold=threshold,
+            expected_release_pin=data.get("_server_model_pin"),
         )
 
     sampled = image.select(0).reduceRegion(
@@ -1302,22 +1313,26 @@ def analyze_landcover_hotspots(data: dict) -> dict:
             dataset, from_year, aoi,
             start_date=from_start, end_date=from_end,
             dw_probability_threshold=dw_probability_threshold,
+            expected_release_pin=data.get("_server_model_pin"),
         )
         to_image, to_meta = get_landcover_image(
             dataset, to_year, aoi,
             start_date=to_start, end_date=to_end,
             dw_probability_threshold=dw_probability_threshold,
+            expected_release_pin=data.get("_server_model_pin"),
         )
     elif explicit_start and explicit_end:
         from_image, from_meta = get_landcover_image(
             dataset, from_year, aoi,
             start_date=_reyear_date(explicit_start, from_year), end_date=_reyear_date(explicit_end, from_year),
             dw_probability_threshold=dw_probability_threshold,
+            expected_release_pin=data.get("_server_model_pin"),
         )
         to_image, to_meta = get_landcover_image(
             dataset, to_year, aoi,
             start_date=_reyear_date(explicit_start, to_year), end_date=_reyear_date(explicit_end, to_year),
             dw_probability_threshold=dw_probability_threshold,
+            expected_release_pin=data.get("_server_model_pin"),
         )
     else:
         from_image, from_meta = get_landcover_image(
@@ -1327,6 +1342,7 @@ def analyze_landcover_hotspots(data: dict) -> dict:
             start_month,
             end_month,
             dw_probability_threshold=dw_probability_threshold,
+            expected_release_pin=data.get("_server_model_pin"),
         )
         to_image, to_meta = get_landcover_image(
             dataset,
@@ -1335,6 +1351,7 @@ def analyze_landcover_hotspots(data: dict) -> dict:
             start_month,
             end_month,
             dw_probability_threshold=dw_probability_threshold,
+            expected_release_pin=data.get("_server_model_pin"),
         )
 
     from_image, to_image = _comparison_grid(from_image, to_image, from_meta, to_meta, lc_scale, bool(data.get("include_improbable_classes", False)))
@@ -1382,7 +1399,8 @@ def analyze_landcover_hotspots(data: dict) -> dict:
     elif to_meta.get("confidence_available"):
         from app.services.landcover_model_service import get_model_image
         period = to_meta["date_range"]
-        _, _, confidence_image = get_model_image(dataset, to_meta["year"], aoi, period["start"], _exclusive_end_date(period["end"]), dw_probability_threshold, with_confidence=True)
+        _, _, confidence_image = get_model_image(dataset, to_meta["year"], aoi, period["start"], _exclusive_end_date(period["end"]), dw_probability_threshold,
+                                                   with_confidence=True, expected_release_pin=to_meta.get("model_release"))
         if confidence_image is not None:
             vectors = confidence_image.updateMask(to_image.mask()).reduceRegions(collection=vectors, reducer=ee.Reducer.mean(), scale=lc_scale, crs=LC_EQUAL_AREA_CRS, tileScale=4)
 

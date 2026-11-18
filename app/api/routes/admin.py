@@ -1096,6 +1096,8 @@ def admin_user_create(
         raise HTTPException(status_code=400, detail="role_id does not exist")
     if payload.is_superuser and not admin.is_superuser:
         raise HTTPException(403, "Only a superuser can grant full access")
+    if payload.mfa_required and not admin.is_superuser:
+        raise HTTPException(403, "Only a superuser can require MFA for an account")
     if payload.is_superuser and payload.role_id is not None:
         raise HTTPException(422, "Full access and an explicit role are mutually exclusive")
     _ensure_user_role_scope(admin, assigned_role)
@@ -1160,6 +1162,8 @@ def admin_user_update(
 
     changes = {}
     if "mfa_required" in payload.model_fields_set and target.mfa_required != payload.mfa_required:
+        if not admin.is_superuser:
+            raise HTTPException(403, "Only a superuser can change an account's MFA requirement")
         require_recent_mfa(admin)
         target.mfa_required = payload.mfa_required
         target.session_version = (target.session_version or 0) + 1

@@ -233,6 +233,9 @@ class CarbonCalibrationRun(Base):
                 "artifact_sha256",
                 "error",
                 "progress",
+                "attempts",
+                "max_attempts",
+                "run_after",
                 "created_at",
                 "completed_at",
             )

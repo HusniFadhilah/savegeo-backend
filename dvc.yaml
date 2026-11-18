@@ -6,7 +6,7 @@ stages:
       --dataset-source "${training.dataset_source}"
       --dataset-license "${training.dataset_license}"
       --target ${training.target}
-      --target-unit ${training.target_unit}
+      --target-unit "${training.target_unit}"
       --group ${training.group}
       --features ${training.features}
       --algorithm ${training.algorithm}

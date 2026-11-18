@@ -220,7 +220,9 @@ def requires_admin_mfa(admin: AdminUser) -> bool:
     if privileged and get_settings().privileged_mfa_required:
         return True
     override = getattr(admin, "mfa_required", None)
-    return bool(override if override is not None else getattr(admin, "mfa_enabled", False))
+    # Enrollment and enforcement are separate: keeping an authenticator
+    # enrolled does not force prompts unless the account policy requires it.
+    return bool(override) if override is not None else False
 
 
 def ensure_admin_mfa(payload: dict, admin: AdminUser) -> None:

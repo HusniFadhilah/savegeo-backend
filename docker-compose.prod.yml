@@ -163,6 +163,47 @@ services:
       - -m
       - app.workers.analysis_worker
 
+  field-prediction-worker:
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SAVEGEO_PRODUCT_VERSION: ${SAVEGEO_PRODUCT_VERSION:-}
+        SAVEGEO_COMMIT_SHA: ${SAVEGEO_COMMIT_SHA:-}
+        SAVEGEO_BUILD_NUMBER: ${SAVEGEO_BUILD_NUMBER:-}
+    restart: unless-stopped
+    mem_limit: 8g
+    pids_limit: 256
+    cpus: 3
+    env_file:
+      - .env
+    environment:
+      APP_ENV: production
+      DEBUG: "false"
+      DATABASE_URL: ${RUNTIME_DATABASE_URL:?Run scripts/prepare_runtime_database.py before deploying}
+      POSTGRES_PASSWORD: ""
+      MIGRATION_DATABASE_URL: ""
+      UPLOAD_DIR: /app/var/uploads
+      MODEL_DIR: /app/var/saved_models
+    volumes:
+      - ./var:/app/var
+    healthcheck:
+      disable: true
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    command:
+      - python
+      - -m
+      - app.workers.field_prediction_worker
+      - --poll-interval
+      - ${FIELD_PREDICTION_WORKER_POLL_INTERVAL:-2}
+
   migrate:
     build:
       context: .

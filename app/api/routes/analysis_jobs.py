@@ -50,6 +50,7 @@ from app.services.gee_common import AnalysisError, public_analysis_error
 from app.services.carbon_retry import run_carbon_with_retry
 from app.services.aoi_reference import resolve_known_aoi
 from app.services.analysis_requirements import requires_earth_engine
+from app.services.analysis_preflight import assess_result_quality, preflight as run_analysis_preflight
 from app.services import analysis_queue
 from app.db.models.analysis_job import AnalysisJob
 from app.core.bounded_json import read_typed_json_object
@@ -203,6 +204,32 @@ def _carbon_cache_ttl(job_type: str) -> int:
 
 def _model_pin_for_job(db: Session, job_type: str, payload: dict[str, Any]) -> dict[str, Any] | None:
     """Resolve selected DB-backed model to an immutable identity at submission."""
+    if job_type in {"landcover", "landcover_change", "landcover_transition", "landcover_change_map", "landcover_hotspots", "landcover_fusion"}:
+        model_key = str(payload.get("dataset") or payload.get("model_key") or "")
+        from app.services.landcover_model_service import MODEL_KEYS
+        if model_key not in MODEL_KEYS:
+            return None
+        candidates = db.query(UploadedModel).filter_by(model_type="landcover", lifecycle_state="active", is_active=True).all()
+        row = next((candidate for candidate in candidates
+                    if (candidate.metadata_json or {}).get("format") == "gee_config_release"
+                    and (candidate.metadata_json or {}).get("model_key") == model_key), None)
+        if row is None:
+            from app.services.landcover_model_service import read_model_config
+            pending = read_model_config().get(model_key, {})
+            if pending.get("classifier_asset") or pending.get("annual_asset_template"):
+                raise HTTPException(409, detail={"code": "model_not_approved", "message": "Model GEE tutupan lahan belum dievaluasi, direview independen, dan diaktifkan."})
+            return None
+        try:
+            from app.services import model_lifecycle
+            evaluation = model_lifecycle.latest_evaluation(db, row)
+            if not model_lifecycle.has_current_approval(db, row, evaluation):
+                raise ValueError("release approval is not current")
+            model_lifecycle.artifact_path(row)
+        except Exception as exc:  # noqa: BLE001 - no unverified GEE artifact can be pinned
+            raise HTTPException(409, detail={"code": "model_not_approved", "message": "Model GEE belum memiliki approval aktif yang valid."}) from exc
+        return {"id": row.id, "name": row.name, "version": row.version,
+                "artifact_sha256": row.artifact_sha256, "approval_digest": row.approval_digest,
+                "format": "gee_config_release", "model_key": model_key}
     model_name = payload.get("model_name")
     if job_type not in {"carbon", "carbon_local", "carbon_delta"}:
         return None
@@ -287,6 +314,13 @@ def _verify_job_model_pin(db: Session, payload: dict[str, Any]) -> dict[str, Any
             evaluation = model_lifecycle.latest_evaluation(db, row)
             valid = model_lifecycle.has_current_approval(db, row, evaluation)
             model_lifecycle.artifact_path(row)
+        elif pin.get("format") == "gee_config_release":
+            from app.services import model_lifecycle
+
+            evaluation = model_lifecycle.latest_evaluation(db, row)
+            valid = model_lifecycle.has_current_approval(db, row, evaluation)
+            model_lifecycle.artifact_path(row)
+            valid = valid and (row.metadata_json or {}).get("model_key") == pin.get("model_key")
         else:
             valid = False
     except Exception as exc:  # noqa: BLE001 - checksum/review drift blocks serving
@@ -427,6 +461,7 @@ def _complete_cached_job(
         payload=payload,
         user_id=viewer.id if isinstance(viewer, User) else None,
     )
+    result = {**result, "quality_assessment": assess_result_quality(job_type, result)}
     _write_job(job_id, {
         "job_id": job_id,
         "type": job_type,
@@ -503,6 +538,8 @@ def _run_job(
             result = crop_monitoring_service.run_crop_monitoring(db, payload, owner)
         else:  # defensive; validated before submit
             raise ValueError(f"Unsupported job type: {job_type}")
+        if isinstance(result, dict):
+            result = {**result, "quality_assessment": assess_result_quality(job_type, result)}
         if cache_key and owner:
             # Result payloads have already been JSON-serialized by the job store.
             cached_result = json.loads(json.dumps(result, ensure_ascii=False, default=str))
@@ -617,6 +654,20 @@ async def create_analysis_job(
     return await run_in_threadpool(_create_analysis_job_sync, request, data, viewer, db)
 
 
+@router.post("/analysis-jobs/preflight", dependencies=[Depends(get_current_app_viewer)])
+async def analysis_preflight(request: Request, viewer: object = Depends(get_current_app_viewer), db: Session = Depends(get_db)):
+    data = await read_typed_json_object(request, AnalysisJobRequest)
+    job_type = data["type"]
+    payload = data.get("payload")
+    if job_type not in _ALLOWED_JOB_TYPES or not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="Jenis analisis atau payload tidak valid untuk preflight.")
+    ensure_job_feature_access(viewer, job_type, db, payload)
+    result = run_analysis_preflight(job_type, payload)
+    if result["status"] == "blocked":
+        return {**result, "http_status": 422}
+    return result
+
+
 def _create_analysis_job_sync(request: Request, data: dict[str, Any], viewer: object, db: Session):
     job_type = data["type"]
     payload = data.get("payload")
@@ -630,6 +681,10 @@ def _create_analysis_job_sync(request: Request, data: dict[str, Any], viewer: ob
     payload.pop("_server_model_pin", None)
     payload.pop("_server_serving_revision", None)
     ensure_job_feature_access(viewer, job_type, db, payload)
+    preflight_report = run_analysis_preflight(job_type, payload)
+    if preflight_report["status"] == "blocked":
+        first = preflight_report["blocking"][0]
+        raise HTTPException(status_code=422, detail={"code": first["code"], "message": first["message"], "preflight": preflight_report})
 
     model_pin = _model_pin_for_job(db, job_type, payload)
     if model_pin is not None:

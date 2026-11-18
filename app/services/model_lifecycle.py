@@ -36,6 +36,11 @@ def artifact_path(model: UploadedModel) -> Path:
         and metadata.get("method") == "saved_reference_ensemble"
         and resolved.name == metadata.get("frozen_ensemble_file")
         and resolved.name.endswith(".ensemble.json")
+    ) or (
+        artifact_format == "gee_config_release"
+        and metadata.get("method") == "gee_classifier_release"
+        and resolved.suffix.lower() == ".json"
+        and bool(metadata.get("model_key"))
     )
     if not resolved.is_relative_to(root) or not resolved.is_file() or not supported:
         raise HTTPException(409, "Model artifact is not available for evaluation")
@@ -145,14 +150,16 @@ def review(db: Session, model: UploadedModel, actor_id: int, decision: str, reas
     return locked
 
 
-def _lock_model_type(db: Session, model_type: str) -> None:
+def _lock_model_type(db: Session, model_type: str, scope: str | None = None) -> None:
     if db.bind is not None and db.bind.dialect.name == "postgresql":
-        key = int.from_bytes(hashlib.blake2b(model_type.encode(), digest_size=8).digest(), "big", signed=True)
+        key = int.from_bytes(hashlib.blake2b(f"{model_type}:{scope or '*'}".encode(), digest_size=8).digest(), "big", signed=True)
         db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
 
 
 def activate(db: Session, model: UploadedModel, actor_id: int) -> UploadedModel:
-    _lock_model_type(db, model.model_type)
+    model_metadata = model.metadata_json or {}
+    scope = str(model_metadata.get("model_key")) if model_metadata.get("format") == "gee_config_release" else None
+    _lock_model_type(db, model.model_type, scope)
     locked = db.execute(select(UploadedModel).where(UploadedModel.id == model.id).with_for_update()
                         .execution_options(populate_existing=True)).scalar_one_or_none()
     if locked is None:
@@ -165,11 +172,12 @@ def activate(db: Session, model: UploadedModel, actor_id: int) -> UploadedModel:
     if actor_id == locked.uploaded_by:
         raise HTTPException(409, detail={"code": "separation_of_duties", "message": "Uploader cannot activate their own model"})
 
-    db.execute(select(UploadedModel).where(UploadedModel.model_type == locked.model_type).with_for_update()).scalars().all()
-    db.query(UploadedModel).filter(UploadedModel.model_type == locked.model_type,
-        UploadedModel.id != locked.id, UploadedModel.lifecycle_state == "active").update(
-            {UploadedModel.lifecycle_state: "approved", UploadedModel.is_active: False, UploadedModel.is_default: False},
-            synchronize_session=False)
+    siblings = db.execute(select(UploadedModel).where(UploadedModel.model_type == locked.model_type).with_for_update()).scalars().all()
+    for sibling in siblings:
+        sibling_metadata = sibling.metadata_json or {}
+        sibling_scope = str(sibling_metadata.get("model_key")) if sibling_metadata.get("format") == "gee_config_release" else None
+        if sibling.id != locked.id and sibling.lifecycle_state == "active" and sibling_scope == scope:
+            sibling.lifecycle_state, sibling.is_active, sibling.is_default = "approved", False, False
     locked.lifecycle_state, locked.is_active = "active", True
     locked.is_default = False
     db.add(AuditLog(admin_user_id=actor_id, action="model.activate", resource_type="uploaded_model",

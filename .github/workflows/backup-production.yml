@@ -1,0 +1,63 @@
+name: SAVEGEO encrypted off-site backup
+
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: savegeo-production-backup
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 45
+    steps:
+      - name: Install SSH and VPN tools
+        run: sudo apt-get update && sudo apt-get install -y openvpn openssh-client netcat-openbsd
+      - name: Connect production VPN
+        env:
+          VPN_CONFIG_B64: ${{ secrets.VPN_CONFIG_B64 }}
+          VPN_AUTH_B64: ${{ secrets.VPN_AUTH_B64 }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_SSH_PORT: ${{ secrets.DEPLOY_SSH_PORT }}
+        run: |
+          set -euo pipefail
+          test -n "$VPN_CONFIG_B64" && test -n "$VPN_AUTH_B64"
+          printf '%s' "$VPN_CONFIG_B64" | base64 --decode > "$RUNNER_TEMP/savegeo-vpn.ovpn"
+          printf '%s' "$VPN_AUTH_B64" | base64 --decode > "$RUNNER_TEMP/savegeo-vpn-auth.txt"
+          chmod 600 "$RUNNER_TEMP/savegeo-vpn.ovpn" "$RUNNER_TEMP/savegeo-vpn-auth.txt"
+          sudo openvpn --config "$RUNNER_TEMP/savegeo-vpn.ovpn" --auth-user-pass "$RUNNER_TEMP/savegeo-vpn-auth.txt" --daemon --log "$RUNNER_TEMP/openvpn.log"
+          for attempt in $(seq 1 30); do
+            nc -z -w 3 "$DEPLOY_HOST" "$DEPLOY_SSH_PORT" && exit 0
+            sleep 3
+          done
+          sudo cat "$RUNNER_TEMP/openvpn.log" || true
+          exit 1
+      - name: Configure pinned SSH host and key
+        env:
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$SSH_KNOWN_HOSTS" && test -n "$DEPLOY_SSH_PRIVATE_KEY"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$RUNNER_TEMP/savegeo-known-hosts"
+          printf '%s\n' "$DEPLOY_SSH_PRIVATE_KEY" > "$RUNNER_TEMP/savegeo-deploy-key"
+          chmod 600 "$RUNNER_TEMP/savegeo-known-hosts" "$RUNNER_TEMP/savegeo-deploy-key"
+      - name: Create encrypted, verified backup and apply scoped retention
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_SSH_PORT: ${{ secrets.DEPLOY_SSH_PORT }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          BACKEND_REMOTE_DIR: ${{ secrets.BACKEND_REMOTE_DIR }}
+        run: |
+          set -euo pipefail
+          test -n "$DEPLOY_HOST" && test -n "$DEPLOY_SSH_PORT" && test -n "$DEPLOY_USER" && test -n "$BACKEND_REMOTE_DIR"
+          ssh -i "$RUNNER_TEMP/savegeo-deploy-key" -p "$DEPLOY_SSH_PORT" \
+            -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/savegeo-known-hosts" \
+            "$DEPLOY_USER@$DEPLOY_HOST" "cd '$BACKEND_REMOTE_DIR' && bash scripts/backup_offsite.sh"

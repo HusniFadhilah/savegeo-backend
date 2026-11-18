@@ -7,7 +7,7 @@ import json
 import uuid
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import Response
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -121,31 +121,16 @@ def _pool_model_candidates(db, pool: str, model_name: str | None):
     return sorted(approved, key=lambda item: (item[0], item[1].id), reverse=True)
 
 
-def _run_field_prediction(run_id: str):
-    from app.db.session import SessionLocal
-    from app.services.field_prediction_service import run_field_prediction
-
-    db = SessionLocal()
-    try:
-        run_field_prediction(db, run_id)
-    finally:
-        db.close()
-
-
 @router.post("/datasets/{dataset_id}/field-predictions", status_code=202)
 def queue_field_predictions(
     dataset_id: str,
     payload: FieldPredictionExtractionRequest,
-    request: Request,
     admin=Depends(require_permission("calibration.write")),
     db: Session = Depends(get_db),
 ):
     dataset = dataset_or_404(db, dataset_id)
     if payload.analysis_year > datetime.now(UTC).year:
         raise HTTPException(422, "Tahun prediksi tidak boleh melebihi tahun berjalan.")
-    if not getattr(request.app.state, "ee_initialized", False):
-        raise HTTPException(503, "Earth Engine belum aktif; ekstraksi prediksi lapangan belum dimulai.")
-
     selected = _pool_model_candidates(db, payload.pool, payload.model_name)
     if not selected:
         raise HTTPException(

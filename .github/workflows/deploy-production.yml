@@ -289,7 +289,7 @@ jobs:
             } > "$manifest_tmp"
             mv "$manifest_tmp" "$backup_prefix.manifest"
             export DOCKER_BUILDKIT=1
-            docker compose -f docker-compose.prod.yml build api dmrv-worker analysis-worker migrate
+            docker compose -f docker-compose.prod.yml build api dmrv-worker analysis-worker field-prediction-worker migrate
             docker compose -f docker-compose.prod.yml run --rm --no-deps \
               --volume "$BACKEND_REMOTE_DIR/../frontend/dist:/frontend-assets:ro" \
               api python -m scripts.check_auth_secret --frontend-dist /frontend-assets
