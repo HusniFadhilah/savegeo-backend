@@ -113,6 +113,7 @@ def _record_analysis_execution(
     analysis_id: str,
     result: dict[str, Any],
     pinned_model: dict[str, Any] | None = None,
+    serving_revision: dict[str, Any] | None = None,
 ) -> None:
     """Persist the model identity and quality signals observed in the worker result."""
     record = db.get(AnalysisProvenance, analysis_id)
@@ -157,6 +158,7 @@ def _record_analysis_execution(
     manifest = {
         "model": _safe_parameters(model_info),
         "pinned_model": _safe_parameters(pinned_model or {}),
+        "serving_revision": _safe_parameters(serving_revision or {}),
         "quality": _safe_parameters(quality),
         "application_version": get_product_version(),
         "code_revision": get_public_version_metadata().get("commit_sha"),
@@ -171,9 +173,10 @@ def record_analysis_execution(
     analysis_id: str,
     result: dict[str, Any],
     pinned_model: dict[str, Any] | None = None,
+    serving_revision: dict[str, Any] | None = None,
 ) -> None:
     try:
-        _record_analysis_execution(db, analysis_id, result, pinned_model)
+        _record_analysis_execution(db, analysis_id, result, pinned_model, serving_revision)
     except Exception:  # noqa: BLE001 - optional evidence must not discard a completed map
         db.rollback()
         logger.exception("execution manifest update failed analysis_id=%s", analysis_id)

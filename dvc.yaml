@@ -3,6 +3,8 @@ stages:
     cmd: >-
       python -m scripts.train_reproducible_model
       --dataset ${training.dataset}
+      --dataset-source "${training.dataset_source}"
+      --dataset-license "${training.dataset_license}"
       --target ${training.target}
       --target-unit ${training.target_unit}
       --group ${training.group}
@@ -11,13 +13,17 @@ stages:
       --seed ${training.seed}
       --trees ${training.trees}
       --max-depth ${training.max_depth}
+      --minimum-r2 ${training.minimum_r2}
+      --max-baseline-rmse-ratio ${training.max_baseline_rmse_ratio}
       --mlflow ${tracking.mlflow_enabled}
       --output-dir ${training.output_dir}
     deps:
       - scripts/train_reproducible_model.py
+      - pyproject.toml
       - ${training.dataset}
     params:
       - training
+      - tracking
     outs:
       - ${training.output_dir}/model.onnx
       - ${training.output_dir}/manifest.json

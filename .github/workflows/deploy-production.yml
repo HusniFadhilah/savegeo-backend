@@ -255,11 +255,39 @@ jobs:
             backup_dir="$BACKEND_REMOTE_DIR/../private-backups"
             mkdir -p "$backup_dir"
             chmod 700 "$backup_dir"
-            if docker compose -f docker-compose.prod.yml ps --status running db | grep -q db; then
-              docker compose -f docker-compose.prod.yml exec -T db \
-                pg_dump -U savegeo -Fc savegeo \
-                > "$backup_dir/predeploy_$(date +%Y%m%d_%H%M%S).dump"
+            if ! docker compose -f docker-compose.prod.yml ps --status running db | grep -q db; then
+              echo "Database container is not running; refusing deployment without a verified pre-deploy backup." >&2
+              exit 1
             fi
+            backup_stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+            backup_prefix="$backup_dir/predeploy_$backup_stamp"
+            dump_tmp="$backup_prefix.dump.partial"
+            docker compose -f docker-compose.prod.yml exec -T db \
+              pg_dump -U savegeo -Fc savegeo > "$dump_tmp"
+            test -s "$dump_tmp"
+            docker compose -f docker-compose.prod.yml exec -T db \
+              pg_restore --list - < "$dump_tmp" > /dev/null
+            mv "$dump_tmp" "$backup_prefix.dump"
+            dump_sha256="$(sha256sum "$backup_prefix.dump" | awk '{print $1}')"
+            evidence_sha256="absent"
+            if [ -d var/dmrv/evidence ]; then
+              evidence_tmp="$backup_prefix.dmrv-evidence.tar.gz.partial"
+              tar -C var -czf "$evidence_tmp" dmrv/evidence
+              tar -tzf "$evidence_tmp" > /dev/null
+              mv "$evidence_tmp" "$backup_prefix.dmrv-evidence.tar.gz"
+              evidence_sha256="$(sha256sum "$backup_prefix.dmrv-evidence.tar.gz" | awk '{print $1}')"
+            fi
+            manifest_tmp="$backup_prefix.manifest.partial"
+            {
+              printf 'created_at_utc=%s\n' "$backup_stamp"
+              printf 'application_commit=%s\n' "$SAVEGEO_COMMIT_SHA"
+              printf 'database_dump=%s\n' "$(basename "$backup_prefix.dump")"
+              printf 'database_sha256=%s\n' "$dump_sha256"
+              printf 'dmrv_evidence_archive=%s\n' "$([ "$evidence_sha256" = absent ] && printf absent || basename "$backup_prefix.dmrv-evidence.tar.gz")"
+              printf 'dmrv_evidence_sha256=%s\n' "$evidence_sha256"
+              printf 'encryption=not-configured-by-this-deployment-step\n'
+            } > "$manifest_tmp"
+            mv "$manifest_tmp" "$backup_prefix.manifest"
             export DOCKER_BUILDKIT=1
             docker compose -f docker-compose.prod.yml build api dmrv-worker analysis-worker migrate
             docker compose -f docker-compose.prod.yml run --rm --no-deps \

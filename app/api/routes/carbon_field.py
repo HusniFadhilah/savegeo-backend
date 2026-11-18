@@ -158,6 +158,8 @@ def queue_field_predictions(
             },
         )
     _, model = selected[0]
+    from app.services.model_serving_identity import current_identity
+
     rows_query = db.query(CarbonFieldObservation).filter_by(dataset_pk=dataset.id, pool=payload.pool)
     total = rows_query.count()
     rows = rows_query.order_by(CarbonFieldObservation.id).offset(payload.offset).limit(payload.limit).all()
@@ -185,6 +187,7 @@ def queue_field_predictions(
             "artifact_sha256": model.artifact_sha256,
             "approval_digest": model.approval_digest,
             "target_pool": metadata.get("target_pool"),
+            "serving_revision": current_identity(),
         },
         created_by=admin.id,
     )
@@ -200,7 +203,15 @@ def queue_field_predictions(
     )
     db.commit()
     db.refresh(run)
-    _field_prediction_executor.submit(_run_field_prediction, run.id)
+    try:
+        _field_prediction_executor.submit(_run_field_prediction, run.id)
+    except RuntimeError as exc:
+        run.status = "failed"
+        run.progress = 100
+        run.error = {"code": "field_prediction_worker_unavailable", "message": "Worker ekstraksi tidak tersedia; coba lagi nanti."}
+        run.completed_at = datetime.now(UTC)
+        db.commit()
+        raise HTTPException(503, "Worker ekstraksi prediksi belum tersedia.") from exc
     return {"run": run.to_dict(), "total_observations": total, "batch_count": len(rows)}
 
 

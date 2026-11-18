@@ -76,6 +76,11 @@ _ALLOWED_JOB_TYPES = {
     "crop_monitoring",
 }
 _CARBON_CACHEABLE_TYPES = {"carbon", "carbon_local", "carbon_delta"}
+_GEE_SERVING_JOB_TYPES = {
+    "carbon", "carbon_local", "carbon_delta", "vegetation", "landcover",
+    "landcover_change", "landcover_transition", "landcover_change_map",
+    "landcover_hotspots", "landcover_fusion",
+}
 _CARBON_CACHE_SCHEMA = 3
 _UPSTREAM_CONNECTION_ERROR = (
     "Koneksi ke layanan data eksternal terputus sebelum respons diterima. "
@@ -124,6 +129,27 @@ def viewer_owns_job(job_id: str, viewer: object, created_by_user_id: int | None 
 
 def _now() -> str:
     return format_rfc3339(utc_now())
+
+
+def _serving_code_identity() -> dict[str, Any]:
+    """Content-address the server code that defines Earth Engine analysis serving."""
+    from app.services.model_serving_identity import current_identity
+
+    return current_identity()
+
+
+def _verify_serving_code_identity(payload: dict[str, Any]) -> dict[str, Any] | None:
+    expected = payload.get("_server_serving_revision")
+    if not isinstance(expected, dict):
+        return None
+    from app.services.model_serving_identity import matches
+
+    if not matches(expected):
+        raise AnalysisError(
+            "Versi serving GEE berubah setelah job dibuat. Job dihentikan agar model tidak berjalan dengan kode yang berbeda; kirim ulang analisis.",
+            409,
+        )
+    return expected
 
 
 def _write_job(job_id: str, data: dict[str, Any]) -> None:
@@ -414,7 +440,9 @@ def _complete_cached_job(
     })
     output_registry_service.register_action_outputs(db, job_id, result)
     provenance_service.record_analysis_execution(
-        db, job_id, result, payload.get("_server_model_pin") if isinstance(payload.get("_server_model_pin"), dict) else None
+        db, job_id, result,
+        payload.get("_server_model_pin") if isinstance(payload.get("_server_model_pin"), dict) else None,
+        payload.get("_server_serving_revision") if isinstance(payload.get("_server_serving_revision"), dict) else None,
     )
     provenance_service.update_analysis_provenance(
         db, job_id, status="succeeded", started_at=now, completed_at=now
@@ -445,6 +473,7 @@ def _run_job(
     )
     try:
         pinned_model = _verify_job_model_pin(db, payload)
+        serving_revision = _verify_serving_code_identity(payload) if job_type in _GEE_SERVING_JOB_TYPES else None
         if job_type in {"vegetation", "landcover", "landcover_change", "landcover_transition", "landcover_change_map", "landcover_hotspots", "landcover_fusion"}:
             payload = resolve_known_aoi(payload)
         if job_type == "carbon":
@@ -482,7 +511,7 @@ def _run_job(
                 job_type=job_type, status="completed", result=cached_result,
             )
         output_registry_service.register_action_outputs(db, job_id, result)
-        provenance_service.record_analysis_execution(db, job_id, result, pinned_model)
+        provenance_service.record_analysis_execution(db, job_id, result, pinned_model, serving_revision)
         provenance_service.update_analysis_provenance(
             db,
             job_id,
@@ -599,11 +628,14 @@ def _create_analysis_job_sync(request: Request, data: dict[str, Any], viewer: ob
     # Never trust model identity pins supplied by a browser. The API resolves a
     # current, reviewed identity and stores that server-side on the queued job.
     payload.pop("_server_model_pin", None)
+    payload.pop("_server_serving_revision", None)
     ensure_job_feature_access(viewer, job_type, db, payload)
 
     model_pin = _model_pin_for_job(db, job_type, payload)
     if model_pin is not None:
         payload["_server_model_pin"] = model_pin
+    if job_type in _GEE_SERVING_JOB_TYPES:
+        payload["_server_serving_revision"] = _serving_code_identity()
 
     if job_type in _CARBON_CACHEABLE_TYPES and payload.get("model_name"):
         uploaded = db.query(UploadedModel).filter_by(name=payload["model_name"], model_type="carbon").first()

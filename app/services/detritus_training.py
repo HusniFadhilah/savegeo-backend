@@ -205,6 +205,9 @@ def ensure_model(db, pool):
             "Model serasah/kayu mati belum mengungguli baseline pada validasi spasial; model tidak diterbitkan.",
             422,
         )
+    estimator = RandomForestRegressor(
+        n_estimators=60, max_depth=12, min_samples_leaf=4, random_state=42, n_jobs=2
+    )
     estimator.fit(x, y)
     artifact = {
         "algorithm": "random_forest",

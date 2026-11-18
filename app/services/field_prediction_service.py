@@ -9,7 +9,6 @@ from datetime import UTC, datetime
 import ee
 from sqlalchemy.orm import Session
 
-from app.core.config import get_settings
 from app.db.models.carbon_calibration import (
     CarbonCalibrationDataset,
     CarbonCalibrationRun,
@@ -18,7 +17,6 @@ from app.db.models.carbon_calibration import (
 )
 from app.db.models.uploaded_model import UploadedModel
 from app.services import model_lifecycle
-from app.services.carbon_field_service import POOL_TARGETS
 from app.services.gee_common import AnalysisError
 
 
@@ -43,6 +41,13 @@ def _model_for_run(db: Session, parameters: dict) -> tuple[UploadedModel, dict]:
         or metadata.get("target_pool") != parameters.get("target_pool")
     ):
         raise AnalysisError("Model GEE tidak kompatibel dengan pool pengukuran ini.", 409)
+    from app.services.model_serving_identity import matches
+
+    if not matches(parameters.get("serving_revision")):
+        raise AnalysisError(
+            "Versi serving GEE berubah setelah ekstraksi dijadwalkan. Job dihentikan; mulai ekstraksi baru.",
+            409,
+        )
     evaluation = model_lifecycle.latest_evaluation(db, model)
     if not model_lifecycle.has_current_approval(db, model, evaluation):
         raise AnalysisError("Bukti evaluasi dan persetujuan model tidak lagi cocok.", 409)

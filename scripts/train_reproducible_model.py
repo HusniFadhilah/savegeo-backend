@@ -9,11 +9,12 @@ import argparse
 import hashlib
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess
 import sys
-from importlib.metadata import PackageNotFoundError, version
+from importlib.metadata import PackageNotFoundError, distributions, version
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
@@ -30,12 +31,24 @@ def sha256(raw: bytes) -> str:
 
 def _versions() -> dict[str, str | None]:
     result = {}
-    for package in ("scikit-learn", "numpy", "pandas", "skl2onnx", "onnx"):
+    for package in ("scikit-learn", "numpy", "pandas", "skl2onnx", "onnx", "dvc", "mlflow"):
         try:
             result[package] = version(package)
         except PackageNotFoundError:
             result[package] = None
+    result["python"] = platform.python_version()
+    result["platform"] = platform.platform()
     return result
+
+
+def _resolved_distributions() -> dict[str, str]:
+    """Record installed distribution versions without local paths or credentials."""
+    resolved: dict[str, str] = {}
+    for distribution in distributions():
+        name = distribution.metadata.get("Name")
+        if name:
+            resolved[name.lower().replace("_", "-")] = distribution.version
+    return dict(sorted(resolved.items()))
 
 
 def _git_revision() -> str | None:
@@ -67,7 +80,22 @@ def _safe_tracking_endpoint(value: str) -> str:
     hostname = parsed.hostname or ""
     if parsed.port:
         hostname = f"{hostname}:{parsed.port}"
-    return urlunsplit((parsed.scheme, hostname, parsed.path, "", ""))
+    return urlunsplit((parsed.scheme, hostname, "", "", ""))
+
+
+def _safe_source_label(value: str) -> str | None:
+    value = value.strip()
+    if not value:
+        return None
+    if len(value) > 500:
+        raise ValueError("dataset source/license labels must be at most 500 characters")
+    parsed = urlsplit(value)
+    if parsed.scheme and parsed.hostname:
+        hostname = parsed.hostname
+        if parsed.port:
+            hostname = f"{hostname}:{parsed.port}"
+        return urlunsplit((parsed.scheme, hostname, "", "", ""))
+    return value
 
 
 def _metrics(actual: np.ndarray, predicted: np.ndarray) -> dict[str, float | None]:
@@ -146,19 +174,22 @@ def train(args: argparse.Namespace) -> dict:
 
     cv = _metrics(y, oof)
     baseline_cv = _metrics(y, baseline_oof)
-    baseline_improved = cv["rmse"] < baseline_cv["rmse"]
-    preflight_passed = cv["r2"] is not None and cv["r2"] > 0 and baseline_improved
+    baseline_rmse_ratio = (cv["rmse"] / baseline_cv["rmse"]) if baseline_cv["rmse"] > 0 else float("inf")
+    baseline_improved = baseline_rmse_ratio < args.max_baseline_rmse_ratio
+    preflight_passed = cv["r2"] is not None and cv["r2"] >= args.minimum_r2 and baseline_improved
     duplicate_rows = int(frame.duplicated(subset=features + [args.target, args.group]).sum())
     group_sizes = groups.value_counts()
     preflight = {
         "status": "passed" if preflight_passed else "warning",
-        "baseline_improved": cv["rmse"] < baseline_cv["rmse"],
+        "baseline_improved": baseline_improved,
+        "baseline_rmse_ratio": baseline_rmse_ratio if np.isfinite(baseline_rmse_ratio) else None,
         "checks": {
             "finite_numeric_values": True,
             "non_empty_independent_groups": len(unique_groups) >= 5,
             "non_constant_target": bool(np.ptp(y) > 0),
             "grouped_out_of_fold_predictions": bool(np.isfinite(oof).all()),
-            "cross_validation_beats_mean_baseline": baseline_improved,
+            "minimum_r2_met": cv["r2"] is not None and cv["r2"] >= args.minimum_r2,
+            "cross_validation_beats_mean_baseline_within_configured_ratio": baseline_improved,
         },
         "warnings": (["Ada baris pengukuran identik dalam dataset."] if duplicate_rows else []),
         "duplicate_sample_count": duplicate_rows,
@@ -185,6 +216,9 @@ def train(args: argparse.Namespace) -> dict:
     artifact_hash = sha256(artifact)
     dataset_hash = sha256(raw)
     group_hash = sha256("\n".join(unique_groups).encode("utf-8"))
+    dataset_source = _safe_source_label(args.dataset_source)
+    dataset_license = _safe_source_label(args.dataset_license)
+    feature_schema_hash = sha256("\n".join(features).encode("utf-8"))
     default_target_slug = re.sub(r"[^A-Za-z0-9._-]+", "_", args.target).strip("._-") or "target"
     model_slug = args.model_name or f"{args.algorithm}_{default_target_slug}_{dataset_hash[:10]}"
     model_slug = f"{model_slug}_{artifact_hash[:10]}"
@@ -207,12 +241,14 @@ def train(args: argparse.Namespace) -> dict:
         "task": "regression",
         "algorithm": args.algorithm,
         "parameters": {"seed": args.seed, "trees": args.trees, "max_depth": args.max_depth,
+                       "minimum_r2": args.minimum_r2,
+                       "max_baseline_rmse_ratio": args.max_baseline_rmse_ratio,
                        "fold_count": split_count},
         "dataset": {"name": source.name, "sha256": dataset_hash, "row_count": len(frame),
                     "feature_columns": features, "target_column": args.target,
                     "target_unit": args.target_unit,
-                    "source": args.dataset_source or None,
-                    "license": args.dataset_license or None,
+                    "source": dataset_source,
+                    "license": dataset_license,
                     "group_column": args.group, "group_count": len(unique_groups),
                     "group_ids_sha256": group_hash},
         "artifact": {"file": model_path.name, "sha256": artifact_hash, "format": "onnx"},
@@ -224,6 +260,7 @@ def train(args: argparse.Namespace) -> dict:
         "training_script_sha256": source_hash,
         "dependency_manifest_sha256": sha256(dependency_file.read_bytes()) if dependency_file.is_file() else None,
         "runtime_versions": _versions(),
+        "resolved_distributions": _resolved_distributions(),
         "dvc_revision": os.getenv("DVC_REV"),
     }
     metrics = {"cv": cv, "baseline_cv": baseline_cv, "quality_preflight": preflight,
@@ -246,7 +283,14 @@ def train(args: argparse.Namespace) -> dict:
         with mlflow.start_run(run_name=model_slug) as run:
             mlflow.log_params({"algorithm": args.algorithm, "seed": args.seed, "trees": args.trees,
                                "max_depth": args.max_depth or "unbounded", "fold_count": split_count,
+                               "minimum_r2": args.minimum_r2,
+                               "max_baseline_rmse_ratio": args.max_baseline_rmse_ratio,
                                "dataset_sha256": dataset_hash, "dataset_rows": len(frame),
+                               "dataset_source": dataset_source or "unspecified",
+                               "dataset_license": dataset_license or "unspecified",
+                               "target_column": args.target, "target_unit": args.target_unit,
+                               "group_column": args.group, "feature_count": len(features),
+                               "feature_schema_sha256": feature_schema_hash,
                                "group_count": len(unique_groups), "code_revision": manifest["code_revision"] or "unknown"})
             mlflow.log_metrics({key: value for key, value in cv.items() if value is not None})
             mlflow.log_metrics({f"baseline_{key}": value for key, value in baseline_cv.items() if value is not None})
@@ -324,6 +368,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--trees", type=int, default=160)
     parser.add_argument("--max-depth", type=int, default=16)
+    parser.add_argument("--minimum-r2", type=float, default=0.0)
+    parser.add_argument("--max-baseline-rmse-ratio", type=float, default=1.0)
     parser.add_argument("--model-name", default="")
     parser.add_argument("--output-dir", default="var/training_runs/candidate")
     parser.add_argument("--mlflow", nargs="?", const="true", default="false", choices=("true", "false"))
@@ -332,6 +378,10 @@ def parse_args() -> argparse.Namespace:
     args.mlflow = args.mlflow == "true"
     if args.seed < 0 or not 10 <= args.trees <= 5000 or not 1 <= args.max_depth <= 128:
         parser.error("seed/trees/max-depth are outside supported bounds")
+    if not np.isfinite(args.minimum_r2) or not -1.0 <= args.minimum_r2 <= 1.0:
+        parser.error("minimum-r2 must be finite and between -1 and 1")
+    if not np.isfinite(args.max_baseline_rmse_ratio) or not 0 < args.max_baseline_rmse_ratio <= 2:
+        parser.error("max-baseline-rmse-ratio must be finite and in (0, 2]")
     return args
 
 
