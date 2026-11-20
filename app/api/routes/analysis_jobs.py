@@ -37,6 +37,7 @@ from app.db.session import SessionLocal
 from app.db.models.uploaded_model import UploadedModel
 from app.db.models.user import User
 from app.services import (
+    config_service,
     carbon_service,
     crop_monitoring_service,
     download_service,
@@ -82,7 +83,7 @@ _GEE_SERVING_JOB_TYPES = {
     "landcover_change", "landcover_transition", "landcover_change_map",
     "landcover_hotspots", "landcover_fusion",
 }
-_CARBON_CACHE_SCHEMA = 4
+_CARBON_CACHE_SCHEMA = 5
 _UPSTREAM_CONNECTION_ERROR = (
     "Koneksi ke layanan data eksternal terputus sebelum respons diterima. "
     "Coba jalankan ulang analisis; jika berulang, kecilkan AOI/rentang waktu "
@@ -361,6 +362,14 @@ def _carbon_cache_key(db: Session, job_type: str, payload: dict[str, Any], owner
             if builtin:
                 model_identity.update({"version": builtin.get("version"), "metadata": builtin.get("metadata_json")})
 
+    analysis_defaults = config_service.get_analysis_defaults(db)
+    visualization_identity = {
+        "carbon_vis_min": analysis_defaults["carbon_vis_min"],
+        "carbon_vis_max": analysis_defaults["carbon_vis_max"],
+        "carbon_vis_palette": analysis_defaults["carbon_vis_palette"],
+        "carbon_legend_bins": analysis_defaults["carbon_legend_bins"],
+        "carbon_pool_visualization": analysis_defaults["carbon_pool_visualization"],
+    }
     encoded = json.dumps(
         {
             "type": job_type,
@@ -368,6 +377,7 @@ def _carbon_cache_key(db: Session, job_type: str, payload: dict[str, Any], owner
             "cache_schema": _CARBON_CACHE_SCHEMA,
             "application_version": get_product_version(),
             "model": model_identity,
+            "visualization": visualization_identity,
             "payload": payload,
         },
         sort_keys=True,

@@ -294,9 +294,19 @@ def analyze_carbon_pool(db, data):
             image, extras = _random_forest(reference, calculation_roi, meta, model, analysis_year,
                                            allow_large=bool(data.get("simple_mode")),
                                            cached_model_info=cached_model_info)
-    vis = {"min": meta.get("vis_min", defaults["carbon_vis_min"]),
-           "max": meta.get("vis_max", defaults["carbon_vis_max"]),
-           "palette": meta.get("vis_palette", defaults["carbon_vis_palette"])}
+    pool_key = {
+        "aboveground_biomass_carbon": "agb",
+        "belowground_biomass_carbon": "bgb",
+        "soil_organic_carbon": "soc",
+        "litter_carbon": "litter",
+        "deadwood_carbon": "deadwood",
+    }.get(meta.get("target_pool"))
+    pool_vis = defaults.get("carbon_pool_visualization", {}).get(pool_key, {})
+    vis = {
+        "min": pool_vis.get("min", meta.get("vis_min", defaults["carbon_vis_min"])),
+        "max": pool_vis.get("max", meta.get("vis_max", defaults["carbon_vis_max"])),
+        "palette": pool_vis.get("palette", meta.get("vis_palette", defaults["carbon_vis_palette"])),
+    }
     stats = None
     area_info = {"calculation_mode": "clipped_aoi" if clipped else "full_tiles", "total_carbon_tons": None,
                  "carbon_dioxide_equivalent_tons": None, "description": meta["description"]}
@@ -333,7 +343,9 @@ def analyze_carbon_pool(db, data):
         coverage = min(100, raw["valid_area_sum"] / raw["aoi_area"] * 100) if raw["aoi_area"] else None
         area_info.update(calculation_area_ha=raw["aoi_area"], area_ha=raw["aoi_area"], valid_area_ha=raw["valid_area_sum"],
                          total_carbon_tons=total, carbon_dioxide_equivalent_tons=total * defaults["carbon_co2_factor"] if total is not None else None)
-    if data.get("auto_vis") and stats and stats["max"] > stats["min"]:
+    # The per-pool admin stretch controls the served tile and its legend. Keep
+    # AOI-specific auto-stretch only for datasets without a known carbon pool.
+    if data.get("auto_vis") and not pool_vis and stats and stats["max"] > stats["min"]:
         vis.update(min=stats["min"], max=stats["max"])
     display = image.clip(calculation_roi)
     tile = display.getMapId(vis)["tile_fetcher"].url_format
