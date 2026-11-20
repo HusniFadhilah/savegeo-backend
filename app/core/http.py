@@ -28,6 +28,9 @@ _REQUEST_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 # rejects an oversized body on Content-Length before the multipart parser spools it to disk.
 _DMRV_UPLOAD_PATH = re.compile(r"^/dmrv/projects/[^/]+/field-data/imports(?:/preview)?$")
 DMRV_UPLOAD_LIMIT_BYTES = 11 * 1024 * 1024
+_SHP_CONVERT_PATH = re.compile(r"^/utils/convert_shp$")
+SHP_MULTIPART_BODY_LIMIT_BYTES = 51 * 1024 * 1024
+SHP_JSON_BODY_LIMIT_BYTES = 68 * 1024 * 1024
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -59,9 +62,10 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         )
 
     def _rate_limited(self, request: Request) -> bool:
-        if request.url.path in {"/api/health", "/api/live", "/api/ready", "/docs", "/redoc", "/openapi.json"}:
+        if request.url.path in {"/api/health", "/api/live", "/api/ready"}:
             return False
-        if not request.url.path.startswith("/api/"):
+        is_docs = request.url.path in {"/docs", "/redoc", "/openapi.json"}
+        if not is_docs and not request.url.path.startswith("/api/"):
             return False
 
         # Leaflet issues one request per visible raster tile. Keep these
@@ -72,10 +76,16 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             and request.url.path.startswith("/api/disasters/wildfires/events/")
             and "/emissions/tiles/" in request.url.path
         )
-        bucket = "map_tiles" if is_map_tile else "api"
+        is_region_read = (
+            request.method in {"GET", "HEAD"}
+            and request.url.path.startswith(f"{self.settings.api_prefix.rstrip('/')}/regions/")
+        )
+        bucket = "docs" if is_docs else "map_tiles" if is_map_tile else "regions" if is_region_read else "api"
         limit = (
-            self.settings.rate_limit_map_tiles_per_minute
+            60 if is_docs else self.settings.rate_limit_map_tiles_per_minute
             if is_map_tile
+            else self.settings.rate_limit_region_requests_per_minute
+            if is_region_read
             else self.settings.rate_limit_requests_per_minute
         )
         if limit <= 0:
@@ -103,12 +113,27 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     def _upload_too_large(self, request: Request) -> bool:
         prefix = self.settings.api_prefix
         path = request.url.path
-        if request.method != "POST" or not path.startswith(prefix + "/") or not _DMRV_UPLOAD_PATH.match(path[len(prefix):]):
+        if request.method != "POST" or not path.startswith(prefix + "/"):
             return False
+        route_path = path[len(prefix):]
+        is_dmrv_upload = bool(_DMRV_UPLOAD_PATH.match(route_path))
+        is_shapefile_upload = bool(_SHP_CONVERT_PATH.match(route_path))
+        if not is_dmrv_upload and not is_shapefile_upload:
+            return False
+        content_length = request.headers.get("content-length")
+        if not content_length:
+            return True
         try:
-            return int(request.headers.get("content-length", "0")) > DMRV_UPLOAD_LIMIT_BYTES
+            body_size = int(content_length)
         except ValueError:
             return True
+        if body_size < 0:
+            return True
+        if is_dmrv_upload:
+            return body_size > DMRV_UPLOAD_LIMIT_BYTES
+        is_multipart = "multipart/form-data" in request.headers.get("content-type", "").lower()
+        limit = SHP_MULTIPART_BODY_LIMIT_BYTES if is_multipart else SHP_JSON_BODY_LIMIT_BYTES
+        return body_size > limit
 
     def _csrf_rejected(self, request: Request) -> bool:
         if not self.settings.csrf_protection_enabled or request.method in {"GET", "HEAD", "OPTIONS"}:
@@ -150,16 +175,19 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         elif self._csrf_rejected(request):
             response = self._problem(request, 403, "Origin is not allowed for cookie-authenticated requests")
         elif self._upload_too_large(request):
-            response = JSONResponse(  # same body as every other dMRV error (see services/dmrv/errors.py)
-                status_code=413,
-                content={
-                    "code": "file_too_large", "message": "Ukuran berkas maksimal 10 MB.",
-                    "request_id": request_id, "retryable": False, "details": [],
-                },
-            )
+            if _DMRV_UPLOAD_PATH.match(request.url.path[len(self.settings.api_prefix):]):
+                response = JSONResponse(  # same body as every other dMRV error (see services/dmrv/errors.py)
+                    status_code=413,
+                    content={
+                        "code": "file_too_large", "message": "Ukuran berkas maksimal 10 MB.",
+                        "request_id": request_id, "retryable": False, "details": [],
+                    },
+                )
+            else:
+                response = self._problem(request, 413, "Request body exceeds the configured upload limit")
         else:
             response = await call_next(request)
-        if request.url.path.startswith(self.settings.api_prefix + "/"):
+        if request.url.path.startswith(self.settings.api_prefix + "/") or request.url.path in {"/docs", "/redoc", "/openapi.json"}:
             response.headers["Cache-Control"] = "no-store"
         response.headers["X-Request-ID"] = request_id
         response.headers["X-Content-Type-Options"] = "nosniff"

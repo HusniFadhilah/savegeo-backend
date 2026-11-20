@@ -9,6 +9,8 @@ migration plan - not run automatically on every boot).
 from __future__ import annotations
 
 import logging
+import hashlib
+import secrets
 from contextlib import asynccontextmanager
 from collections.abc import Mapping
 from pathlib import Path
@@ -17,10 +19,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
+from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -62,7 +66,44 @@ app = FastAPI(
     description="Carbon stock, vegetation, land cover, and disaster analysis platform - FastAPI + Supabase Postgres backend.",
     version=get_product_version(),
     lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
 )
+
+_docs_basic = HTTPBasic(auto_error=False)
+
+
+def require_docs_password(credentials: HTTPBasicCredentials | None = Depends(_docs_basic)) -> None:
+    """Keep the schema and both documentation pages closed by default."""
+    username = settings.api_docs_username
+    password = settings.api_docs_password.get_secret_value()
+    if not username or len(password) < 24:
+        raise HTTPException(status_code=503, detail="API documentation is not configured")
+    supplied_user = credentials.username if credentials else ""
+    supplied_password = credentials.password if credentials else ""
+    # Compare fixed-length digests to support Unicode without exposing secrets.
+    def digest(value: str) -> bytes:
+        return hashlib.sha256(value.encode("utf-8")).digest()
+    valid_user = secrets.compare_digest(digest(supplied_user), digest(username))
+    valid_password = secrets.compare_digest(digest(supplied_password), digest(password))
+    if not (valid_user and valid_password):
+        raise HTTPException(status_code=401, detail="Authentication required", headers={"WWW-Authenticate": 'Basic realm="SaveGeo API docs"'})
+
+
+@app.get("/openapi.json", include_in_schema=False, dependencies=[Depends(require_docs_password)])
+def private_openapi():
+    return JSONResponse(app.openapi())
+
+
+@app.get("/docs", include_in_schema=False, dependencies=[Depends(require_docs_password)])
+def private_swagger(request: Request):
+    return get_swagger_ui_html(openapi_url=request.scope.get("root_path", "").rstrip("/") + "/openapi.json", title=app.title + " - Swagger UI")
+
+
+@app.get("/redoc", include_in_schema=False, dependencies=[Depends(require_docs_password)])
+def private_redoc(request: Request):
+    return get_redoc_html(openapi_url=request.scope.get("root_path", "").rstrip("/") + "/openapi.json", title=app.title + " - ReDoc")
 
 setup_cors(app, settings)
 app.add_middleware(SecurityHeadersMiddleware, settings=settings)

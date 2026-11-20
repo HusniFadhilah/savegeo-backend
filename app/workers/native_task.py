@@ -4,6 +4,83 @@ import json
 import os
 from pathlib import Path
 import sys
+from typing import Any
+import zipfile
+
+from app.core.shapefile_limits import SHP_MAX_MEMBER_BYTES
+
+
+def inspect_shapefile_archive(source_path: str) -> dict:
+    """Parse one bounded shapefile archive without extracting member paths."""
+    import io
+    import stat
+
+    import shapefile
+
+    max_entries = 1000
+    max_member_bytes = SHP_MAX_MEMBER_BYTES
+    max_total_bytes = 300 * 1024 * 1024
+    max_features = 100_000
+    source = Path(source_path)
+    with zipfile.ZipFile(source) as archive:
+        members = archive.infolist()
+        if len(members) > max_entries:
+            raise ValueError("Too many archive entries")
+        total_size = 0
+        for member in members:
+            name = member.filename.replace("\\", "/")
+            if name.startswith("/") or ".." in Path(name).parts or "\x00" in name or ":" in name:
+                raise ValueError("Unsafe archive member path")
+            mode = member.external_attr >> 16
+            member_type = stat.S_IFMT(mode)
+            if member_type == stat.S_IFLNK or member_type not in (0, stat.S_IFREG, stat.S_IFDIR):
+                raise ValueError("Unsafe archive member type")
+            total_size += member.file_size
+            if total_size > max_total_bytes:
+                raise ValueError("Archive expands beyond the permitted size")
+
+        normalized_names = [member.filename.replace("\\", "/").casefold() for member in members]
+        if len(normalized_names) != len(set(normalized_names)):
+            raise ValueError("Archive contains duplicate member names")
+        shapefiles = [m.filename for m in members if m.filename.lower().endswith(".shp")]
+        if len(shapefiles) != 1:
+            raise ValueError("Archive must contain exactly one shapefile")
+        shp_name = shapefiles[0]
+        base = shp_name.replace("\\", "/")[:-4]
+        wanted = {f"{base}{ext}".casefold(): ext for ext in (".shp", ".dbf", ".shx")}
+        by_name = {m.filename.replace("\\", "/").casefold(): m for m in members}
+        selected = {ext: by_name.get(name) for name, ext in wanted.items()}
+        for _ext, selected_member in selected.items():
+            if selected_member is not None and selected_member.file_size > max_member_bytes:
+                raise ValueError("Shapefile member exceeds the permitted size")
+        if selected[".shp"] is None:
+            raise ValueError("Shapefile data is missing")
+
+        buffers = {}
+        for ext, selected_member in selected.items():
+            if selected_member is not None:
+                with archive.open(selected_member) as stream:
+                    buffers[ext] = io.BytesIO(stream.read(max_member_bytes + 1))
+                if len(buffers[ext].getbuffer()) > max_member_bytes:
+                    raise ValueError("Shapefile member exceeds the permitted size")
+
+    reader = shapefile.Reader(shp=buffers[".shp"], dbf=buffers.get(".dbf"), shx=buffers.get(".shx"))
+    try:
+        fields = [field[0] for field in reader.fields[1:]]
+        features: list[dict[str, Any]] = []
+        for shape_record in reader.iterShapeRecords():
+            if len(features) >= max_features:
+                raise ValueError("Shapefile exceeds the feature limit")
+            properties = dict(zip(fields, shape_record.record))
+            properties = {key: value.decode("utf-8", "replace") if isinstance(value, bytes) else value
+                for key, value in properties.items()}
+            features.append({"type": "Feature", "geometry": shape_record.shape.__geo_interface__, "properties": properties})
+    finally:
+        reader.close()
+    if not features:
+        raise ValueError("Shapefile contains no features")
+    return {"geojson": {"type": "FeatureCollection", "features": features},
+        "feature_count": len(features), "name": Path(base).name}
 
 
 def main():
@@ -56,9 +133,11 @@ def main():
                 copy(src, payload["destination"], driver="COG", compress="DEFLATE", blocksize=512,
                     overview_resampling=payload["resampling"], bigtiff="IF_SAFER")
         result = {"converted": True}
+    elif kind == "shapefile":
+        result = inspect_shapefile_archive(payload["source"])
     else:
         raise ValueError("Unknown native task")
-    Path(sys.argv[2]).write_text(json.dumps(result), encoding="utf-8")
+    Path(sys.argv[2]).write_text(json.dumps(result, default=str), encoding="utf-8")
 
 
 if __name__ == "__main__":

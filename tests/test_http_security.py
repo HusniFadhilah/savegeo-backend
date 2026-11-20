@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+import pytest
+from starlette.requests import Request
+
+from app.core.config import Settings
+from app.core.http import SecurityHeadersMiddleware
+
 
 def test_request_id_and_security_headers(client):
     response = client.get("/")
@@ -38,3 +44,29 @@ def test_oversized_dmrv_upload_is_rejected_before_the_body_is_parsed(client):
     assert client.post(path + "/preview", content=b"x" * (12 * 1024 * 1024), headers=headers).status_code == 413
     # ordinary-sized requests are not touched by the size guard (this one fails later, as a malformed form)
     assert client.post(path, content=b"x", headers=headers).status_code != 413
+
+
+@pytest.mark.asyncio
+async def test_oversized_shapefile_upload_is_rejected_before_multipart_parsing():
+    middleware = SecurityHeadersMiddleware(lambda *_args: None, Settings(_env_file=None))
+    request = Request({
+        "type": "http",
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/api/utils/convert_shp",
+        "raw_path": b"/api/utils/convert_shp",
+        "query_string": b"",
+        "headers": [
+            (b"host", b"test"),
+            (b"content-type", b"multipart/form-data; boundary=x"),
+            (b"content-length", str(52 * 1024 * 1024).encode()),
+        ],
+        "client": ("127.0.0.1", 1234),
+        "server": ("test", 80),
+    })
+
+    response = await middleware.dispatch(request, lambda _request: None)
+
+    assert response.status_code == 413
+    assert b"Request body exceeds the configured upload limit" in response.body

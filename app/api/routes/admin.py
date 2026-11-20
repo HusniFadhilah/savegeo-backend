@@ -25,7 +25,7 @@ from urllib.parse import urlparse
 import requests
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.concurrency import run_in_threadpool
-from sqlalchemy import select
+from sqlalchemy import inspect as sa_inspect, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -682,6 +682,95 @@ def admin_models_list(
     admin: AdminUser = Depends(require_permission("model.read")),
     db: Session = Depends(get_db),
 ):
+    model_columns = {column["name"] for column in sa_inspect(db.get_bind()).get_columns("uploaded_models")}
+    if "lifecycle_state" not in model_columns:
+        # Legacy deployments can still list models, but cannot claim lifecycle
+        # approval or safely execute review/archive actions.
+        legacy_columns = (
+            "id", "name", "display_name", "model_type", "algorithm", "filename",
+            "file_size_kb", "is_default", "is_active", "is_legacy", "description",
+            "version", "metrics", "feature_names", "metadata_json", "uploaded_by",
+            "uploaded_at", "updated_at",
+        )
+        selected_columns = [name for name in legacy_columns if name in model_columns]
+        if "id" not in selected_columns:
+            raise HTTPException(status_code=503, detail="Model catalog schema is unavailable")
+        sql_columns = ", ".join(f'"{name}"' for name in selected_columns)
+        where_clause = ' WHERE "model_type" = :model_type' if model_type and "model_type" in model_columns else ""
+        order_column = "updated_at" if "updated_at" in model_columns else "uploaded_at" if "uploaded_at" in model_columns else "id"
+        raw_rows = db.execute(
+            text(f'SELECT {sql_columns} FROM uploaded_models{where_clause} ORDER BY "{order_column}" DESC'),
+            {"model_type": model_type} if where_clause else {},
+        ).mappings().all()
+
+        def decode_json_value(value, default):
+            for _ in range(2):
+                if not isinstance(value, str):
+                    break
+                try:
+                    value = json.loads(value)
+                except (TypeError, json.JSONDecodeError):
+                    return default
+            return value if isinstance(value, type(default)) else default
+
+        models = []
+        for row in raw_rows:
+            item = dict(row)
+            item["display_name"] = item.get("display_name") or item.get("name")
+            item["is_active"] = bool(item.get("is_active", False))
+            item["is_default"] = bool(item.get("is_default", False))
+            item["is_legacy"] = bool(item.get("is_legacy", False))
+            item["metrics"] = decode_json_value(item.get("metrics"), {})
+            item["feature_names"] = decode_json_value(item.get("feature_names"), [])
+            item["metadata_json"] = decode_json_value(item.get("metadata_json"), {})
+            for date_field in ("uploaded_at", "updated_at"):
+                value = item.get(date_field)
+                item[date_field] = value.isoformat() if hasattr(value, "isoformat") else value
+            item["lifecycle_state"] = "legacy_unmigrated"
+            item["approved_by"] = None
+            item["approved_at"] = None
+            models.append(item)
+
+        uploader_ids = {item.get("uploaded_by") for item in models if item.get("uploaded_by") is not None}
+        uploader_names = {}
+        if uploader_ids:
+            try:
+                uploader_names = {
+                    user_id: username
+                    for user_id, username in db.query(AdminUser.id, AdminUser.username)
+                    .filter(AdminUser.id.in_(uploader_ids))
+                    .all()
+                }
+            except Exception:
+                logger.warning("Could not resolve legacy model uploader names")
+        for item in models:
+            item["uploaded_by"] = uploader_names.get(item.get("uploaded_by"))
+
+        if is_datatables_request(request):
+            params = request.query_params
+            search_value = (params.get("search[value]") or "").strip().casefold()
+            filtered = models
+            if search_value:
+                searchable_fields = ("name", "display_name", "algorithm", "model_type", "description")
+                filtered = [
+                    item for item in models
+                    if any(search_value in str(item.get(field) or "").casefold() for field in searchable_fields)
+                ]
+            try:
+                draw = max(0, int(params.get("draw", "0") or 0))
+                start = max(0, int(params.get("start", "0") or 0))
+                length = int(params.get("length", "10") or 10)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail="Invalid DataTables pagination parameters") from exc
+            page = filtered[start:] if length == -1 else filtered[start : start + max(0, length)]
+            return {
+                "draw": draw,
+                "recordsTotal": len(models),
+                "recordsFiltered": len(filtered),
+                "data": page,
+            }
+        return {"models": models}
+
     query = db.query(UploadedModel)
     if model_type:
         query = query.filter_by(model_type=model_type)
@@ -1435,7 +1524,7 @@ def admin_companies_list(
     if province:
         query = query.filter_by(province=province)
     if search:
-        query = query.filter(CompanyBoundary.name.ilike(f"%{search}%"))
+        query = query.filter(CompanyBoundary.name.icontains(search.strip(), autoescape=True))
     query = query.order_by(CompanyBoundary.name)
 
     if is_datatables_request(request):

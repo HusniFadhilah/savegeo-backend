@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     api_prefix: str = "/api"
     port: int = 8086
     app_name: str = "SAVEGEO"
+    # Separate credentials for interactive API documentation. Empty values
+    # leave documentation closed without affecting the API itself.
+    api_docs_username: str = ""
+    api_docs_password: SecretStr = SecretStr("")
     analysis_queue_backend: Literal["auto", "postgres", "inline"] = "auto"
     frontend_base_url: str = "http://localhost:5501"
 
@@ -58,6 +62,9 @@ class Settings(BaseSettings):
     csrf_protection_enabled: bool = True
     allow_user_registration: bool = False
     rate_limit_requests_per_minute: int = 120
+    # Boundary lookups are bursty (AOI selection and map overlays load several
+    # regions together); isolate these read-only calls from analysis/API quota.
+    rate_limit_region_requests_per_minute: int = 300
     trusted_proxy_cidrs: str = ""
     # Viewport raster requests are numerous and should not consume the budget
     # reserved for JSON/API operations such as hotspot region statistics.

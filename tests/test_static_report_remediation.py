@@ -8,14 +8,18 @@ import pytest
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from fastapi import FastAPI, HTTPException
+from fastapi import Response
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from app.api.routes import fields, geospatial, user_auth
 from app.core.security import create_user_access_token
 from app.db.models.field import Field
+from app.db.models.company_boundary import CompanyBoundary
 from app.db.models.user import User
 from app.db.session import get_db
 from app.providers import arcgis_client
@@ -113,6 +117,81 @@ def test_registration_closed_by_default_without_touching_database(monkeypatch):
         response = client.post("/auth/register", json={"username": "new-user", "email": "new@example.test", "password": "AuditPassword123!"})
         assert response.status_code == 404
         assert "set-cookie" not in response.headers
+
+
+def test_registration_unique_constraint_race_returns_conflict(monkeypatch):
+    monkeypatch.setattr(user_auth, "get_settings", lambda: SimpleNamespace(allow_user_registration=True))
+    monkeypatch.setattr(user_auth, "hash_password", lambda _password: "test-hash")
+
+    class EmptyQuery:
+        def filter_by(self, **_filters):
+            return self
+
+        def first(self):
+            return None
+
+    class ConflictingSession:
+        rolled_back = False
+
+        def query(self, _model):
+            return EmptyQuery()
+
+        def add(self, _user):
+            pass
+
+        def commit(self):
+            # Simulate another worker inserting the same unique value after
+            # this request's preflight SELECT and before its INSERT commits.
+            raise IntegrityError("INSERT users", {}, Exception("unique constraint"))
+
+        def rollback(self):
+            self.rolled_back = True
+
+    db = ConflictingSession()
+    payload = user_auth.UserRegisterRequest(
+        username="racing-user", email="race@example.test", password="SafeTest123!"
+    )
+    with pytest.raises(HTTPException) as error:
+        user_auth.register(payload, Response(), db)
+    assert error.value.status_code == 409
+    assert error.value.detail == "Username or email already exists"
+    assert db.rolled_back
+
+
+@pytest.mark.parametrize("duplicate_field", ["username", "email"])
+def test_registration_conflicts_do_not_disclose_which_identity_exists(monkeypatch, duplicate_field):
+    monkeypatch.setattr(user_auth, "get_settings", lambda: SimpleNamespace(allow_user_registration=True))
+
+    class DuplicateQuery:
+        filters = {}
+
+        def query(self, _model):
+            return self
+
+        def filter_by(self, **filters):
+            self.filters = filters
+            return self
+
+        def first(self):
+            identity = "racing-user" if duplicate_field == "username" else "race@example.test"
+            return object() if self.filters.get(duplicate_field) == identity else None
+
+    payload = user_auth.UserRegisterRequest(
+        username="racing-user", email="race@example.test", password="SafeTest123!"
+    )
+    with pytest.raises(HTTPException) as error:
+        user_auth.register(payload, Response(), DuplicateQuery())
+    assert error.value.status_code == 409
+    assert error.value.detail == "Username or email already exists"
+    assert "racing-user" not in error.value.detail
+    assert "race@example.test" not in error.value.detail
+
+
+def test_company_name_search_escapes_sql_wildcards():
+    expression = CompanyBoundary.name.icontains("company%_name", autoescape=True)
+    compiled = expression.compile(dialect=postgresql.dialect())
+    assert "ESCAPE" in str(compiled).upper()
+    assert next(iter(compiled.params.values())) == "company/%/_name"
 
 
 @pytest.mark.parametrize("url", ["https://www.arcgis.com:443@evil.example/path", "https://www.arcgis.com@evil.example/path", "http://www.arcgis.com/path", "https://www.arcgis.com.evil.example/path", "https://www.arcgis.com:8443/path", "https://user:pass@www.arcgis.com/path"])

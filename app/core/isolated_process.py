@@ -13,9 +13,11 @@ _slots = BoundedSemaphore(2)
 _root = Path(__file__).resolve().parents[2]
 
 
-def run_isolated(kind: str, payload: dict, *, timeout: float = 120, memory_mib: int = 4096) -> dict:
-    if kind not in {"onnx-inspect", "onnx-predict", "cog"}:
+def run_isolated(kind: str, payload: dict, *, timeout: float = 120, memory_mib: int = 4096,
+                 max_output_bytes: int = 65536) -> dict:
+    if kind not in {"onnx-inspect", "onnx-predict", "cog", "shapefile"}:
         raise ValueError("Unsupported isolated workload")
+    max_output_bytes = max(1024, min(int(max_output_bytes), 16 * 1024 * 1024))
     if not _slots.acquire(blocking=False):
         raise ValueError("Native processing capacity is busy; retry later")
     try:
@@ -37,7 +39,7 @@ def run_isolated(kind: str, payload: dict, *, timeout: float = 120, memory_mib: 
                     creationflags=int(getattr(subprocess, "CREATE_NO_WINDOW", 0)) if os.name == "nt" else 0)
             except subprocess.TimeoutExpired as exc:
                 raise ValueError("Native processing exceeded the time budget") from exc
-            if process.returncode or not output.is_file() or output.stat().st_size > 65536:
+            if process.returncode or not output.is_file() or output.stat().st_size > max_output_bytes:
                 raise ValueError("Native processing failed or exceeded its resource budget")
             return json.loads(output.read_text(encoding="utf-8"))
     finally:

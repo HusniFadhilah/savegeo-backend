@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core import auth_throttle
@@ -38,6 +39,7 @@ router = APIRouter(prefix="/auth", tags=["user-auth"])
 RESET_REQUEST_MESSAGE = (
     "Jika akun ditemukan, link reset password sudah dikirim ke email terdaftar."
 )
+REGISTRATION_CONFLICT_MESSAGE = "Username or email already exists"
 
 
 @router.get("/config")
@@ -52,9 +54,9 @@ def register(payload: UserRegisterRequest, response: Response, db: Session = Dep
     if len(payload.password) < 8:
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
     if db.query(User).filter_by(username=payload.username).first():
-        raise HTTPException(status_code=409, detail=f"Username {payload.username!r} already exists")
+        raise HTTPException(status_code=409, detail=REGISTRATION_CONFLICT_MESSAGE)
     if db.query(User).filter_by(email=payload.email).first():
-        raise HTTPException(status_code=409, detail=f"Email {payload.email!r} already exists")
+        raise HTTPException(status_code=409, detail=REGISTRATION_CONFLICT_MESSAGE)
 
     user = User(
         username=payload.username,
@@ -63,7 +65,15 @@ def register(payload: UserRegisterRequest, response: Response, db: Session = Dep
         password_hash=hash_password(payload.password),
     )
     db.add(user)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        # The preflight queries improve the common case, but two requests can
+        # still race between those checks and the INSERT. The database's
+        # unique constraints remain authoritative, and that conflict should
+        # be reported as a normal registration conflict rather than a 500.
+        db.rollback()
+        raise HTTPException(status_code=409, detail=REGISTRATION_CONFLICT_MESSAGE) from exc
     db.refresh(user)
     set_session_cookie(response, USER_SESSION_COOKIE, create_user_access_token(user))
     return {"user": user.to_dict()}
