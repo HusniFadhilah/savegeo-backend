@@ -22,7 +22,7 @@ def _model(name, display_name, algorithm, datasets, description, **metadata):
 
 BUILTIN_CARBON_POOL_MODELS = {}
 for _key, _meta in CARBON_DATASET_REGISTRY.items():
-    if not _meta.get("pool_analysis"):
+    if not _meta.get("pool_analysis") and _key != "SPAWN":
         continue
     _name = "pool_rf_" + _key.lower()
     BUILTIN_CARBON_POOL_MODELS[_name] = _model(

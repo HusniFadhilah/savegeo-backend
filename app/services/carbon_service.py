@@ -1026,7 +1026,7 @@ def analyze_carbon(db: Session, data: dict) -> dict:
     pool_meta = CARBON_DATASET_REGISTRY.get(data.get("reference_dataset"), {})
     builtin = get_builtin_carbon_model(data.get("model_name"), db=db)
     if (builtin and not data.get("reference_only") and not data.get("load_only")) or (pool_meta.get("pool_analysis") and (data.get("reference_only") or data.get("load_only") or not data.get("model_name"))):
-        if not pool_meta.get("pool_analysis") and not (builtin and builtin["metadata_json"].get("method") == "saved_reference_ensemble"):
+        if not pool_meta.get("pool_analysis") and not (builtin and (builtin["metadata_json"].get("method") == "saved_reference_ensemble" or (data.get("reference_dataset") == "SPAWN" and builtin["metadata_json"].get("training_mode") == "reference_raster"))):
             raise AnalysisError("Model BGB/SOC tidak kompatibel dengan dataset yang dipilih.", 422)
         from app.services.carbon_pool_service import analyze_carbon_pool
 

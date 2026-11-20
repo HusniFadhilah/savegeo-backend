@@ -7,6 +7,20 @@ from app.services import carbon_pool_service as service
 from app.services import carbon_annual_store as store
 
 
+def test_spawn_builtin_is_listed_and_routes_to_pool_analysis():
+    from app.registries.carbon_pool_models import builtin_carbon_models
+    from app.services import carbon_service
+
+    models = builtin_carbon_models('SPAWN', include_fallback=True)
+    model = next(item for item in models if item['name'] == 'pool_rf_spawn')
+    assert model['metadata_json']['training_mode'] == 'reference_raster'
+    data = {'aoi': {'west': 110, 'south': -7, 'east': 110.1, 'north': -6.9},
+            'reference_dataset': 'SPAWN', 'model_name': model['name'], 'year': 2026, 'simple_mode': True}
+    with patch.object(service, 'analyze_carbon_pool', return_value={'ok': True}) as analyze:
+        assert carbon_service.analyze_carbon(MagicMock(), data) == {'ok': True}
+    analyze.assert_called_once()
+
+
 @pytest.mark.parametrize('year', [2025, 2026])
 def test_database_reload_keeps_selected_year_and_regenerates_map_ids(year):
     model = {'name': 'reference_national', 'version': '1', 'algorithm': 'RF', 'description': 'annual',
