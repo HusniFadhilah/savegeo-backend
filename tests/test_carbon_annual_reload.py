@@ -7,6 +7,12 @@ from app.services import carbon_pool_service as service
 from app.services import carbon_annual_store as store
 
 
+def test_large_detritus_training_targets_land_and_oversamples():
+    assert service._training_sample_plan(True, 120000, 1600) == (10000, True)
+    assert service._training_sample_plan(True, 2000, 1600) == (1600, False)
+    assert service._training_sample_plan(False, 120000, 1600) == (1600, False)
+
+
 def test_spawn_builtin_is_listed_and_routes_to_pool_analysis():
     from app.registries.carbon_pool_models import builtin_carbon_models
     from app.services import carbon_service

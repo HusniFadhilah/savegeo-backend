@@ -119,6 +119,11 @@ def _detritus_prediction_mask(roi, analysis_year):
     return tree_cover.And(mangrove.Not()).And(tropical)
 
 
+def _training_sample_plan(is_detritus, area, sample_count):
+    use_land_geometry = bool(is_detritus and area > 100000)
+    return (max(sample_count, 10000) if use_land_geometry else sample_count), use_land_geometry
+
+
 def _random_forest(reference, roi, meta, model, analysis_year, *, allow_large=False, cached_model_info=None):
     # Bounded regional fitting keeps global-load requests separate from model calibration.
     region = roi.bounds(maxError=100).buffer(20000, maxError=100).bounds(maxError=100)
@@ -138,7 +143,12 @@ def _random_forest(reference, roi, meta, model, analysis_year, *, allow_large=Fa
     lonlat = ee.Image.pixelLonLat()
     block = lonlat.select("longitude").divide(0.05).floor().add(lonlat.select("latitude").divide(0.05).floor().multiply(7)).abs().mod(5).rename("holdout")
     sample_count = max(1600, min(20000, int(model.get("metadata_json", {}).get("rf_samples", 1600))))
-    samples = reference.addBands(training_predictors).addBands(block).sample(region=region, scale=sample_scale, numPixels=sample_count, seed=42, geometries=False, tileScale=4)
+    # On island/national bounding boxes most candidate pixels are ocean or
+    # outside the forest reference mask. Sample the selected land geometry and
+    # oversample candidates, while preserving the independent spatial holdout.
+    sample_count, use_land_geometry = _training_sample_plan(is_detritus, area, sample_count)
+    sample_region = roi if use_land_geometry else region
+    samples = reference.addBands(training_predictors).addBands(block).sample(region=sample_region, scale=sample_scale, numPixels=sample_count, seed=42, geometries=False, tileScale=4)
     train = samples.filter(ee.Filter.neq("holdout", 0))
     valid = samples.filter(ee.Filter.eq("holdout", 0))
     cached_metrics = (cached_model_info or {}).get("validation_metrics")
