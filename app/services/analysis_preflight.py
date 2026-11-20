@@ -6,7 +6,7 @@ import math
 from datetime import date, datetime, timezone
 from typing import Any
 
-from shapely.geometry import shape
+from shapely.geometry import box, shape
 from shapely.validation import explain_validity
 
 AOI_KEYS = ("aoi", "geometry", "geojson", "aoi_geojson", "aoiGeojson")
@@ -77,14 +77,25 @@ def preflight(analysis_type: str, payload: dict[str, Any]) -> dict[str, Any]:
     aoi_value = _find_aoi(payload)
     area_ha = None
     vertices = 0
-    if aoi_value is not None:
+    if isinstance(aoi_value, dict) and "region" in aoi_value:
+        if isinstance(aoi_value["region"], dict):
+            checks["geometry"] = {"status": "deferred", "message": "Batas wilayah akan dimuat dan divalidasi oleh server."}
+        else:
+            blocking.append({"code": "invalid_aoi", "message": "Referensi wilayah AOI tidak valid."})
+            checks["geometry"] = {"status": "fail"}
+    elif aoi_value is not None:
         try:
             encoded = json.dumps(aoi_value, separators=(",", ":"), allow_nan=False)
             if len(encoded.encode("utf-8")) > MAX_AOI_BYTES:
                 raise ValueError("AOI terlalu besar; batas geometri masukan adalah 4 MiB.")
             if isinstance(aoi_value, str):
                 aoi_value = json.loads(aoi_value)
-            if aoi_value.get("type") == "FeatureCollection":
+            if all(k in aoi_value for k in ("west", "south", "east", "north")):
+                west, south, east, north = (float(aoi_value[k]) for k in ("west", "south", "east", "north"))
+                if not all(math.isfinite(v) for v in (west, south, east, north)) or not (-180 <= west < east <= 180 and -90 <= south < north <= 90):
+                    raise ValueError("Batas AOI tidak valid.")
+                geometry = box(west, south, east, north)
+            elif aoi_value.get("type") == "FeatureCollection":
                 geometry = shape({"type": "GeometryCollection", "geometries": [f["geometry"] for f in aoi_value.get("features", [])]})
             else:
                 geometry = shape(aoi_value.get("geometry") if aoi_value.get("type") == "Feature" else aoi_value)
