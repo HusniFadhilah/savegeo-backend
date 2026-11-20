@@ -33,6 +33,7 @@ def models_list_legacy(model_type: str = "carbon", db: Session = Depends(get_db)
 def models_list(
     model_type: str | None = None,
     include_inactive: bool = False,
+    include_fallback: bool = Query(default=False),
     target_dataset: str | None = None,
     gee_deployable: bool | None = None,
     db: Session = Depends(get_db),
@@ -75,7 +76,8 @@ def models_list(
 
     if offset == 0 and model_type in (None, "carbon") and gee_deployable is not False:
         existing_names = {m["name"] for m in results}
-        results.extend(m for m in builtin_carbon_models(target_dataset, db=db) if m["name"] not in existing_names)
+        results.extend(m for m in builtin_carbon_models(target_dataset, db=db, include_fallback=include_fallback)
+                       if m["name"] not in existing_names)
     return {"models": results, "count": len(results), "offset": offset, "limit": limit, "has_more": has_more}
 
 

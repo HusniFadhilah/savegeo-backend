@@ -999,7 +999,7 @@ def analyze_carbon(db: Session, data: dict) -> dict:
         from app.services.carbon_extensions import analyze_extension
 
         return analyze_extension(data)
-    if data.get("reference_dataset") in {"TROPICAL_LITTER_REFERENCE", "TROPICAL_DEADWOOD_REFERENCE"} and not data.get("reference_only") and not data.get("load_only"):
+    if data.get("reference_dataset") in {"TROPICAL_LITTER_REFERENCE", "TROPICAL_DEADWOOD_REFERENCE"} and not data.get("model_name") and not data.get("reference_only") and not data.get("load_only"):
         from app.services.detritus_training import ensure_model
 
         if not data.get("aoi"):

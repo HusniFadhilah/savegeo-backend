@@ -82,7 +82,7 @@ _GEE_SERVING_JOB_TYPES = {
     "landcover_change", "landcover_transition", "landcover_change_map",
     "landcover_hotspots", "landcover_fusion",
 }
-_CARBON_CACHE_SCHEMA = 3
+_CARBON_CACHE_SCHEMA = 4
 _UPSTREAM_CONNECTION_ERROR = (
     "Koneksi ke layanan data eksternal terputus sebelum respons diterima. "
     "Coba jalankan ulang analisis; jika berulang, kecilkan AOI/rentang waktu "
