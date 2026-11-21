@@ -201,12 +201,11 @@ def _dw_confidence_stats(dw_collection, aoi, scale: int, threshold: float | None
     try:
         labels = mask_indonesia_snow_ice(dw_collection.select("label").mode())
         max_prob = _dw_class_confidence(dw_collection, labels).clip(aoi)
-        stats = max_prob.reduceRegion(
+        quality = max_prob.rename("confidence").addBands(
+            max_prob.lt(effective_threshold).rename("low_confidence")
+        )
+        stats = quality.reduceRegion(
             reducer=ee.Reducer.mean().combine(ee.Reducer.minMax(), sharedInputs=True),
-            geometry=aoi, scale=scale, maxPixels=int(settings.max_pixels), bestEffort=True, tileScale=4,
-        ).getInfo()
-        low_conf = max_prob.lt(effective_threshold).rename("low").reduceRegion(
-            reducer=ee.Reducer.mean(),
             geometry=aoi, scale=scale, maxPixels=int(settings.max_pixels), bestEffort=True, tileScale=4,
         ).getInfo()
         mean_c = stats.get("confidence_mean")
@@ -214,7 +213,7 @@ def _dw_confidence_stats(dw_collection, aoi, scale: int, threshold: float | None
             "mean_confidence": round(float(mean_c), 3) if mean_c is not None else None,
             "min_confidence": round(float(stats["confidence_min"]), 3) if stats.get("confidence_min") is not None else None,
             "low_confidence_threshold": effective_threshold,
-            "low_confidence_pixel_pct": round(float(low_conf.get("low", 0) or 0) * 100, 1),
+            "low_confidence_pixel_pct": round(float(stats.get("low_confidence_mean", 0) or 0) * 100, 1),
         }
     except Exception as e:  # noqa: BLE001
         logger.warning(f"Dynamic World confidence stats failed: {e}")
@@ -1091,19 +1090,11 @@ def analyze_landcover_change_map(data: dict) -> dict:
     source_from, source_to = from_image, to_image
     from_image, to_image = _comparison_grid(from_image, to_image, from_meta, to_meta, lc_scale, bool(data.get("include_improbable_classes", False)))
     changed = from_image.neq(to_image).rename("changed").selfMask().clip(aoi)
-    stable = from_image.eq(to_image).rename("stable").selfMask().clip(aoi)
 
     area_ha = ee.Image.pixelArea().divide(10000)
-    changed_area = area_ha.updateMask(changed).reduceRegion(
-        reducer=ee.Reducer.sum(),
-        geometry=aoi,
-        scale=lc_scale,
-        maxPixels=int(settings.max_pixels),
-        crs=LC_EQUAL_AREA_CRS,
-        bestEffort=False,
-        tileScale=4,
-    ).getInfo()
-    stable_area = area_ha.updateMask(stable).reduceRegion(
+    valid_area = area_ha.rename("valid_area_ha").updateMask(from_image.mask().And(to_image.mask()))
+    changed_area = area_ha.rename("changed_area_ha").updateMask(changed)
+    area_stats = valid_area.addBands(changed_area).reduceRegion(
         reducer=ee.Reducer.sum(),
         geometry=aoi,
         scale=lc_scale,
@@ -1137,9 +1128,9 @@ def analyze_landcover_change_map(data: dict) -> dict:
         "Land cover to year",
     )
 
-    changed_ha = float(changed_area.get("area_ha", 0) or changed_area.get("area", 0) or changed_area.get("constant", 0) or 0)
-    stable_ha = float(stable_area.get("area_ha", 0) or stable_area.get("area", 0) or stable_area.get("constant", 0) or 0)
-    total_ha = changed_ha + stable_ha
+    total_ha = float((area_stats or {}).get("valid_area_ha", 0) or 0)
+    changed_ha = float((area_stats or {}).get("changed_area_ha", 0) or 0)
+    stable_ha = max(total_ha - changed_ha, 0.0)
 
     return {
         "dataset": dataset,

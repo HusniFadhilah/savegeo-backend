@@ -78,6 +78,12 @@ _ALLOWED_JOB_TYPES = {
     "crop_monitoring",
 }
 _CARBON_CACHEABLE_TYPES = {"carbon", "carbon_local", "carbon_delta"}
+_RESULT_CACHEABLE_TYPES = _CARBON_CACHEABLE_TYPES | {
+    "landcover",
+    "landcover_change",
+    "landcover_transition",
+    "landcover_change_map",
+}
 _GEE_SERVING_JOB_TYPES = {
     "carbon", "carbon_local", "carbon_delta", "vegetation", "landcover",
     "landcover_change", "landcover_transition", "landcover_change_map",
@@ -362,14 +368,16 @@ def _carbon_cache_key(db: Session, job_type: str, payload: dict[str, Any], owner
             if builtin:
                 model_identity.update({"version": builtin.get("version"), "metadata": builtin.get("metadata_json")})
 
-    analysis_defaults = config_service.get_analysis_defaults(db)
-    visualization_identity = {
-        "carbon_vis_min": analysis_defaults["carbon_vis_min"],
-        "carbon_vis_max": analysis_defaults["carbon_vis_max"],
-        "carbon_vis_palette": analysis_defaults["carbon_vis_palette"],
-        "carbon_legend_bins": analysis_defaults["carbon_legend_bins"],
-        "carbon_pool_visualization": analysis_defaults["carbon_pool_visualization"],
-    }
+    visualization_identity = None
+    if job_type in _CARBON_CACHEABLE_TYPES:
+        analysis_defaults = config_service.get_analysis_defaults(db)
+        visualization_identity = {
+            "carbon_vis_min": analysis_defaults["carbon_vis_min"],
+            "carbon_vis_max": analysis_defaults["carbon_vis_max"],
+            "carbon_vis_palette": analysis_defaults["carbon_vis_palette"],
+            "carbon_legend_bins": analysis_defaults["carbon_legend_bins"],
+            "carbon_pool_visualization": analysis_defaults["carbon_pool_visualization"],
+        }
     encoded = json.dumps(
         {
             "type": job_type,
@@ -714,7 +722,7 @@ def _create_analysis_job_sync(request: Request, data: dict[str, Any], viewer: ob
     # during credential outages and in offline deployments.
     needs_ee = requires_earth_engine(job_type, payload)
     owner = job_owner_key(viewer)
-    cache_key = _carbon_cache_key(db, job_type, payload, owner) if job_type in _CARBON_CACHEABLE_TYPES else None
+    cache_key = _carbon_cache_key(db, job_type, payload, owner) if job_type in _RESULT_CACHEABLE_TYPES else None
     if cache_key:
         cached = _get_carbon_cache(db, cache_key)
         if cached is not None and _cache_entry_is_fresh(cached):
