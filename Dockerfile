@@ -119,6 +119,8 @@ COPY app ./app
 COPY alembic ./alembic
 COPY alembic.ini ./
 COPY scripts ./scripts
+COPY examples/dmrv/undip_carbon_stock_report_series.json ./examples/dmrv/undip_carbon_stock_report_series.json
+COPY examples/dmrv/pt_dahana_subang_field_inventory.csv ./examples/dmrv/pt_dahana_subang_field_inventory.csv
 
 ENV PORT=8086
 EXPOSE 8086
