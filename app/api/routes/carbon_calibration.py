@@ -337,6 +337,11 @@ def _extract_dataset(dataset_pk: int, job_id: str) -> None:
                 _import_workbook_records(db, dataset, item, parsed)
             _job(job_id, progress=10 + int((index + 1) / max(len(files), 1) * 80))
         dataset.status = "ready"
+        if (dataset.manifest or {}).get("source_reference_only"):
+            dataset.manifest = {**dataset.manifest, "plot_count": len(dataset.plots)}
+            # Extracted source records still require review of plot areas,
+            # coordinates, and pool-specific observations before fitting.
+            dataset.status = "review" if dataset.plots else "draft"
         dataset.provenance = {
             **(dataset.provenance or {}),
             "extracted_at": datetime.now(UTC).isoformat(),
@@ -792,6 +797,25 @@ async def upload_dataset_file(
 )
 def validate_dataset(dataset_id: str, db: Session = Depends(get_db)):
     dataset = _dataset_or_404(db, dataset_id)
+    if dataset.manifest.get("source_reference_only") and not dataset.plots:
+        report = {
+            "status": "blocked",
+            "errors": [{
+                "code": "field_plots_not_imported",
+                "message": "Unggah dan ekstrak data plot UNDIP, lalu tinjau koordinat serta luas plot sebelum kalibrasi.",
+            }],
+            "file_count": len(dataset.files),
+            "plot_count": 0,
+            "independent_sample_count": 0,
+            "warnings": [
+                "Ringkasan agregat laporan dan workbook tidak digunakan sebagai label pelatihan.",
+                "Angka AGB dan SOC tahun 2026 berbeda antara workbook revisi, tabel laporan, dan narasi PDF.",
+            ],
+        }
+        dataset.validation_report = report
+        dataset.status = "draft"
+        db.commit()
+        return report
     errors = []
     allowed_crs = {"EPSG:32748", "EPSG:4326"}
     if dataset.manifest.get("crs") not in allowed_crs:
@@ -803,6 +827,34 @@ def validate_dataset(dataset_id: str, db: Session = Depends(get_db)):
         )
     if len(dataset.plots) and any(plot.crs not in allowed_crs for plot in dataset.plots):
         errors.append({"code": "plot_crs_mismatch", "message": "One or more plots have an unsupported CRS"})
+    if dataset.manifest.get("source_reference_only"):
+        unresolved_area_count = sum(not plot.area_ha or plot.area_ha <= 0 for plot in dataset.plots)
+        coordinate_review_count = sum(
+            plot.qa_status != "valid"
+            or (plot.attributes or {}).get("coordinate_status") != "valid"
+            or not (plot.geometry_original or plot.geometry_normalized)
+            for plot in dataset.plots
+        )
+        coordinates = {}
+        for plot in dataset.plots:
+            geometry = plot.geometry_original or plot.geometry_normalized or {}
+            values = geometry.get("coordinates") if geometry.get("type") == "Point" else None
+            if values and len(values) >= 2:
+                key = (round(float(values[0]), 6), round(float(values[1]), 6))
+                coordinates.setdefault(key, []).append(plot.plot_id)
+        coordinate_review_count += sum(
+            len(plot_ids) for plot_ids in coordinates.values() if len(plot_ids) > 1
+        )
+        if unresolved_area_count:
+            errors.append({
+                "code": "plot_area_unconfirmed",
+                "message": f"Luas belum terkonfirmasi pada {unresolved_area_count} plot.",
+            })
+        if coordinate_review_count:
+            errors.append({
+                "code": "plot_coordinate_review",
+                "message": f"Koordinat perlu ditinjau pada {coordinate_review_count} plot.",
+            })
     report = {
         "status": "review" if errors else "valid",
         "errors": errors,
@@ -813,7 +865,11 @@ def validate_dataset(dataset_id: str, db: Session = Depends(get_db)):
             "Sampling is purposive; interval is indicative, not full-area probability inference",
             "Orthophoto RGB has no NIR and cannot produce NDVI/NDRE/SAVI",
             "Do not treat 90 trees as independent raster samples",
-        ],
+        ] + ([
+            "Aggregate totals in the report and workbooks are context only, not plot-level training labels.",
+            "Reconcile the 2026 AGB and SOC totals: figures differ between the revised workbook, PDF table, and PDF narrative.",
+            "BGB, litter, and deadwood are not covered by the provided UNDIP sources.",
+        ] if dataset.manifest.get("source_reference_only") else []),
     }
     dataset.validation_report = report
     dataset.status = "validated" if not errors else "review"
@@ -828,6 +884,13 @@ def validate_dataset(dataset_id: str, db: Session = Depends(get_db)):
 )
 def extract_dataset(dataset_id: str, db: Session = Depends(get_db)):
     dataset = _dataset_or_404(db, dataset_id)
+    if dataset.manifest.get("source_reference_only") and not any(
+        Path(item.source_name).suffix.lower() == ".xlsx" for item in dataset.files
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="Unggah workbook Excel survei UNDIP terlebih dahulu sebelum mengekstrak plot.",
+        )
     return _queue_dataset_job(dataset, "extract")
 
 
@@ -953,6 +1016,29 @@ def create_run(
     db: Session = Depends(get_db),
 ):
     dataset = _dataset_or_404(db, payload.dataset_id)
+    if (dataset.manifest or {}).get("source_reference_only"):
+        target_key = {
+            "aboveground_biomass_carbon": "carbon_agb_mg_c_ha",
+            "belowground_biomass_carbon": "carbon_bgb_mg_c_ha",
+            "living_biomass_carbon": "carbon_total_mg_c_ha",
+            "soil_organic_carbon": "carbon_soc_mg_c_ha",
+            "litter_carbon": "carbon_litter_mg_c_ha",
+            "deadwood_carbon": "carbon_deadwood_mg_c_ha",
+        }[payload.target_pool]
+        has_plot_observations = any(
+            plot.attributes
+            and plot.attributes.get(target_key) is not None
+            and (
+                plot.attributes.get("current_model_prediction") is not None
+                or (plot.attributes.get("current_model_predictions") or {}).get(payload.target_pool) is not None
+            )
+            for plot in dataset.plots
+        )
+        if not has_plot_observations:
+            raise HTTPException(
+                status_code=409,
+                detail="Kalibrasi UNDIP menunggu data prediksi dan pengamatan per plot yang sudah diverifikasi. Angka agregat PDF/workbook tidak dapat dipakai sebagai label model.",
+            )
     run = CarbonCalibrationRun(
         id=str(uuid.uuid4()),
         dataset_pk=dataset.id,

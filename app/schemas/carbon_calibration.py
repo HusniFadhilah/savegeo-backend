@@ -25,7 +25,9 @@ class CalibrationDatasetCreate(BaseModel):
     ecosystem: str = "rubber_plantation"
     species: list[str] = ["Hevea brasiliensis"]
     sampling_design: str = "purposive"
-    plot_count: int = Field(default=10, ge=1)
+    # Zero is valid for a source-only draft whose field plots have not yet been
+    # extracted and reviewed. Such a draft cannot be validated for calibration.
+    plot_count: int = Field(default=10, ge=0)
     plot_size_m: list[float] = [20, 20]
     sample_area_ha: float = 0.4
     mapped_area_ha: float = 9
