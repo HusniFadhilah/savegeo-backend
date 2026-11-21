@@ -797,7 +797,8 @@ async def upload_dataset_file(
 )
 def validate_dataset(dataset_id: str, db: Session = Depends(get_db)):
     dataset = _dataset_or_404(db, dataset_id)
-    if dataset.manifest.get("source_reference_only") and not dataset.plots:
+    manifest = dataset.manifest or {}
+    if manifest.get("source_reference_only") and not dataset.plots:
         report = {
             "status": "blocked",
             "errors": [{
@@ -818,7 +819,7 @@ def validate_dataset(dataset_id: str, db: Session = Depends(get_db)):
         return report
     errors = []
     allowed_crs = {"EPSG:32748", "EPSG:4326"}
-    if dataset.manifest.get("crs") not in allowed_crs:
+    if manifest.get("crs") not in allowed_crs:
         errors.append(
             {
                 "code": "crs_mismatch",
@@ -827,7 +828,7 @@ def validate_dataset(dataset_id: str, db: Session = Depends(get_db)):
         )
     if len(dataset.plots) and any(plot.crs not in allowed_crs for plot in dataset.plots):
         errors.append({"code": "plot_crs_mismatch", "message": "One or more plots have an unsupported CRS"})
-    if dataset.manifest.get("source_reference_only"):
+    if manifest.get("source_reference_only"):
         unresolved_area_count = sum(not plot.area_ha or plot.area_ha <= 0 for plot in dataset.plots)
         coordinate_review_count = sum(
             plot.qa_status != "valid"
@@ -869,7 +870,7 @@ def validate_dataset(dataset_id: str, db: Session = Depends(get_db)):
             "Aggregate totals in the report and workbooks are context only, not plot-level training labels.",
             "Reconcile the 2026 AGB and SOC totals: figures differ between the revised workbook, PDF table, and PDF narrative.",
             "BGB, litter, and deadwood are not covered by the provided UNDIP sources.",
-        ] if dataset.manifest.get("source_reference_only") else []),
+        ] if manifest.get("source_reference_only") else []),
     }
     dataset.validation_report = report
     dataset.status = "validated" if not errors else "review"
