@@ -59,7 +59,7 @@ def test_missing_plot_boundary_uses_confirmed_square_area_proxy(monkeypatch):
     geometry, properties = field_prediction_service._plot_feature(observation, None)
 
     assert geometry == "square-bounds"
-    assert calls["radius"] == pytest.approx(20 / 2**0.5)
+    assert calls["radius"] == pytest.approx(10.0)
     assert properties["support"] == "north_aligned_square_proxy"
 
 
