@@ -1740,10 +1740,9 @@ def _render_cog_tile(item_url: str, z: int, x: int, y: int, asset_key: str, band
     href = _readable_stac_asset_href(item_url, asset_key, provider_key, settings)
     _validate_public_http_url(href, "URL asset COG")
     indexes = _parse_cog_bands(bands)
-    from app.providers.local_raster_provider import GDAL_HTTP_OPTS, raster_provider_guard, validate_remote_raster_url
-    raster_host = validate_remote_raster_url(href)
-    with raster_provider_guard(raster_host), rasterio.Env(**GDAL_HTTP_OPTS):
-        with Reader(href) as reader:
+    from app.providers.local_raster_provider import safe_raster_source
+    with safe_raster_source(href) as local_path:
+        with Reader(local_path) as reader:
             if not reader.tile_exists(x, y, z):
                 return None
             img = reader.tile(x, y, z, tilesize=256, indexes=indexes)
@@ -1876,17 +1875,15 @@ def raster_toolbox(data: dict) -> dict:
     if not geometry:
         raise AnalysisError("AOI diperlukan untuk Raster Toolbox", 400)
     bands = _parse_cog_bands(data.get("bands")) or [1, 2, 3]
-    from app.providers.local_raster_provider import GDAL_HTTP_OPTS, raster_provider_guard, validate_remote_raster_url
-    raster_host = validate_remote_raster_url(href)
-    with raster_provider_guard(raster_host), rasterio.Env(**GDAL_HTTP_OPTS):
-        with rasterio.open(href) as source:
-            selected = [band for band in bands if band <= source.count]
-            if not selected:
-                raise AnalysisError("Band tidak tersedia pada asset COG", 400)
-            source_geometry = warp_transform_geom("EPSG:4326", source.crs, geometry)
-            clipped, transform = raster_mask(source, [source_geometry], crop=True, indexes=selected, filled=False)
-            profile = source.profile.copy()
-            profile.update(height=clipped.shape[1], width=clipped.shape[2], transform=transform, count=clipped.shape[0])
+    from app.providers.local_raster_provider import safe_raster_source
+    with safe_raster_source(href) as local_path, rasterio.open(local_path) as source:
+        selected = [band for band in bands if band <= source.count]
+        if not selected:
+            raise AnalysisError("Band tidak tersedia pada asset COG", 400)
+        source_geometry = warp_transform_geom("EPSG:4326", source.crs, geometry)
+        clipped, transform = raster_mask(source, [source_geometry], crop=True, indexes=selected, filled=False)
+        profile = source.profile.copy()
+        profile.update(height=clipped.shape[1], width=clipped.shape[2], transform=transform, count=clipped.shape[0])
     values = clipped.compressed().astype("float32")
     if values.size == 0:
         raise AnalysisError("AOI tidak memotong area raster", 400)

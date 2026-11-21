@@ -4,6 +4,7 @@ from __future__ import annotations
 import io
 import socket
 import time
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import numpy as np
@@ -30,83 +31,187 @@ def test_public_https_rejects_private_dns_before_connect(monkeypatch, address):
         public_http.public_http.get('https://allowed.arcgis.com/path')
 
 
-def test_gdal_provider_guard_shares_public_provider_circuit_breaker(monkeypatch):
-    outcomes = []
-    monkeypatch.setattr(public_http, "public_addresses", lambda _host: ["93.184.215.14"])
-    monkeypatch.setattr(public_http.public_http, "_circuit_before", lambda host: outcomes.append(("before", host)))
-    monkeypatch.setattr(
-        public_http.public_http,
-        "_circuit_result",
-        lambda host, *, success: outcomes.append(("result", host, success)),
-    )
-
-    with local_raster_provider.raster_provider_guard("assets.example"):
-        pass
-    with pytest.raises(RuntimeError):
-        with local_raster_provider.raster_provider_guard("assets.example"):
-            raise RuntimeError("upstream read failed")
-
-    assert outcomes == [
-        ("before", "assets.example"), ("result", "assets.example", True),
-        ("before", "assets.example"), ("result", "assets.example", False),
-    ]
-    assert local_raster_provider.GDAL_HTTP_OPTS["GDAL_HTTP_MAX_RETRY"] == 0
-
-
-def test_gdal_remote_raster_requires_bounded_non_redirecting_range_probe(monkeypatch):
-    calls = {}
+def test_remote_raster_url_requires_public_https_without_opening_a_connection(monkeypatch):
     monkeypatch.setattr(
         public_http.public_http,
         "validate_public_destination",
         lambda url: (url, "assets.example", ["93.184.215.14"]),
     )
-
-    def request(method, url, **kwargs):
-        calls.update(method=method, url=url, **kwargs)
-        return SimpleNamespace(status_code=206, headers={"Content-Range": "bytes 0-0/1048576"})
-
-    monkeypatch.setattr(public_http.public_http, "request", request)
     hostname = local_raster_provider.validate_remote_raster_url(
         "https://assets.example/plot.tif?sig=private",
-        {"GDAL_HTTP_HEADERS": "Authorization: Bearer private\nX-Debug: do-not-forward"},
     )
-
     assert hostname == "assets.example"
-    assert calls["method"] == "GET"
-    assert calls["headers"] == {"Range": "bytes=0-0", "Authorization": "Bearer private"}
-    assert calls["max_bytes"] == 1
-    assert calls["timeout"] == (3, 8)
-    assert calls["allow_redirects"] is False
+    with pytest.raises(ValueError, match="public HTTPS"):
+        local_raster_provider.validate_remote_raster_url("ftp://assets.example/plot.tif")
+    with pytest.raises(ValueError, match="virtual paths"):
+        local_raster_provider.validate_remote_raster_url("/vsicurl/https://assets.example/plot.tif")
 
 
-@pytest.mark.parametrize(
-    "status,content_range",
-    [
-        (302, ""),
-        (200, ""),
-        (206, ""),
-        (206, "bytes 0-0/536870913"),
-    ],
-)
-def test_gdal_remote_raster_rejects_redirects_unknown_sizes_and_oversized_files(
-    monkeypatch, status, content_range
-):
+def test_safe_raster_source_serves_bounded_ranges_and_stops(monkeypatch):
+    source_bytes = b"0123456789abcdef"
+    calls = []
     monkeypatch.setattr(
         public_http.public_http,
         "validate_public_destination",
         lambda url: (url, "assets.example", ["93.184.215.14"]),
     )
+
+    def get(url, *, headers, timeout, max_bytes):
+        range_header = headers["Range"]
+        calls.append((url, range_header, timeout, max_bytes, headers.copy()))
+        start, end = (int(value) for value in range_header.removeprefix("bytes=").split("-"))
+        end = min(end, len(source_bytes) - 1)
+        content = source_bytes[start:end + 1]
+        return SimpleNamespace(
+            status_code=206,
+            headers={
+                "Content-Range": f"bytes {start}-{end}/{len(source_bytes)}",
+                "Content-Length": str(len(content)),
+                "ETag": '"stable-version"',
+            },
+            content=content,
+        )
+
+    monkeypatch.setattr(public_http.public_http, "get", get)
+    with local_raster_provider.safe_raster_source(
+        "https://assets.example/plot.tif?sig=private",
+        {"GDAL_HTTP_HEADERS": "Authorization: Bearer private"},
+    ) as local_url:
+        response = public_http.requests.get(local_url, headers={"Range": "bytes=2-5"}, timeout=3)
+        assert response.status_code == 206
+        assert response.content == source_bytes[2:6]
+        assert response.headers["Content-Range"] == "bytes 2-5/16"
+    assert len(calls) == 2
+    assert calls[0][1] == "bytes=0-0" and calls[0][3] == 1
+    assert calls[1][1] == "bytes=2-5" and calls[1][3] == 4
+    assert calls[1][4]["Authorization"] == "Bearer private"
+    with pytest.raises(public_http.requests.RequestException):
+        public_http.requests.get(local_url, headers={"Range": "bytes=2-5"}, timeout=0.5)
+
+
+def test_safe_raster_source_limits_range_bytes_and_rejects_unsupported_headers(monkeypatch):
+    attempts = []
     monkeypatch.setattr(
         public_http.public_http,
-        "request",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            status_code=status, headers={"Content-Range": content_range}
-        ),
+        "validate_public_destination",
+        lambda url: (url, "bounded-range.example", ["93.184.215.14"]),
     )
 
-    with pytest.raises(ValueError, match="bounded public HTTPS range check"):
-        local_raster_provider.validate_remote_raster_url("https://assets.example/plot.tif")
+    def get(_url, *, headers, **_kwargs):
+        attempts.append(headers["Range"])
+        object_size = local_raster_provider.MAX_REMOTE_RASTER_RANGE_BYTES + 2
+        return SimpleNamespace(
+            status_code=206,
+            headers={"Content-Range": f"bytes 0-0/{object_size}"},
+            content=b"x",
+        )
 
+    monkeypatch.setattr(public_http.public_http, "get", get)
+    with local_raster_provider.safe_raster_source("https://bounded-range.example/plot.tif") as local_url:
+        oversized = public_http.requests.get(
+            local_url,
+            headers={"Range": f"bytes=0-{local_raster_provider.MAX_REMOTE_RASTER_RANGE_BYTES}"},
+            timeout=3,
+        )
+        assert oversized.status_code == 416
+    assert attempts == ["bytes=0-0"]
+    with pytest.raises(ValueError, match="unsupported HTTP header"):
+        with local_raster_provider.safe_raster_source(
+            "https://bounded-range.example/plot.tif",
+            {"GDAL_HTTP_HEADERS": "X-Api-Key: must-not-be-forwarded"},
+        ):
+            pytest.fail("unsupported provider header must be rejected")
+
+
+def test_safe_raster_source_reserves_shared_session_budget_for_parallel_ranges(monkeypatch):
+    monkeypatch.setattr(local_raster_provider, "MAX_REMOTE_RASTER_SESSION_BYTES", 4)
+    monkeypatch.setattr(
+        public_http.public_http,
+        "validate_public_destination",
+        lambda url: (url, "parallel-ranges.example", ["93.184.215.14"]),
+    )
+    source_bytes = b"0123456789"
+    fetched_ranges = []
+
+    def get(_url, *, headers, max_bytes, **_kwargs):
+        range_header = headers["Range"]
+        if range_header != "bytes=0-0":
+            fetched_ranges.append(range_header)
+        start, end = (int(value) for value in range_header.removeprefix("bytes=").split("-"))
+        end = min(end, len(source_bytes) - 1)
+        body = source_bytes[start:end + 1]
+        assert len(body) <= max_bytes
+        return SimpleNamespace(
+            status_code=206,
+            headers={
+                "Content-Range": f"bytes {start}-{end}/{len(source_bytes)}",
+                "ETag": '"stable-object"',
+            },
+            content=body,
+        )
+
+    monkeypatch.setattr(public_http.public_http, "get", get)
+    with local_raster_provider.safe_raster_source("https://parallel-ranges.example/plot.tif") as local_url:
+        def fetch(range_header):
+            return public_http.requests.get(
+                local_url, headers={"Range": range_header}, timeout=3
+            ).status_code
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            statuses = list(executor.map(fetch, ("bytes=0-2", "bytes=3-5")))
+
+    assert sorted(statuses) == [206, 413]
+    assert len(fetched_ranges) == 1
+
+
+def test_rasterio_reads_cog_through_loopback_range_proxy(monkeypatch):
+    import rasterio
+    from rasterio.io import MemoryFile
+    from rasterio.transform import from_origin
+
+    expected = np.arange(16, dtype="uint8").reshape((4, 4))
+    with MemoryFile() as memory_file:
+        with memory_file.open(
+            driver="GTiff",
+            width=4,
+            height=4,
+            count=1,
+            dtype="uint8",
+            crs="EPSG:4326",
+            transform=from_origin(100, 4, 0.01, 0.01),
+        ) as raster:
+            raster.write(expected, 1)
+        raster_bytes = memory_file.read()
+
+    monkeypatch.setattr(
+        public_http.public_http,
+        "validate_public_destination",
+        lambda url: (url, "cog.example", ["93.184.215.14"]),
+    )
+    ranges = []
+
+    def get(_url, *, headers, max_bytes, **_kwargs):
+        range_header = headers["Range"]
+        ranges.append(range_header)
+        start, end = (int(value) for value in range_header.removeprefix("bytes=").split("-"))
+        end = min(end, len(raster_bytes) - 1)
+        body = raster_bytes[start:end + 1]
+        assert len(body) <= max_bytes
+        return SimpleNamespace(
+            status_code=206,
+            headers={
+                "Content-Range": f"bytes {start}-{end}/{len(raster_bytes)}",
+                "ETag": '"test-raster"',
+            },
+            content=body,
+        )
+
+    monkeypatch.setattr(public_http.public_http, "get", get)
+    with local_raster_provider.safe_raster_source("https://cog.example/tiny.tif") as source_url:
+        with rasterio.open(source_url) as source:
+            assert np.array_equal(source.read(1), expected)
+    assert ranges and ranges[0] == "bytes=0-0"
+    assert any(value != "bytes=0-0" for value in ranges)
 
 def test_public_https_pins_address_with_original_sni_and_no_redirect(monkeypatch):
     calls = {}
@@ -293,6 +398,68 @@ def test_public_https_download_blocks_unapproved_redirect_before_dns(monkeypatch
             max_bytes=128, allowed_redirect_hosts={'huggingface.co', 'xethub.hf.co'},
         )
     assert resolved == ['huggingface.co']
+    assert not target.exists()
+
+
+def test_remote_raster_download_requires_exact_host_for_redirects(monkeypatch, tmp_path):
+    resolved = []
+    monkeypatch.setattr(public_http, 'public_addresses', lambda host: resolved.append(host) or ['93.184.215.14'])
+    public_http._CIRCUITS.pop("assets.example", None)
+
+    class Pool:
+        def __init__(self, _address, **kwargs):
+            self.hostname = kwargs["server_hostname"]
+        def urlopen(self, *_args, **_kwargs):
+            return SimpleNamespace(
+                status=302,
+                headers={"Location": "https://cdn.assets.example/data.tif"},
+                close=lambda: None,
+            )
+        def close(self):
+            pass
+
+    monkeypatch.setattr(public_http.urllib3, "HTTPSConnectionPool", Pool)
+    target = tmp_path / "raster.tif"
+    with pytest.raises(ValueError, match="original host"):
+        public_http.public_http.download_to_file(
+            "https://assets.example/data.tif",
+            target,
+            max_bytes=16,
+            allowed_redirect_hosts={"assets.example"},
+            same_host_redirects=True,
+        )
+    assert resolved == ["assets.example"]
+    assert not target.exists()
+
+
+@pytest.mark.parametrize(
+    "headers,body",
+    [({"Content-Length": "9"}, b""), ({}, b"123456789")],
+)
+def test_public_https_file_download_caps_declared_and_streamed_bytes(monkeypatch, tmp_path, headers, body):
+    monkeypatch.setattr(public_http, "public_addresses", lambda _host: ["93.184.215.14"])
+    hostname = "bounded-download.example"
+    public_http._CIRCUITS.pop(hostname, None)
+
+    class Pool:
+        def __init__(self, *_args, **_kwargs):
+            pass
+        def urlopen(self, *_args, **_kwargs):
+            stream = io.BytesIO(body)
+            raw = SimpleNamespace(read1=lambda size: stream.read(size))
+            return SimpleNamespace(status=200, headers=headers, _fp=raw, close=lambda: None)
+        def close(self):
+            pass
+
+    monkeypatch.setattr(public_http.urllib3, "HTTPSConnectionPool", Pool)
+    target = tmp_path / "too-large.bin"
+    with pytest.raises(ValueError, match="size limit"):
+        public_http.public_http.download_to_file(
+            f"https://{hostname}/asset",
+            target,
+            max_bytes=8,
+            allowed_redirect_hosts={hostname},
+        )
     assert not target.exists()
 
 

@@ -11,9 +11,9 @@ import os
 from datetime import UTC, datetime
 from functools import lru_cache
 from typing import Any
+from urllib.parse import urlsplit
 
 import numpy as np
-import rasterio
 from dotenv import dotenv_values
 from fastapi import Request
 from rio_tiler.errors import PointOutsideBounds, TileOutsideBounds
@@ -168,7 +168,31 @@ def _asset_href_and_env(asset: Any) -> tuple[str, dict[str, str]]:
     ).strip()
     https_alt = asset.extra_fields.get("alternate", {}).get("https", {})
     if token and https_alt.get("href"):
-        return https_alt["href"], {"GDAL_HTTP_HEADERS": f"Authorization: Bearer {token}"}
+        href = str(https_alt["href"])
+        try:
+            parsed = urlsplit(href)
+            hostname = (parsed.hostname or "").encode("idna").decode("ascii").lower().rstrip(".")
+            valid_https = (
+                parsed.scheme == "https"
+                and parsed.username is None
+                and parsed.password is None
+                and parsed.port in {None, 443}
+                and not any(ord(char) < 33 or ord(char) == 127 for char in href)
+            )
+        except (UnicodeError, ValueError):
+            valid_https = False
+            hostname = ""
+        if (
+            not valid_https
+            or not (hostname == "dataspace.copernicus.eu" or hostname.endswith(".dataspace.copernicus.eu"))
+            or len(token) > 8192
+            or any(char.isspace() or ord(char) < 33 or ord(char) == 127 for char in token)
+        ):
+            raise CopernicusAnalysisError(
+                "Host aset Copernicus tidak diizinkan untuk autentikasi.",
+                502,
+            )
+        return href, {"GDAL_HTTP_HEADERS": f"Authorization: Bearer {token}"}
 
     if asset.href.startswith("s3://") and not (
         os.environ.get("AWS_ACCESS_KEY_ID") and os.environ.get("AWS_SECRET_ACCESS_KEY")
@@ -267,10 +291,9 @@ def render_tile(provider_key: str, scene_id: str, z: int, x: int, y: int) -> byt
                     404,
                 )
             href, env = _asset_href_and_env(asset)
-            from app.providers.local_raster_provider import GDAL_HTTP_OPTS, raster_provider_guard, validate_remote_raster_url
-            raster_host = validate_remote_raster_url(href)
-            with raster_provider_guard(raster_host), rasterio.Env(**{**GDAL_HTTP_OPTS, **env}):
-                with Reader(href) as reader:
+            from app.providers.local_raster_provider import safe_raster_source
+            with safe_raster_source(href, env) as local_path:
+                with Reader(local_path) as reader:
                     if not reader.tile_exists(x, y, z):
                         return None
                     img = reader.tile(x, y, z, tilesize=256)

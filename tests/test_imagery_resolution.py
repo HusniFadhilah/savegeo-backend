@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -210,8 +211,7 @@ def test_forced_non_sentinel_mosaic_uses_generic_renderer():
 def test_cog_renderer_reads_requested_high_zoom_without_thumbnail_resize():
     with patch.object(imagery_service, "_readable_stac_asset_href", return_value="https://example.org/full.tif"), \
          patch.object(imagery_service, "_validate_public_http_url"), \
-         patch("app.providers.local_raster_provider.validate_remote_raster_url", return_value="example.org"), \
-         patch("app.providers.local_raster_provider.raster_provider_guard"), \
+         patch("app.providers.local_raster_provider.safe_raster_source", return_value=nullcontext("source.tif")), \
          patch.object(imagery_service, "Reader") as reader:
         reader.return_value.__enter__.return_value.tile.return_value = ImageData(np.ma.array(np.full((3, 256, 256), 123, dtype="uint8"), mask=False))
         imagery_service._render_cog_tile("https://example.org/item", 14, 12000, 8000, "visual", "1,2,3", None)

@@ -2,10 +2,9 @@
 local_raster_provider.py — rasterio-based, non-GEE raster ingestion.
 
 Provides the shared grid/warp primitive (`GridSpec`, `load_raster_to_grid`)
-used both for local/already-downloaded GeoTIFFs and for STAC-signed HTTPS
-COG hrefs (providers/stac_provider.py reuses `load_raster_to_grid` — a
-signed STAC asset href is just an HTTPS URL rasterio can open the same way
-as a local path).
+used both for local/already-downloaded GeoTIFFs and STAC-signed HTTPS COGs.
+Remote COGs are read by byte range through a short-lived loopback proxy backed
+by a bounded, DNS-pinned HTTPS transport.
 
 Also implements `load_carbon_reference_to_grid()`: non-GEE label ingestion
 for the tiled/global-COG carbon reference datasets in CARBON_EXTERNAL_REGISTRY
@@ -22,10 +21,13 @@ import math
 import hashlib
 import os
 import re
-from collections.abc import Callable
+import secrets
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from collections.abc import Callable, Iterator
 from pathlib import Path
 import threading
 import time
+from contextlib import contextmanager
 from urllib.parse import urlsplit
 
 import numpy as np
@@ -116,83 +118,235 @@ def _write_cached_carbon_tile(cache_key: str, content: bytes) -> None:
 
 BBox = tuple[float, float, float, float]  # (west, south, east, north) in EPSG:4326
 
-# GDAL/vsicurl tuning for remote COG reads (Planetary Computer / CEDA HTTPS).
-# Without these, every rasterio.open() on a remote COG re-negotiates a fresh
-# connection and re-reads the TIFF directory with no caching — observed to
-# take 10-30s per band on this network. This is the standard cloud-native
-# GeoTIFF tuning recommended by Planetary Computer's own docs.
-GDAL_HTTP_OPTS = {
-    "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
-    "CPL_VSIL_CURL_ALLOWED_EXTENSIONS": ".tif,.TIF,.tiff",
-    # GDAL/libcurl on the Windows deployment occasionally terminates the
-    # process while opening large public COGs over HTTP/2. HTTP/1.1 keeps
-    # range reads stable; connection reuse remains enabled by the VSI cache.
-    "GDAL_HTTP_MULTIPLEX": "NO",
-    "GDAL_HTTP_VERSION": "1.1",
-    "VSI_CACHE": True,
-    "VSI_CACHE_SIZE": 200_000_000,
-    "GDAL_CACHEMAX": 200,
-    # Keep transport retry policy in public_http (one bounded retry for safe
-    # GETs); durable analysis jobs provide the higher-level backoff.
-    "GDAL_HTTP_MAX_RETRY": 0,
-    "GDAL_HTTP_TIMEOUT": 20,
-    "GDAL_HTTP_CONNECTTIMEOUT": 5,
-    "GDAL_HTTP_NETRC": "NO",
-    # Never carry CDSE/provider bearer headers through an HTTP redirect.
-    "CPL_VSIL_CURL_AUTHORIZATION_HEADER_ALLOWED_IF_REDIRECT": "NO",
-    # Abort stalled remote range reads instead of letting a provider hold a worker.
-    "GDAL_HTTP_LOW_SPEED_LIMIT": 1,
-    "GDAL_HTTP_LOW_SPEED_TIME": 30,
-}
 MAX_GRID_PIXELS = 50_000_000
-MAX_REMOTE_RASTER_BYTES = 512 * 1024 * 1024
+MAX_REMOTE_RASTER_OBJECT_BYTES = 128 * 1024 * 1024 * 1024
+MAX_REMOTE_RASTER_RANGE_BYTES = 16 * 1024 * 1024
+MAX_REMOTE_RASTER_SESSION_BYTES = 512 * 1024 * 1024
 
 
 def validate_remote_raster_url(path_or_url: str, http_options: dict[str, str] | None = None) -> str | None:
-    """Require a public HTTPS COG with a bounded, non-redirecting range probe.
+    """Validate remote raster syntax and reject non-public DNS answers.
 
-    GDAL performs its own DNS lookup and may follow redirects, so this probe
-    rejects non-range servers, redirects and oversized objects before GDAL is
-    allowed to open the source. Production egress rules must still constrain
-    GDAL/libcurl's later range requests to approved provider hosts.
+    Rasterio must never receive an external URL. Use ``safe_raster_source``
+    to read through its loopback proxy and the bounded HTTPS transport.
     """
-    parsed = urlsplit(str(path_or_url))
-    if parsed.scheme not in {"http", "https"}:
+    source = str(path_or_url).strip()
+    if re.match(r"^[A-Za-z]:[\\/]", source):
         return None
+    parsed = urlsplit(source)
+    if not parsed.scheme:
+        if source.lower().startswith(("/vsi", "\\\\")):
+            raise ValueError("Remote GDAL virtual paths and network shares are not allowed.")
+        return None
+    if parsed.scheme.lower() != "https":
+        raise ValueError("Remote raster must use public HTTPS.")
     try:
-        _, hostname, _ = public_http.validate_public_destination(str(path_or_url))
-        probe_headers = {"Range": "bytes=0-0"}
-        configured_headers = str((http_options or {}).get("GDAL_HTTP_HEADERS") or "")
-        for line in configured_headers.splitlines():
-            name, separator, value = line.partition(":")
-            if separator and name.strip().lower() in {"authorization", "x-api-key", "cookie"}:
-                probe_headers[name.strip()] = value.strip()
-        response = public_http.request(
-            "GET",
-            str(path_or_url),
-            headers=probe_headers,
-            timeout=(3, 8),
-            allow_redirects=False,
-            max_bytes=1,
-        )
-        if response.status_code != 206:
-            raise ValueError("Remote raster range probe did not return HTTP 206.")
-        content_range = response.headers.get("Content-Range", "")
-        match = re.fullmatch(r"bytes 0-0/(\d+)", content_range.strip(), re.IGNORECASE)
-        if not match or int(match.group(1)) <= 0 or int(match.group(1)) > MAX_REMOTE_RASTER_BYTES:
-            raise ValueError("Remote raster size is missing or exceeds the configured limit.")
+        _, hostname, _ = public_http.validate_public_destination(source)
     except (ValueError, OSError) as exc:
-        raise ValueError("Remote raster failed the bounded public HTTPS range check.") from exc
+        raise ValueError("Remote raster must use public HTTPS.") from exc
     return hostname
 
 
-def raster_provider_guard(hostname: str | None):
-    """Share the public provider circuit breaker with GDAL/libcurl reads."""
-    from contextlib import nullcontext
+def _raster_http_headers(http_options: dict[str, str] | None) -> dict[str, str]:
+    """Extract the one credential header allowed for remote raster downloads."""
+    configured = str((http_options or {}).get("GDAL_HTTP_HEADERS") or "")
+    headers: dict[str, str] = {}
+    for line in configured.splitlines():
+        name, separator, value = line.partition(":")
+        if not separator or name.strip().lower() != "authorization" or not value.strip():
+            raise ValueError("Remote raster provider supplied an unsupported HTTP header.")
+        if headers:
+            raise ValueError("Remote raster provider supplied duplicate authorization headers.")
+        headers["Authorization"] = value.strip()
+    return headers
 
-    if not hostname:
-        return nullcontext()
-    return public_http.provider_guard(hostname)
+
+@contextmanager
+def safe_raster_source(path_or_url: str, http_options: dict[str, str] | None = None) -> Iterator[str]:
+    """Yield a source path/URL while routing remote COG ranges through pinned HTTPS.
+
+    GDAL sees only a tokenized loopback HTTP endpoint. Each byte range is fetched
+    through ``public_http`` with DNS pinning, redirects disabled, bounded bytes,
+    timeout and retry policy. Large COGs are read by range without downloading
+    the complete object. The loopback server is private to this context and is
+    stopped as soon as the caller closes the raster.
+    """
+    source = str(path_or_url)
+    hostname = validate_remote_raster_url(source, http_options)
+    if hostname is None:
+        yield source
+        return
+
+    headers = _raster_http_headers(http_options)
+    probe = public_http.get(
+        source,
+        headers={**headers, "Range": "bytes=0-0"},
+        timeout=(3, 8),
+        max_bytes=1,
+    )
+    content_range = str(probe.headers.get("Content-Range", ""))
+    match = re.fullmatch(r"bytes 0-0/(\d+)", content_range.strip(), re.IGNORECASE)
+    if probe.status_code != 206 or not match or len(probe.content) != 1:
+        raise ValueError("Remote raster must support bounded HTTPS byte-range reads.")
+    object_size = int(match.group(1))
+    if object_size <= 0 or object_size > MAX_REMOTE_RASTER_OBJECT_BYTES:
+        raise ValueError("Remote raster object exceeds the configured size limit.")
+    etag = str(probe.headers.get("ETag") or "").strip()
+    last_modified = str(probe.headers.get("Last-Modified") or "").strip()
+    token = secrets.token_urlsafe(32)
+    state = {"bytes_served": 0, "bytes_reserved": 0}
+    state_lock = threading.Lock()
+
+    class RangeProxyHandler(BaseHTTPRequestHandler):
+        # Each bounded range is served on a short-lived connection. HTTP/1.0
+        # makes the close behavior explicit for GDAL's VSI curl client.
+        protocol_version = "HTTP/1.0"
+        server_version = ""
+        sys_version = ""
+
+        def log_message(self, _format: str, *_args) -> None:
+            # The request path contains a bearer-like token; never log it.
+            return
+
+        def _authorized(self) -> bool:
+            return self.path == f"/{token}.tif"
+
+        def _reply(self, status: int, body: bytes = b"", extra_headers: dict[str, str] | None = None) -> None:
+            outgoing_headers = extra_headers or {}
+            self.send_response(status)
+            self.send_header("Content-Length", outgoing_headers.get("Content-Length", str(len(body))))
+            self.send_header("Content-Type", "image/tiff")
+            for name, value in outgoing_headers.items():
+                if name.lower() != "content-length":
+                    self.send_header(name, value)
+            self.end_headers()
+            self.close_connection = True
+            if body and self.command != "HEAD":
+                try:
+                    self.wfile.write(body)
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
+        def do_HEAD(self) -> None:
+            if not self._authorized():
+                self._reply(404)
+                return
+            metadata = {"Accept-Ranges": "bytes"}
+            if etag:
+                metadata["ETag"] = etag
+            if last_modified:
+                metadata["Last-Modified"] = last_modified
+            self._reply(200, extra_headers={**metadata, "Content-Length": str(object_size)})
+
+        def do_GET(self) -> None:
+            if not self._authorized():
+                self._reply(404)
+                return
+
+            range_value = str(self.headers.get("Range") or "").strip()
+            whole_object = not range_value
+            if whole_object:
+                if object_size > MAX_REMOTE_RASTER_RANGE_BYTES:
+                    self._reply(416, extra_headers={"Content-Range": f"bytes */{object_size}"})
+                    return
+                start, end = 0, object_size - 1
+            else:
+                range_match = re.fullmatch(r"bytes=(\d+)-(\d+)", range_value, re.IGNORECASE)
+                if not range_match:
+                    self._reply(416, extra_headers={"Content-Range": f"bytes */{object_size}"})
+                    return
+                start, requested_end = (int(value) for value in range_match.groups())
+                if start >= object_size or requested_end < start:
+                    self._reply(416, extra_headers={"Content-Range": f"bytes */{object_size}"})
+                    return
+                end = min(requested_end, object_size - 1)
+
+            byte_count = end - start + 1
+            if byte_count <= 0 or byte_count > MAX_REMOTE_RASTER_RANGE_BYTES:
+                self._reply(416, extra_headers={"Content-Range": f"bytes */{object_size}"})
+                return
+
+            if_range = str(self.headers.get("If-Range") or "").strip()
+            # If-Range requires a strong entity tag. Weak ETags are unsuitable;
+            # use Last-Modified in that case when the provider supplies it.
+            validator = (etag if etag and not etag.lstrip().startswith("W/") else "") or last_modified
+            if if_range and validator and if_range != validator:
+                self._reply(412)
+                return
+
+            request_headers = {**headers, "Range": f"bytes={start}-{end}"}
+            if validator:
+                request_headers["If-Range"] = validator
+            with state_lock:
+                over_session_limit = (
+                    state["bytes_served"] + state["bytes_reserved"] + byte_count
+                    > MAX_REMOTE_RASTER_SESSION_BYTES
+                )
+                if not over_session_limit:
+                    state["bytes_reserved"] += byte_count
+            if over_session_limit:
+                self._reply(413)
+                return
+            reservation_active = True
+            try:
+                upstream = public_http.get(
+                    source,
+                    headers=request_headers,
+                    timeout=(3, 20),
+                    max_bytes=byte_count,
+                )
+                upstream_range = str(upstream.headers.get("Content-Range", ""))
+                expected_range = f"bytes {start}-{end}/{object_size}"
+                if (upstream.status_code != 206 or upstream_range.strip().lower() != expected_range.lower()
+                        or len(upstream.content) != byte_count):
+                    raise ValueError("Remote raster did not return the exact requested byte range")
+                if etag and upstream.headers.get("ETag") and str(upstream.headers["ETag"]).strip() != etag:
+                    raise ValueError("Remote raster entity changed during range reads")
+                with state_lock:
+                    state["bytes_reserved"] -= byte_count
+                    state["bytes_served"] += byte_count
+                reservation_active = False
+                metadata = {"Accept-Ranges": "bytes"}
+                if not whole_object:
+                    metadata["Content-Range"] = expected_range
+                if etag:
+                    metadata["ETag"] = etag
+                if last_modified:
+                    metadata["Last-Modified"] = last_modified
+                self._reply(200 if whole_object else 206, upstream.content, metadata)
+            except Exception as exc:  # noqa: BLE001 - keep remote errors and signed URLs private
+                if reservation_active:
+                    with state_lock:
+                        state["bytes_reserved"] -= byte_count
+                logger.warning("Bounded raster range failed host=%s error_type=%s", hostname, type(exc).__name__)
+                self._reply(502)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), RangeProxyHandler)
+    server.daemon_threads = True
+    server.block_on_close = False
+    worker = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+    worker.start()
+    local_url = f"http://127.0.0.1:{server.server_address[1]}/{token}.tif"
+    try:
+        import rasterio
+
+        with rasterio.Env(
+            GDAL_HTTP_PROXY="",
+            GDAL_HTTPS_PROXY="",
+            GDAL_HTTP_TIMEOUT=25,
+            GDAL_HTTP_CONNECTTIMEOUT=5,
+            GDAL_HTTP_MAX_RETRY=0,
+            GDAL_HTTP_NETRC="NO",
+            # Avoid GDAL directory listings and sidecar probes against this
+            # single-object endpoint; only the authorized TIFF is exposed.
+            GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR",
+        ):
+            yield local_url
+    finally:
+        server.shutdown()
+        server.server_close()
+        worker.join(timeout=2)
 
 
 class GridSpec:
@@ -253,12 +407,10 @@ def load_raster_to_grid(
     from rasterio.vrt import WarpedVRT
 
     resampling_enum = getattr(Resampling, resampling)
-    env_opts = dict(GDAL_HTTP_OPTS) if str(path_or_url).startswith("http") else {}
-    env_opts.update(http_options or {})
     safe_host = None
     try:
         safe_host = validate_remote_raster_url(path_or_url, http_options)
-        with raster_provider_guard(safe_host), rasterio.Env(**env_opts), rasterio.open(path_or_url) as src:
+        with safe_raster_source(path_or_url, http_options) as local_path, rasterio.open(local_path) as src:
             nodata = src.nodata if src_nodata is None else src_nodata
             with WarpedVRT(
                 src,
@@ -604,9 +756,10 @@ def render_carbon_reference_tile(
 
     for url in urls:
         _tile_stat("source_reads")
+        raster_host = None
         try:
             raster_host = validate_remote_raster_url(url)
-            with raster_provider_guard(raster_host), rasterio.Env(**{**GDAL_HTTP_OPTS, **http_options}), rasterio.open(url) as src:
+            with safe_raster_source(url, http_options) as local_path, rasterio.open(local_path) as src:
                 src_nodata = meta.get("nodata") if meta.get("nodata") is not None else src.nodata
                 with WarpedVRT(
                     src,
@@ -627,7 +780,12 @@ def render_carbon_reference_tile(
         except Exception as exc:  # noqa: BLE001 - missing ocean tiles are expected
             if chloris_download:
                 raise ValueError("Raster Chloris berlisensi tidak dapat dibaca.") from exc
-            logger.debug("carbon tile source unavailable (%s): %s", url, exc)
+            logger.debug(
+                "carbon tile source unavailable dataset=%s host=%s error_type=%s",
+                dataset_key,
+                raster_host or "unknown",
+                type(exc).__name__,
+            )
 
     if not np.isfinite(canvas).any():
         _tile_stat("empty")

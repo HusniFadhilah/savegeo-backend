@@ -21,7 +21,7 @@ import time
 import requests
 
 from app.core.public_http import public_http
-from app.providers.local_raster_provider import GDAL_HTTP_OPTS, raster_provider_guard, validate_remote_raster_url
+from app.providers.local_raster_provider import validate_remote_raster_url
 
 logger = logging.getLogger(__name__)
 
@@ -412,8 +412,8 @@ def _sample_cog_rasterio(
 
     nodata_cfg = meta.get("nodata")
     values: list[float | None] = []
-    raster_host = validate_remote_raster_url(cog_url)
-    with raster_provider_guard(raster_host), rasterio.Env(**GDAL_HTTP_OPTS), rasterio.open(cog_url) as src:
+    from app.providers.local_raster_provider import safe_raster_source
+    with safe_raster_source(cog_url) as local_cog_path, rasterio.open(local_cog_path) as src:
         nodata = src.nodata if nodata_cfg is None else nodata_cfg
         crs = src.crs
         wgs84 = CRS.from_epsg(4326)
@@ -481,7 +481,11 @@ def _sample_cog_tiled(
         raster_host = None
         try:
             raster_host = validate_remote_raster_url(url)
-            with raster_provider_guard(raster_host), rasterio.Env(**GDAL_HTTP_OPTS), rasterio.open(url) as src:
+            from contextlib import ExitStack
+            from app.providers.local_raster_provider import safe_raster_source
+            with ExitStack() as stack:
+                local_cog_path = stack.enter_context(safe_raster_source(url))
+                src = stack.enter_context(rasterio.open(local_cog_path))
                 tnd = src.nodata if nodata_cfg is None else nodata_cfg
                 wgs84 = CRS.from_epsg(4326)
                 try:
@@ -500,7 +504,8 @@ def _sample_cog_tiled(
                         loss_host = validate_remote_raster_url(lossyear_url)
                         if loss_host != raster_host:
                             raise ValueError("Loss-year raster host differs from its trusted COG host")
-                        loss_src = rasterio.open(lossyear_url)
+                        local_loss_path = stack.enter_context(safe_raster_source(lossyear_url))
+                        loss_src = stack.enter_context(rasterio.open(local_loss_path))
                     except Exception as exc:  # noqa: BLE001 - masking is optional; do not log a signed URL
                         logger.debug("lossyear tile %s_%s unavailable (%s)", lat_str, lon_str, type(exc).__name__)
 
@@ -522,13 +527,10 @@ def _sample_cog_tiled(
                                     if lyear > 0:
                                         continue  # deforested pixel — label stale
                             except Exception as exc:  # noqa: BLE001 - lossyear masking is optional; point stays unmasked
-                                logger.debug(f"lossyear sample at point {idx} failed: {exc}")
+                                logger.debug("lossyear sample at point %s failed (%s)", idx, type(exc).__name__)
                         values[idx] = raw
                     except Exception as exc:  # noqa: BLE001 - one bad point shouldn't fail the whole tile; skipped
-                        logger.debug(f"COG tile sample at point {idx} failed: {exc}")
-
-                if loss_src is not None:
-                    loss_src.close()
+                        logger.debug("COG tile sample at point %s failed (%s)", idx, type(exc).__name__)
 
         except Exception as exc:  # noqa: BLE001 - one bad tile shouldn't fail the whole batch
             logger.warning("Tiled COG tile %s_%s failed host=%s error_type=%s",

@@ -253,7 +253,7 @@ class PublicHTTPS:
         if json_body is not None:
             body = json.dumps(json_body, allow_nan=False, separators=(",", ":")).encode()
         supplied_headers = headers or {}
-        if any(key.lower() not in {"user-agent", "accept", "content-type", "authorization", "x-amz-target", "ocp-apim-subscription-key"} for key in supplied_headers):
+        if any(key.lower() not in {"user-agent", "accept", "content-type", "authorization", "range", "if-range", "x-amz-target", "ocp-apim-subscription-key"} for key in supplied_headers):
             raise ValueError("Public HTTPS accepts only application identification headers")
         headers = {**supplied_headers, "Host": hostname, "Accept-Encoding": "identity"}
         if body is not None and json_body is None:
@@ -417,7 +417,47 @@ class PublicHTTPS:
 
     def download_to_file(self, url: str, destination, *, max_bytes: int,
                          allowed_redirect_hosts: set[str] | frozenset[str],
-                         timeout=300, headers=None) -> requests.Response:
+                         timeout=300, headers=None, same_host_redirects: bool = False) -> requests.Response:
+        """Download a bounded file with the shared one-retry GET policy and circuit breaker."""
+        _, hostname = self._validated_url(url)
+        seconds = self._timeout_seconds(timeout, maximum=600.0)
+        deadline = time.monotonic() + seconds
+        for attempt in range(2):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise requests.Timeout("Public HTTPS download deadline exceeded")
+            self._circuit_before(hostname)
+            try:
+                response = self._download_to_file_once(
+                    url,
+                    destination,
+                    max_bytes=max_bytes,
+                    allowed_redirect_hosts=allowed_redirect_hosts,
+                    timeout=remaining,
+                    headers=headers,
+                    same_host_redirects=same_host_redirects,
+                )
+            except (requests.RequestException, OSError):
+                self._circuit_result(hostname, success=False)
+                if attempt or time.monotonic() >= deadline:
+                    raise
+                time.sleep(min(0.15, deadline - time.monotonic()))
+                continue
+            except Exception:
+                self._circuit_result(hostname, success=False)
+                raise
+
+            retryable_status = response.status_code in {502, 503, 504}
+            self._circuit_result(hostname, success=not retryable_status and response.status_code != 429)
+            if retryable_status and not attempt and time.monotonic() < deadline:
+                time.sleep(min(0.15, deadline - time.monotonic()))
+                continue
+            return response
+        raise requests.ConnectionError("Public HTTPS download failed")
+
+    def _download_to_file_once(self, url: str, destination, *, max_bytes: int,
+                         allowed_redirect_hosts: set[str] | frozenset[str],
+                         timeout=300, headers=None, same_host_redirects: bool = False) -> requests.Response:
         """Stream one bounded public HTTPS download to a caller-owned temporary file.
 
         Redirects are limited to explicit provider domains. Each hop is resolved
@@ -478,6 +518,8 @@ class PublicHTTPS:
                         from urllib.parse import urljoin
                         next_url = urljoin(current_url, location)
                         next_parsed, next_host = self._validated_url(next_url)
+                        if same_host_redirects and next_host != initial_hostname:
+                            raise ValueError("Public HTTPS download redirect must stay on the original host")
                         if not any(next_host == domain or next_host.endswith("." + domain) for domain in redirect_domains):
                             raise ValueError("Download redirect destination is not allowed")
                         if next_host != initial_hostname:

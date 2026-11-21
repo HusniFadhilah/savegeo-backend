@@ -165,10 +165,9 @@ def segment(data: dict, folder: Path) -> dict:
     )
     bounds = imagery._aoi_payload_to_bbox(data["aoi"])
     indexes = imagery._parse_cog_bands(data.get("bands"))
-    from app.providers.local_raster_provider import GDAL_HTTP_OPTS, raster_provider_guard, validate_remote_raster_url
-    raster_host = validate_remote_raster_url(href)
-    with raster_provider_guard(raster_host), rasterio.Env(**GDAL_HTTP_OPTS):
-        with Reader(href) as reader:
+    from app.providers.local_raster_provider import safe_raster_source
+    with safe_raster_source(href) as local_path:
+        with Reader(local_path) as reader:
             if indexes is None:
                 indexes = list(range(1, min(reader.dataset.count, 3) + 1))
             image = reader.part(bounds, bounds_crs="EPSG:4326", dst_crs="EPSG:3857",

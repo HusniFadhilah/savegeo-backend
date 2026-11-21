@@ -1,5 +1,6 @@
 import io
 import unittest
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -116,8 +117,7 @@ class StacTests(unittest.TestCase):
         source = ImageData(pixels)
         with patch.object(service, "_readable_stac_asset_href", return_value="https://assets.example/a.tif"), \
              patch.object(service, "_validate_public_http_url"), \
-             patch("app.providers.local_raster_provider.validate_remote_raster_url", return_value="assets.example"), \
-             patch("app.providers.local_raster_provider.raster_provider_guard"), \
+             patch("app.providers.local_raster_provider.safe_raster_source", return_value=nullcontext("source.tif")), \
              patch.object(service, "Reader") as reader:
             reader.return_value.__enter__.return_value.tile.return_value = source
             png = service._render_cog_tile("https://catalog.example/item", 0, 0, 0, "visual", None, "0,2000")
