@@ -2,6 +2,8 @@
 set -Eeuo pipefail
 umask 077
 
+source "$(dirname "${BASH_SOURCE[0]}")/load_backup_environment.sh"
+
 : "${SAVEGEO_BACKUP_S3_URI:?Set s3://bucket/prefix on the production host}"
 : "${SAVEGEO_BACKUP_AGE_IDENTITY_FILE:?Set path to the age private identity file}"
 POSTGRES_IMAGE="${SAVEGEO_RESTORE_POSTGRES_IMAGE:-postgres:16-alpine}"

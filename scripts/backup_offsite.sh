@@ -2,6 +2,8 @@
 set -Eeuo pipefail
 umask 077
 
+source "$(dirname "${BASH_SOURCE[0]}")/load_backup_environment.sh"
+
 : "${SAVEGEO_BACKUP_S3_URI:?Set s3://bucket/prefix on the production host}"
 : "${SAVEGEO_BACKUP_AGE_RECIPIENT:?Set the age public recipient on the production host}"
 RETENTION_DAYS="${SAVEGEO_BACKUP_RETENTION_DAYS:-90}"

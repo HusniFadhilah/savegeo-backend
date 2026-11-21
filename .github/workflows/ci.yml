@@ -57,6 +57,7 @@ jobs:
           pip install --require-hashes -r requirements-ci.lock
           pip install --no-deps --no-build-isolation -e .
           ruff check . --ignore E501 --ignore B904 --ignore B905
+          bash -n scripts/load_backup_environment.sh scripts/backup_offsite.sh scripts/restore_drill.sh scripts/restore_local_backup_drill.sh
           python scripts/audit_standards.py --check > standards-audit.json
           mypy app
           bandit -r app -lll

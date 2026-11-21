@@ -59,8 +59,14 @@ def get_carbon_tile_metrics() -> dict:
     stats["cache_hit_rate_pct"] = round(stats["cache_hits"] / stats["requests"] * 100, 1) if stats["requests"] else 0.0
     settings = get_settings()
     configured = str(getattr(settings, "carbon_tile_cache_dir", "") or "").strip()
-    stats["cache_dir"] = str(Path(configured) if configured else Path(settings.upload_dir).resolve().parent / "carbon_tile_cache")
-    return stats
+    return {
+        **stats,
+        "cache_dir": str(
+            Path(configured)
+            if configured
+            else Path(settings.upload_dir).resolve().parent / "carbon_tile_cache"
+        ),
+    }
 
 
 def _tile_stat(name: str, value: int | float = 1) -> None:
