@@ -197,7 +197,7 @@ python -m app.workers.dmrv_worker
 npm run dev
 ```
 
-Migrasi `0051_dmrv_integrity_workspace` menambah empat tabel dan tidak mengubah
+Migrasi `0051_dmrv_integrity_workspace` dan `0052_dmrv_advanced_review_tools` menambah enam tabel dan tidak mengubah
 data proyek lama. Tabel baru memakai RLS dan tidak memberi akses langsung kepada
 role publik, anon, atau authenticated. Backend menggunakan koneksi database
 privileg yang sudah dipakai SaveGeo; keputusan akses tetap di FastAPI melalui
@@ -228,3 +228,114 @@ dengan metodologi/bukti dan melalui verifikasi yang berlaku.
 - FIRMS: https://developers.google.com/earth-engine/datasets/catalog/FIRMS
 - Earth Engine best practices: https://developers.google.com/earth-engine/guides/best_practices
 - PostgreSQL/Supabase RLS: https://supabase.com/docs/guides/database/postgres/row-level-security
+- Verra VM0047 v1.1: https://verra.org/methodologies/vm0047-afforestation-reforestation-and-revegetation-v1-1/
+- Verra VM0047 listed data provider requirements: https://verra.org/methodologies-main/application-for-listed-data-service-providers-under-vm0047/
+- Verra ARR resources and reviewer checklist notice: https://verra.org/verra-releases-new-resources-for-arr-projects/
+- UNFCCC Article 6.4 registry: https://unfccc.int/process-and-meetings/the-paris-agreement/article-6/article-64-pacm/registry
+
+## Fitur lanjutan: metodologi, citra, kredit, dan lapangan
+
+Fitur-fitur ini tersedia dalam ruang kerja proyek. Checklist metodologi dan
+provenance citra berada di tab **Metodologi & data**; pencatatan siklus unit ada
+di tab **Siklus kredit**; pengumpulan catatan lapangan berada di tab data lapangan
+proyek. dMRV tetap tidak ditambahkan ke sidebar.
+
+### Checklist metodologi berbasis versi
+
+Untuk proyek yang identitasnya diisi tepat sebagai **VM0047 v1.1**, SaveGeo
+menampilkan checklist review yang membedakan pendekatan area-based dan
+census-based. Butir area-based dan census-based hanya berlaku pada pendekatan
+masing-masing. Checklist memuat penerapan pendekatan/eligibilitas, dynamic
+performance benchmark atau census, kebutuhan Stocking Index, kualitas dan
+cakupan data, seasonality, hubungan SI-AGB, leakage, monitoring, dan kuantifikasi.
+Setiap butir dapat diberi status, catatan, dan tautan/dokumen bukti; checklist
+yang diajukan tetap melalui review independen.
+
+Paket ini merupakan bantuan kerja ringkas, bukan salinan lengkap metodologi.
+VM0047 v1.1 aktif sejak 14 Mei 2025. Ambang resolusi SI ≤30 m berasal dari
+persyaratan provider yang diterbitkan Verra; daftar provider atau kecocokan
+produknya tidak menjamin proyek atau hasil diterima. Checklist reviewer Verra
+yang diterbitkan pada Oktober 2026 juga menyebut dirinya tidak exhaustive.
+SaveGeo tidak menyatakan proyek memenuhi syarat atau tersertifikasi.
+
+### Provenance dan QA citra satelit
+
+Di tab **Metodologi & data**, hubungkan catatan ke ID snapshot analisis proyek,
+kemudian masukkan sumber/sensor dan versi produk, tanggal observasi, resolusi,
+frekuensi, jendela musim, tutupan awan, jumlah observasi, celah, status aerosol,
+referensi QA/koreksi, versi pemrosesan, dan bukti sumber. Tidak perlu mengisi
+nilai yang tidak tersedia. Status aerosol yang belum diketahui atau tidak
+dikoreksi, metadata awan yang kosong, dan resolusi yang tidak diketahui muncul
+sebagai catatan untuk reviewer.
+
+Metadata tersebut adalah deklarasi anggota proyek dan disimpan dengan revisi,
+hash, serta audit; SaveGeo tidak mengambil ulang atau memverifikasi nilai itu
+secara otomatis terhadap provider. Bukti dikaitkan ke snapshot yang benar-benar
+ada pada proyek tersebut. Catatan ini membantu interpretasi, tetapi tidak
+mengoreksi ulang citra dan tidak memberikan estimasi kesalahan aerosol otomatis.
+
+### Siklus registry dan kredit
+
+Tab **Siklus kredit** mencatat penerbitan, transfer, penggunaan, pensiun, dan
+pembatalan yang **dilaporkan** untuk batch/serial tertentu. Untuk setiap event,
+masukkan registry, ID transaksi eksternal, tanggal, jumlah unit bulat, pemilik,
+dan bukti. API menolak event berulang, batch tanpa penerbitan sebelumnya,
+transfer/penggunaan melebihi saldo internal tercatat, dan event bertanggal lebih
+awal dari event batch sebelumnya. Riwayat event tidak dapat diedit atau dihapus
+melalui aplikasi.
+
+Saldo yang tampil hanyalah saldo yang dihitung dari event yang dimasukkan
+anggota SaveGeo. Tidak ada koneksi/sinkronisasi registry eksternal dan tidak
+ada penerbitan kredit oleh SaveGeo. Karena itu, saldo internal ini tidak boleh
+dipakai sebagai saldo resmi atau klaim kepemilikan tanpa pemeriksaan registry.
+
+### Prioritas pemeriksaan risiko
+
+Bagian atas tab **Risiko** mengurutkan pekerjaan reviewer berdasarkan risiko
+terbuka berkeparahan tinggi/sedang, kelengkapan provenance satelit, konfirmasi
+aerosol dan cakupan pengamatan, ketersediaan validasi spasial beserta interval
+bootstrap metriknya, QA catatan lapangan, serta kelengkapan input ketidakpastian.
+Alasan setiap prioritas ditampilkan; metrik/interval akurasi yang diunggah
+menjelaskan pasangan validasi tersebut, bukan ketidakpastian stok karbon. Bila
+persentase pengurangan ketidakpastian diisi, angka itu hanya ditampilkan sebagai
+input yang dinyatakan pengguna. Sistem tidak menggabungkan faktor-faktor tersebut
+menjadi probabilitas kehilangan stok atau kredit. Prioritas bukan temuan reversal,
+perubahan buffer, atau keputusan kredit.
+
+### Catatan lapangan luring melalui ponsel
+
+Di tab **Lapangan**, pengguna berperan `project_owner`, `analyst`, atau
+`field_operator` dapat menulis kode plot, waktu, koordinat/GPS, akurasi, catatan,
+dan foto PNG/JPEG. Catatan terlebih dulu masuk antrean IndexedDB pada peramban
+dan disinkronkan otomatis saat jaringan tersedia; tombol sinkronisasi juga
+tersedia. ID catatan tetap dipakai saat retry sehingga unggahan ulang tidak
+membuat duplikat. Catatan tersinkron ditautkan ke plot terdaftar bila kode plot
+cocok. Catatan tampil dengan QA flag bila kode plot tidak ditemukan, koordinat
+GPS berbeda lebih dari 50 m (atau dua kali akurasi GPS bila lebih besar) dari
+titik plot terdaftar, akurasi GPS lebih buruk dari 30 m, posisi di luar batas
+proyek, batas belum ada, akurasi tidak direkam, atau waktunya di masa depan.
+Ambang jarak hanya pemicu review dan tidak memindahkan koordinat. Foto dibatasi
+5 MB dan ikut kuota dokumen proyek.
+
+Agar dapat digunakan di area tanpa jaringan, buka proyek dan tab **Lapangan**
+selagi sesi masih online, lalu biarkan halaman itu tetap terbuka saat merekam.
+Antrean luring hanya ada pada perangkat/peramban tempat catatan dibuat. Jangan
+hapus data situs atau ganti perangkat sebelum jumlah catatan tertunda menjadi
+nol. Jika lokasi tidak tersedia, koordinat bisa diisi manual; pemeriksaannya
+tetap perlu dilakukan oleh petugas. Hindari mencatat identitas pribadi atau data
+sensitif yang tidak diperlukan. QA flag bukan penolakan data otomatis.
+
+Endpoint API fitur lanjutan menggunakan autentikasi sesi SaveGeo dan pemeriksaan
+keanggotaan proyek yang sama seperti API dMRV lainnya:
+
+```text
+GET  /api/dmrv/projects/{project_id}/integrity/methodology-checklist
+GET  /api/dmrv/projects/{project_id}/integrity/risk-priority
+GET  /api/dmrv/projects/{project_id}/integrity/credit-events
+POST /api/dmrv/projects/{project_id}/integrity/credit-events
+GET  /api/dmrv/projects/{project_id}/field-data/captures
+POST /api/dmrv/projects/{project_id}/field-data/captures  (multipart: data + optional file)
+```
+
+Provenance satelit disimpan lewat catatan integrity kategori `satellite_provenance`
+dan mengikuti revisi `If-Match` yang sama seperti catatan proyek lainnya.

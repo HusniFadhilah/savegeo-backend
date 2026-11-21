@@ -13,7 +13,7 @@ import uuid
 import zipfile
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, Header, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, Query, Request, Response, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse
 from sqlalchemy import func, select
@@ -21,19 +21,104 @@ from sqlalchemy.orm import Session
 from starlette.background import BackgroundTask
 
 from app.core.security import get_current_app_viewer
+from app.db.models.dmrv_advanced import DmrvCreditEvent, DmrvFieldCapture
 from app.db.models.dmrv_integrity import DmrvIntegrityDocument, DmrvIntegrityRevision
 from app.db.models.dmrv_project import DmrvProject, ProjectMember
 from app.db.models.user import User
 from app.db.models.admin_user import AdminUser
 from app.db.session import get_db
-from app.schemas.dmrv_integrity import RecordOut, RecordReview, RecordSave, RiskPolicyInput, RiskScanInput
+from app.schemas.dmrv_integrity import (
+    CreditEventInput, FieldCaptureInput, RecordOut, RecordReview, RecordSave,
+    RiskPolicyInput, RiskScanInput,
+)
 from app.services.dmrv.audit import record_audit
 from app.services.dmrv.authz import Principal, authorize
 from app.services.dmrv.errors import DmrvError
 from app.services.dmrv import integrity
 from app.services.dmrv.integrity_risks import enqueue_scan, save_policy
+from app.services.dmrv import advanced, methodology, risk_priority
 
 router = APIRouter()
+
+
+@router.get("/projects/{project_id}/integrity/methodology-checklist")
+def get_methodology_checklist(
+    project_id: str, viewer=Depends(get_current_app_viewer), db: Session = Depends(get_db)
+):
+    return methodology.get_checklist(db, Principal.from_account(viewer), project_id)
+
+
+@router.get("/projects/{project_id}/integrity/risk-priority")
+def get_risk_priority(
+    project_id: str, viewer=Depends(get_current_app_viewer), db: Session = Depends(get_db)
+):
+    return risk_priority.reviewer_priority(db, Principal.from_account(viewer), project_id)
+
+
+@router.get("/projects/{project_id}/integrity/credit-events")
+def get_credit_events(
+    project_id: str, viewer=Depends(get_current_app_viewer), db: Session = Depends(get_db)
+):
+    return advanced.list_credit_events(db, Principal.from_account(viewer), project_id)
+
+
+@router.post("/projects/{project_id}/integrity/credit-events", status_code=201)
+def post_credit_event(
+    project_id: str, payload: CreditEventInput, response: Response,
+    viewer=Depends(get_current_app_viewer), db: Session = Depends(get_db),
+):
+    existing = db.get(DmrvCreditEvent, payload.event_id)
+    result = advanced.append_credit_event(db, Principal.from_account(viewer), project_id, payload)
+    if existing:
+        response.status_code = 200
+    return result
+
+
+@router.get("/projects/{project_id}/field-data/captures")
+def get_field_captures(
+    project_id: str, viewer=Depends(get_current_app_viewer), db: Session = Depends(get_db)
+):
+    return advanced.list_field_captures(db, Principal.from_account(viewer), project_id)
+
+
+@router.post("/projects/{project_id}/field-data/captures", status_code=201)
+async def post_field_capture(
+    project_id: str, response: Response, data: str = Form(...), file: UploadFile | None = File(default=None),
+    viewer=Depends(get_current_app_viewer), db: Session = Depends(get_db),
+):
+    try:
+        payload = FieldCaptureInput.model_validate(json.loads(data))
+    except (ValueError, TypeError) as exc:
+        raise DmrvError(422, "invalid_field_capture", str(exc)) from None
+    existing = db.get(DmrvFieldCapture, payload.capture_id)
+    raw = await file.read(5 * 1024 * 1024 + 1) if file else None
+    if raw is not None and len(raw) > 5 * 1024 * 1024:
+        raise DmrvError(413, "photo_size", "Foto lapangan maksimal 5 MB.")
+    result = advanced.capture_field_observation(
+        db, Principal.from_account(viewer), project_id, payload, raw, file.filename if file else None
+    )
+    if existing:
+        response.status_code = 200
+    return result
+
+
+@router.get("/projects/{project_id}/field-data/captures/{capture_id}/photo")
+def get_field_capture_photo(
+    project_id: str, capture_id: str, viewer=Depends(get_current_app_viewer), db: Session = Depends(get_db)
+):
+    principal = Principal.from_account(viewer)
+    authorize(db, project_id, principal, "field.read")
+    capture = db.get(DmrvFieldCapture, capture_id)
+    if capture is None or capture.project_id != project_id or not capture.photo_document_id:
+        raise DmrvError(404, "not_found", "Foto catatan lapangan tidak ditemukan.")
+    document = db.get(DmrvIntegrityDocument, capture.photo_document_id)
+    if document is None or document.project_id != project_id:
+        raise DmrvError(404, "not_found", "Foto catatan lapangan tidak ditemukan.")
+    path = integrity.document_path(document)
+    if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != document.sha256:
+        raise DmrvError(409, "document_integrity_failed", "Foto hilang atau checksum tidak cocok.")
+    return FileResponse(path, filename=document.filename, media_type=document.content_type,
+                        headers={"X-Content-Type-Options": "nosniff"})
 
 
 @router.get("/projects/{project_id}/integrity/members")
@@ -378,6 +463,8 @@ def export_workspace(project_id: str, viewer=Depends(get_current_app_viewer), db
         "format": "savegeo_integrity_workspace_v1",
         "exported_at": dt.datetime.now(dt.UTC).isoformat(),
         "workspace": workspace,
+        "field_captures": advanced.list_field_captures(db, principal, project_id, limit=None),
+        "credit_ledger": advanced.list_credit_events(db, principal, project_id),
         "history": [
             {"record_id": r.record_id, "revision": r.revision, "sha256": r.sha256, "snapshot": r.snapshot}
             for r in revisions

@@ -61,3 +61,34 @@ satellite failures remain retryable without fabricated zero-risk evidence.
   `main` working trees contain concurrent edits and have not been merged or cleaned.
 
 See `DMRV_IDCTA_GUIDE.md` for instructions, formulas and an illustrative case study.
+
+## Supplemental advanced review features — 21 November 2026
+
+On branch `dmrv-idcta-advanced`, the workspace now includes:
+
+- A version-matched VM0047 v1.1 evidence checklist with approach-specific items.
+- Snapshot-linked, user-declared satellite source/quality metadata, including
+  aerosol QA, cloud cover, observation gaps, dates, season, resolution, and
+  processing version.
+- An append-only internal ledger for reported issuance, transfer, use, retirement,
+  and cancellation events, with evidence, replay protection, and reported-balance
+  checks.
+- Reviewer triage using open satellite/field risk reports, spatial-validation
+  bootstrap intervals, field plot/GPS QA, and uncertainty-input completeness.
+- An IndexedDB mobile field capture queue with geotagged timestamp, optional photo,
+  project-boundary and registered-plot checks, and retry-safe synchronization.
+
+Current validation for this supplement: TypeScript, ESLint on changed frontend
+files, Python syntax parsing, Ruff, service-worker syntax, whitespace checks, and
+Vite production build passed. The Vite build reported existing large-bundle and
+ineffective dynamic-import warnings. Automated test suites were not run. Migration
+`0052_dmrv_advanced_review_tools` is prepared but has not been applied to an
+application database; no authenticated HTTP/browser workflow, external registry
+sync, merge to `main`, or remote push was performed for this supplement.
+
+The methodology pack is a limited review aid, not an exhaustive VM0047 checker.
+The satellite metadata is user-entered and not independently checked against
+providers. Credit events and balances remain internally reported, with no official
+registry feed or issuance. Offline observations are kept per account/project in
+the browser; open the project field tab while online before going offline, and
+keep that page available while recording.

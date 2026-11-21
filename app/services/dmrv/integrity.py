@@ -25,6 +25,7 @@ from app.db.models.dmrv_integrity import (
     DmrvIntegrityRevision,
     DmrvRiskPolicy,
 )
+from app.db.models.dmrv_job import DmrvSnapshot
 from app.db.models.dmrv_monitoring import DmrvMonitoringPeriod
 from app.db.models.dmrv_project import DmrvProject, ProjectMember
 from app.db.models.dmrv_submission import DmrvReviewFinding, DmrvSubmission
@@ -33,11 +34,13 @@ from app.schemas.dmrv_integrity import (
     AccountingInput,
     EvidenceInput,
     GrievanceInput,
+    MethodologyCheckInput,
     RecordOut,
     RecordReview,
     RecordSave,
     RegistryInput,
     RiskInput,
+    SatelliteProvenanceInput,
     ValidationInput,
 )
 from app.services.dmrv.audit import record_audit
@@ -95,6 +98,8 @@ SCHEMAS = {
     "registry": RegistryInput,
     "accounting": AccountingInput,
     "validation": ValidationInput,
+    "methodology_check": MethodologyCheckInput,
+    "satellite_provenance": SatelliteProvenanceInput,
     "risk": RiskInput,
     "grievance": GrievanceInput,
 }
@@ -143,6 +148,13 @@ def _documents_exist(db: Session, project_id: str, evidence: list[str]) -> None:
                 )
 
 
+def _evidence_references(validated) -> list[str]:
+    references = list(getattr(validated, "evidence", []))
+    for item in getattr(validated, "items", []):
+        references.extend(item.evidence)
+    return references
+
+
 def out(row: DmrvIntegrityRecord) -> dict:
     return RecordOut.model_validate(row).model_dump(mode="json")
 
@@ -185,6 +197,41 @@ def _record(db: Session, project_id: str, record_id: str) -> DmrvIntegrityRecord
 
 
 def _calculated(db: Session, project_id: str, category: str, data) -> dict:
+    if category == "methodology_check":
+        from app.services.dmrv.methodology import validate_checklist
+
+        validate_checklist(db, project_id, data.approach, [item.model_dump(mode="json") for item in data.items])
+        return {
+            "complete": sum(item.status == "complete" for item in data.items),
+            "partial": sum(item.status == "partial" for item in data.items),
+            "not_assessed": sum(item.status == "not_assessed" for item in data.items),
+            "approach": data.approach,
+            "qualification": "Internal evidence checklist only; not methodology eligibility or certification.",
+        }
+    if category == "satellite_provenance":
+        snapshot = db.execute(
+            select(DmrvSnapshot).where(
+                DmrvSnapshot.id == data.snapshot_id, DmrvSnapshot.project_id == project_id
+            )
+        ).scalar_one_or_none()
+        if snapshot is None:
+            raise DmrvError(422, "snapshot_not_found", "Pilih snapshot analisis dari proyek ini.")
+        warnings = []
+        if data.aerosol_status in {"unknown", "not_corrected"}:
+            warnings.append("aerosol_correction_not_confirmed")
+        if data.cloud_cover_pct is None:
+            warnings.append("cloud_cover_not_reported")
+        if data.spatial_resolution_m is None:
+            warnings.append("spatial_resolution_not_reported")
+        if data.observation_count == 0:
+            warnings.append("no_observations_reported")
+        return {
+            "snapshot_hash": snapshot.snapshot_hash,
+            "snapshot_kind": snapshot.kind,
+            "warnings": warnings,
+            "source_attestation": "user_declared_not_provider_verified",
+            "qualification": "Metadata was entered by a project member. SaveGeo has not independently verified the provider's product or atmospheric corrections.",
+        }
     if category == "validation":
         from shapely.geometry import Point, shape
         from shapely.prepared import prep
@@ -253,6 +300,10 @@ def save_record(
         c["category"] == category and c["key"] == key for c in CATALOG
     ):
         raise DmrvError(422, "unknown_criterion", "Gunakan butir dari katalog penilaian.")
+    if category == "methodology_check" and key != "current":
+        raise DmrvError(422, "invalid_record_key", "Pemeriksaan metodologi menggunakan satu catatan berversi aktif.")
+    if category == "satellite_provenance" and key != str(data.payload.get("snapshot_id", "")):
+        raise DmrvError(422, "snapshot_key_mismatch", "Kunci catatan provenance harus sama dengan ID snapshot.")
     if (category in {"risk", "grievance"}) != (data.status == "open"):
         raise DmrvError(
             422, "invalid_status", "Risiko baru harus terbuka; dokumen harus draft atau diajukan."
@@ -261,8 +312,13 @@ def save_record(
         validated = SCHEMAS[category].model_validate(data.payload)
     except ValidationError as exc:
         raise DmrvError(422, "invalid_input", str(exc)) from None
-    _documents_exist(db, project_id, validated.evidence)
-    if data.status == "submitted" and not validated.evidence:
+    if category == "methodology_check" and data.status == "submitted" and any(
+        item.status == "not_assessed" for item in validated.items
+    ):
+        raise DmrvError(422, "methodology_check_incomplete", "Nilai atau tandai tidak berlaku semua butir sebelum mengajukan review.")
+    evidence_refs = _evidence_references(validated)
+    _documents_exist(db, project_id, evidence_refs)
+    if data.status == "submitted" and not evidence_refs:
         raise DmrvError(422, "evidence_required", "Lampirkan bukti sebelum mengajukan penilaian.")
     row = db.execute(
         select(DmrvIntegrityRecord).where(

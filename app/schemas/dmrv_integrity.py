@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import datetime as dt
+import uuid
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 
 
 class Strict(BaseModel):
@@ -99,6 +100,122 @@ class ValidationInput(Strict):
             raise ValueError("point_id harus unik.")
         if len({(p.lon, p.lat) for p in self.pairs}) != len(self.pairs):
             raise ValueError("Koordinat berulang harus diagregasi sebelum validasi.")
+        return self
+
+
+class MethodologyCheckItem(Strict):
+    key: str = Field(min_length=1, max_length=64)
+    status: Literal["not_assessed", "complete", "partial", "not_applicable"]
+    notes: str = Field(default="", max_length=4000)
+    evidence: list[str] = Field(default_factory=list, max_length=30)
+
+
+class MethodologyCheckInput(Strict):
+    approach: Literal["area_based", "census_based"]
+    items: list[MethodologyCheckItem] = Field(min_length=1, max_length=30)
+
+    @model_validator(mode="after")
+    def unique_keys(self):
+        if len({item.key for item in self.items}) != len(self.items):
+            raise ValueError("Kunci pemeriksaan metodologi harus unik.")
+        if any(item.status == "complete" and not item.evidence for item in self.items):
+            raise ValueError("Pemeriksaan berstatus lengkap harus memiliki bukti.")
+        return self
+
+
+class SatelliteProvenanceInput(Strict):
+    snapshot_id: str = Field(min_length=1, max_length=36)
+    data_source: str = Field(min_length=1, max_length=200)
+    product_version: str = Field(default="", max_length=100)
+    observation_start: dt.date
+    observation_end: dt.date
+    spatial_resolution_m: float | None = Field(default=None, gt=0, le=100000)
+    temporal_cadence: str = Field(default="", max_length=100)
+    season_window: str = Field(default="", max_length=200)
+    cloud_cover_pct: float | None = Field(default=None, ge=0, le=100)
+    aerosol_status: Literal["corrected", "not_corrected", "qa_reported", "unknown", "not_applicable"]
+    aerosol_method_or_qa: str = Field(default="", max_length=1000)
+    observation_count: int | None = Field(default=None, ge=0, le=1000000)
+    data_gap_summary: str = Field(default="", max_length=2000)
+    processing_version: str = Field(min_length=1, max_length=100)
+    evidence: list[str] = Field(default_factory=list, max_length=30)
+
+    @field_validator("snapshot_id")
+    @classmethod
+    def valid_snapshot_id(cls, value: str) -> str:
+        try:
+            uuid.UUID(value)
+        except ValueError:
+            raise ValueError("snapshot_id harus berupa UUID.") from None
+        return value
+
+    @model_validator(mode="after")
+    def dates_and_aerosol(self):
+        if self.observation_end < self.observation_start:
+            raise ValueError("Rentang observasi terbalik.")
+        if self.observation_end > dt.datetime.now(dt.UTC).date():
+            raise ValueError("Tanggal observasi tidak boleh di masa depan.")
+        if self.aerosol_status in {"corrected", "qa_reported"} and not self.aerosol_method_or_qa:
+            raise ValueError("Jelaskan metode koreksi aerosol atau referensi QA yang dipakai.")
+        return self
+
+
+class CreditEventInput(Strict):
+    event_id: str = Field(min_length=36, max_length=36)
+    batch_reference: str = Field(min_length=1, max_length=120)
+    event_type: Literal["issuance_reported", "transfer_reported", "use_reported", "retirement_reported", "cancellation_reported"]
+    quantity: int = Field(ge=1, le=9007199254740991)
+    owner_from: str | None = Field(default=None, min_length=1, max_length=200)
+    owner_to: str | None = Field(default=None, min_length=1, max_length=200)
+    registry: str = Field(min_length=1, max_length=100)
+    external_transaction_id: str = Field(min_length=1, max_length=160)
+    effective_date: dt.date
+    evidence: list[str] = Field(min_length=1, max_length=20)
+
+    @field_validator("event_id")
+    @classmethod
+    def valid_event_id(cls, value: str) -> str:
+        try:
+            uuid.UUID(value)
+        except ValueError:
+            raise ValueError("event_id harus berupa UUID.") from None
+        return value
+
+    @model_validator(mode="after")
+    def owners_match_event(self):
+        if self.event_type == "issuance_reported":
+            if self.owner_from is not None or self.owner_to is None:
+                raise ValueError("Penerbitan tercatat memerlukan pemilik penerima saja.")
+        elif self.event_type == "transfer_reported":
+            if not self.owner_from or not self.owner_to or self.owner_from == self.owner_to:
+                raise ValueError("Transfer memerlukan pemilik asal dan tujuan yang berbeda.")
+        elif not self.owner_from or self.owner_to is not None:
+            raise ValueError("Penggunaan, pensiun, dan pembatalan memerlukan pemilik asal saja.")
+        return self
+
+
+class FieldCaptureInput(Strict):
+    capture_id: str = Field(min_length=36, max_length=36)
+    plot_code: str = Field(min_length=1, max_length=64)
+    observed_at: dt.datetime
+    latitude: float = Field(ge=-85, le=85)
+    longitude: float = Field(ge=-180, le=180)
+    gps_accuracy_m: float | None = Field(default=None, ge=0, le=100000)
+    observation: str = Field(min_length=1, max_length=8000)
+
+    @field_validator("capture_id")
+    @classmethod
+    def valid_capture_id(cls, value: str) -> str:
+        try:
+            uuid.UUID(value)
+        except ValueError:
+            raise ValueError("capture_id harus berupa UUID.") from None
+        return value
+
+    @model_validator(mode="after")
+    def timezone_required(self):
+        if self.observed_at.tzinfo is None or self.observed_at.utcoffset() is None:
+            raise ValueError("Waktu pengamatan harus memiliki zona waktu.")
         return self
 
 

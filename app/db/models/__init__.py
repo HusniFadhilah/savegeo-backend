@@ -33,6 +33,7 @@ from app.db.models.user import User
 from app.db.models.workflow import Workflow, WorkflowRun
 from app.db.models.dmrv_project import DmrvProject, ProjectMember
 from app.db.models.dmrv_integrity import DmrvIntegrityRecord, DmrvIntegrityRevision, DmrvIntegrityDocument, DmrvRiskPolicy
+from app.db.models.dmrv_advanced import DmrvCreditEvent, DmrvFieldCapture
 from app.db.models.organization import Organization, OrganizationMember, OrganizationInvitation, WorkspaceRequest
 from app.db.models.dmrv_boundary import BoundaryVersion
 from app.db.models.dmrv_audit import DmrvAuditEvent, DmrvIdempotencyKey
@@ -54,6 +55,7 @@ from app.db.models.green_ranking import GreenRankingSnapshot, GreenRankingSnapsh
 
 __all__ = [
     "DmrvIntegrityRecord", "DmrvIntegrityRevision", "DmrvIntegrityDocument", "DmrvRiskPolicy",
+    "DmrvCreditEvent", "DmrvFieldCapture",
     "Organization", "OrganizationMember", "OrganizationInvitation", "WorkspaceRequest",
     "AdminMfa", "MfaChallenge", "WorkspaceAnalysisRun", "WorkspaceQuota", "WorkspaceUsageEvent",
     "CarbonFieldObservation",
