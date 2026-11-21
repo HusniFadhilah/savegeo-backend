@@ -3,7 +3,7 @@
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0061_green_ranking_hierarchy_filters"
+revision = "0061_green_rank_hierarchy"
 down_revision = "0060_field_pred_queue"
 branch_labels = None
 depends_on = None
