@@ -10,8 +10,8 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import BoundedSemaphore
 
 import ee
-from fastapi import APIRouter, Body, Depends, HTTPException
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, ConfigDict, Field, RootModel, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -30,6 +30,17 @@ _executor = ThreadPoolExecutor(max_workers=1)
 _slot = BoundedSemaphore(1)
 
 
+class LandcoverModelConfigPayload(RootModel[dict[str, dict[str, object]]]):
+    @model_validator(mode="before")
+    @classmethod
+    def validate_bounded_config(cls, value):
+        if not isinstance(value, dict) or len(value) > len(service.MODEL_KEYS) + 8:
+            raise ValueError("Konfigurasi model harus berupa objek terbatas.")
+        if any(not isinstance(key, str) or len(key) > 120 or not isinstance(entry, dict) for key, entry in value.items()):
+            raise ValueError("Setiap model harus memiliki nama dan konfigurasi berbentuk objek.")
+        return value
+
+
 @router.get("", dependencies=[Depends(require_permission("model.read"))])
 def get_config():
     config = service.refresh_model_catalog()
@@ -37,9 +48,9 @@ def get_config():
 
 
 @router.put("", dependencies=[Depends(require_permission("model.write"))])
-def update_config(config: dict = Body(...), admin: AdminUser = Depends(require_permission("model.write")), db: Session = Depends(get_db)):
+def update_config(config: LandcoverModelConfigPayload, admin: AdminUser = Depends(require_permission("model.write")), db: Session = Depends(get_db)):
     try:
-        clean = service.validate_model_config(config)
+        clean = service.validate_model_config(config.root)
         candidates = []
         for model_key, entry in clean.items():
             if entry.get("classifier_asset") or entry.get("annual_asset_template"):
@@ -59,6 +70,29 @@ class LandcoverHoldoutPoint(BaseModel):
     latitude: float = Field(ge=-90, le=90)
     reference_class: int = Field(ge=0, le=999)
     group_id: str = Field(min_length=1, max_length=100)
+
+
+class LandcoverTrainingRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    model: str = Field(min_length=1, max_length=64)
+    asset_id: str = Field(min_length=1, max_length=200)
+    model_version: str = Field(min_length=1, max_length=100)
+    aoi: dict | None = None
+
+    @field_validator("model")
+    @classmethod
+    def model_is_supported(cls, value: str) -> str:
+        if value not in service.RF_KEYS:
+            raise ValueError("Training EE hanya tersedia untuk model referensi yang didukung.")
+        return value
+
+    @field_validator("asset_id")
+    @classmethod
+    def asset_is_valid(cls, value: str) -> str:
+        if not service._ASSET_PATTERN.fullmatch(value) or ".." in value or "{" in value:
+            raise ValueError("Asset tujuan harus berupa projects/.../assets/... tanpa placeholder.")
+        return value
 
 
 class LandcoverReleaseEvaluation(BaseModel):
@@ -217,15 +251,8 @@ def _train(job_id: str, body: dict):
 
 
 @router.post("/train", dependencies=[Depends(require_permission("model.write")), Depends(require_ee)])
-def train(body: dict = Body(...)):
-    if body.get("model") not in service.RF_KEYS:
-        raise HTTPException(status_code=400, detail="Training EE tersedia untuk AlphaEarth_RF dan Sentinel1_2_RF.")
-    asset = body.get("asset_id", "")
-    if not isinstance(asset, str) or not service._ASSET_PATTERN.fullmatch(asset) or ".." in asset or "{" in asset:
-        raise HTTPException(status_code=400, detail="Asset tujuan harus projects/.../assets/... tanpa placeholder.")
-    version = body.get("model_version")
-    if not isinstance(version, str) or not 1 <= len(version) <= 100:
-        raise HTTPException(status_code=400, detail="Isi versi model (maksimal 100 karakter).")
+def train(body: LandcoverTrainingRequest):
+    body = body.model_dump(exclude_none=True)
     if not _slot.acquire(blocking=False):
         raise HTTPException(status_code=429, detail="Satu training sedang berjalan; tunggu hingga selesai.")
     job_id = uuid.uuid4().hex

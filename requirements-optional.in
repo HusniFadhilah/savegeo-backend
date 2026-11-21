@@ -1,0 +1,11 @@
+# Resolver input for the isolated Python 3.12 Granite and SamGeo runtimes.
+# Install from requirements-optional.lock with --require-hashes; CI audits that lock.
+segment-geospatial>=1.4.2,<2
+transformers>=4.51,<6
+torch==2.13.0
+torchvision==0.28.0
+terratorch==1.2.13
+lightning>=2.6.6
+filelock>=4.2.1
+fsspec>=2026.6.0
+geopandas>=1.1.2

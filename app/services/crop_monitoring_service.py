@@ -67,6 +67,7 @@ from app.services.gee_common import (
     create_geometry_from_payload,
     get_tile_url,
     resolve_cloud_mask_technique,
+    public_analysis_error,
 )
 from app.services.geo_utils import bbox_and_centroid
 
@@ -692,7 +693,7 @@ def _run_crop_monitoring(db: Session, data: dict, owner_key: str) -> dict:
                     crop_result_cache.save(db, key, field.id, section, results[section])
             except Exception as exc:  # noqa: BLE001 - one unavailable section must not discard other results
                 logger.warning("Crop section %s failed (%s)", section, type(exc).__name__, exc_info=True)
-                reason = str(exc) if isinstance(exc, AnalysisError) else "Bagian ini belum berhasil diproses; coba ulang atau gunakan area/periode lebih kecil."
+                reason = public_analysis_error(exc) if isinstance(exc, AnalysisError) else "Bagian ini belum berhasil diproses; coba ulang atau gunakan area/periode lebih kecil."
                 results[section] = {"available": False, "reason": reason}
                 skipped.append({"sub_analysis": section, "reason": reason})
         timings[section] = round(time.monotonic() - started, 3)

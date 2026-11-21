@@ -1,8 +1,8 @@
-"""Copernicus CDSE ingestion bridge backed by geosave-engine's STAC client.
+"""Copernicus CDSE ingestion bridge backed by the official STAC API.
 
 This keeps the raw scene browser's existing contract intact: list exact
-acquisition scenes, then return a Leaflet XYZ URL for one scene. GeoSave Engine
-does the STAC-side discovery; this module adapts its items into SAVEGEO's UI.
+acquisition scenes, then return a Leaflet XYZ URL for one scene. A bounded
+PySTAC client performs catalog discovery and adapts items for SAVEGEO.
 """
 from __future__ import annotations
 
@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 # paginates results instead of imposing the old 100-scene UI limit.
 _MAX_SCENES = 2000
 _CDSE_TIMEOUT_SECONDS = 20
+_CDSE_STAC_URL = "https://stac.dataspace.copernicus.eu/v1/"
 _S2_L2A_COLLECTION = "sentinel-2-l2a"
 _S2_L1C_COLLECTION = "sentinel-2-l1c"
 _RGB_ASSETS = (("B04_10m", "B04"), ("B03_10m", "B03"), ("B02_10m", "B02"))
@@ -55,7 +56,7 @@ COPERNICUS_PROVIDERS: dict[str, dict[str, Any]] = {
         "cloud_property": "eo:cloud_cover",
         "cloud_mask_techniques": None,
         "description": (
-            "Scene Sentinel-2 dari Copernicus CDSE via geosave-engine/STAC. "
+            "Scene Sentinel-2 dari katalog STAC resmi Copernicus CDSE. "
             "Digunakan untuk ingestion lokal dan browsing tanpa Google Earth Engine."
         ),
     },
@@ -75,7 +76,7 @@ COPERNICUS_PROVIDERS: dict[str, dict[str, Any]] = {
         "cloud_property": "eo:cloud_cover",
         "cloud_mask_techniques": None,
         "description": (
-            "Top-of-atmosphere Sentinel-2 dari Copernicus CDSE via geosave-engine/STAC "
+            "Top-of-atmosphere Sentinel-2 dari katalog STAC resmi Copernicus CDSE "
             "untuk arsip 2015+."
         ),
     },
@@ -94,21 +95,19 @@ def get_provider(provider_key: str | None) -> dict[str, Any]:
 
 @lru_cache(maxsize=1)
 def _client():
-    # Import lazily so app startup still works in environments where the
-    # optional ingestion stack has not been installed yet.
-    from geosave_engine.geodata.stac import StacClient
-    from pystac_client.stac_api_io import StacApiIO
-    from urllib3.util import Retry
+    from pystac_client import Client
 
-    client = StacClient.cdse()
-    retry_strategy = Retry(
-        total=3,
-        backoff_factor=1,
-        status_forcelist=[502, 503, 504],
-        allowed_methods=["GET", "POST"],
+    from app.core.stac_http import BoundedStacApiIO
+
+    return Client.open(
+        _CDSE_STAC_URL,
+        stac_io=BoundedStacApiIO(
+            allowed_hosts={"stac.dataspace.copernicus.eu"},
+            timeout=_CDSE_TIMEOUT_SECONDS,
+            max_bytes=16 * 1024 * 1024,
+            max_pages=40,
+        ),
     )
-    client._client._stac_io = StacApiIO(max_retries=retry_strategy, timeout=_CDSE_TIMEOUT_SECONDS)
-    return client
 
 
 def _datetime_range(start_date: str, end_date: str) -> str:
@@ -195,31 +194,24 @@ def list_scenes(data: dict) -> dict:
     aoi = _geojson_from_aoi(data["aoi"])
     max_cloud_cover = data.get("max_cloud_cover")
 
-    from geosave_engine.geodata.stac import StacQuery
-
-    query = StacQuery(
-        collections=[provider["stac_collection"]],
-        intersects=aoi,
-        datetime=_datetime_range(data["start_date"], data["end_date"]),
-        max_items=_MAX_SCENES,
-        limit=min(int(data.get("limit") or _MAX_SCENES), _MAX_SCENES),
-        sortby=[{"field": "datetime", "direction": "asc"}],
-    )
-    if max_cloud_cover is not None:
-        query = query.with_filter(f"eo:cloud_cover <= {float(max_cloud_cover)}")
-
-    old_timeout = os.environ.get("GDAL_HTTP_TIMEOUT")
-    os.environ["GDAL_HTTP_TIMEOUT"] = str(_CDSE_TIMEOUT_SECONDS)
+    limit = min(max(int(data.get("limit") or _MAX_SCENES), 1), _MAX_SCENES)
     try:
-        items = _client().search(query)
+        items = list(
+            _client()
+            .search(
+                collections=[provider["stac_collection"]],
+                intersects=aoi,
+                datetime=_datetime_range(data["start_date"], data["end_date"]),
+                max_items=limit,
+                limit=min(limit, 100),
+                sortby=[{"field": "datetime", "direction": "asc"}],
+                query={"eo:cloud_cover": {"lte": float(max_cloud_cover)}} if max_cloud_cover is not None else None,
+            )
+            .items()
+        )
     except Exception as e:  # noqa: BLE001
-        logger.exception("CDSE STAC search failed")
-        raise CopernicusAnalysisError(f"Gagal mengakses Copernicus CDSE STAC: {e}", 502)
-    finally:
-        if old_timeout is None:
-            os.environ.pop("GDAL_HTTP_TIMEOUT", None)
-        else:
-            os.environ["GDAL_HTTP_TIMEOUT"] = old_timeout
+        logger.warning("CDSE STAC search failed error_type=%s", type(e).__name__)
+        raise CopernicusAnalysisError("Gagal mengakses katalog Copernicus CDSE.", 502) from e
 
     scenes = [
         {"id": item.id, "acquired_at": _item_acquired(item), "cloud_cover_pct": _item_cloud(item)}
@@ -229,7 +221,7 @@ def list_scenes(data: dict) -> dict:
         "scenes": scenes,
         "count": len(scenes),
         "satellite": provider,
-        "truncated": len(scenes) >= _MAX_SCENES,
+        "truncated": len(scenes) >= limit,
     }
 
 
@@ -250,10 +242,10 @@ def get_scene_tile(data: dict, request: Request) -> dict:
 @lru_cache(maxsize=256)
 def _get_item(provider_key: str, scene_id: str):
     provider = get_provider(provider_key)
-    from geosave_engine.geodata.stac import StacQuery
-
-    items = _client().search(
-        StacQuery(collections=[provider["stac_collection"]], ids=[scene_id], max_items=1)
+    items = list(
+        _client()
+        .search(collections=[provider["stac_collection"]], ids=[scene_id], max_items=1, limit=1)
+        .items()
     )
     if not items:
         raise CopernicusAnalysisError(f"Scene '{scene_id}' tidak ditemukan di Copernicus CDSE", 404)
@@ -275,7 +267,9 @@ def render_tile(provider_key: str, scene_id: str, z: int, x: int, y: int) -> byt
                     404,
                 )
             href, env = _asset_href_and_env(asset)
-            with rasterio.Env(**env):
+            from app.providers.local_raster_provider import GDAL_HTTP_OPTS, raster_provider_guard, validate_remote_raster_url
+            raster_host = validate_remote_raster_url(href)
+            with raster_provider_guard(raster_host), rasterio.Env(**{**GDAL_HTTP_OPTS, **env}):
                 with Reader(href) as reader:
                     if not reader.tile_exists(x, y, z):
                         return None

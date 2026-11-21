@@ -6,6 +6,8 @@ from datetime import date
 
 import requests
 
+from app.core.public_http import public_http
+
 WIND_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 WIND_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 MAX_BBOX_SPAN = 60.0
@@ -60,7 +62,7 @@ def get_wind(bbox: tuple[float, float, float, float], requested_date: str | None
         "wind_speed_unit": "kmh",
     }
     try:
-        response = requests.get(endpoint, params=params, timeout=20)
+        response = public_http.get(endpoint, params=params, timeout=20)
         response.raise_for_status()
         payload = response.json()
     except (requests.RequestException, ValueError) as exc:

@@ -40,6 +40,7 @@ from app.services.gee_common import (
     build_date_range,
     create_geometry_from_payload,
     get_tile_url,
+    public_analysis_error,
 )
 
 logger = logging.getLogger(__name__)
@@ -811,11 +812,11 @@ def analyze_landcover(data: dict) -> dict:
             results[dataset] = summary
         except AnalysisError as exc:
             failures.append(exc)
-            results[dataset] = {"error": str(exc), "available": False}
+            results[dataset] = {"error": public_analysis_error(exc), "available": False}
         except Exception as exc:
             logger.warning("Land cover dataset %s failed (%s)", dataset, type(exc).__name__)
             failures.append(AnalysisError("Layanan raster gagal memproses dataset; coba kecilkan AOI atau periksa konfigurasi sumber.", 502))
-            results[dataset] = {"error": str(exc)}
+            results[dataset] = {"error": "Layanan raster gagal memproses dataset. Coba lagi."}
     if not any("classes" in entry for entry in results.values()):
         raise failures[0] if failures else AnalysisError("Tidak ada dataset berhasil diproses.", 404)
     return results

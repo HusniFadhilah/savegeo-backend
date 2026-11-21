@@ -19,6 +19,8 @@ import ee
 import requests
 from sqlalchemy.orm import Session
 
+from app.core.public_http import public_http
+
 from app.db.models.uploaded_model import UploadedModel
 from app.inference.carbon_inference import CarbonInferenceEngine
 from app.inference.carbon_inference_local import LocalCarbonInferenceEngine
@@ -437,10 +439,10 @@ def check_external_dataset_health(key: str, refresh: bool = False) -> dict:
 
     started = time.perf_counter()
     try:
-        response = requests.head(url, timeout=5, allow_redirects=True)
+        response = public_http.head(url, timeout=5)
         if response.status_code in {405, 501}:
             response.close()
-            response = requests.get(url, headers={"Range": "bytes=0-1023"}, timeout=5, stream=True)
+            response = public_http.get(url, headers={"Range": "bytes=0-1023"}, timeout=5, max_bytes=1024)
         try:
             ok = 200 <= response.status_code < 400
             result = {
@@ -454,7 +456,7 @@ def check_external_dataset_health(key: str, refresh: bool = False) -> dict:
             }
         finally:
             response.close()
-    except requests.RequestException:
+    except (requests.RequestException, ValueError):
         result = {
             "key": key,
             "check_scope": "reachability_only",

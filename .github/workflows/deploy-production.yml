@@ -65,6 +65,7 @@ jobs:
           pip install --no-deps --no-build-isolation -e .
           ruff check . --ignore E501 --ignore B904 --ignore B905
           mypy app
+          bash -n scripts/load_backup_environment.sh scripts/backup_offsite.sh scripts/restore_drill.sh scripts/restore_local_backup_drill.sh
           bandit -r app -lll
           for attempt in 1 2 3; do
             if pip-audit -r requirements-api.lock --no-deps --disable-pip; then
@@ -75,6 +76,17 @@ jobs:
               exit 1
             fi
             echo "::warning::pip-audit could not reach its advisory service; retrying in 10 seconds (attempt $attempt/3)"
+            sleep 10
+          done
+          for attempt in 1 2 3; do
+            if pip-audit -r requirements-optional.lock --no-deps --disable-pip; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::pip-audit failed for optional model runtime dependencies after $attempt attempts"
+              exit 1
+            fi
+            echo "::warning::pip-audit could not complete the optional runtime audit; retrying in 10 seconds (attempt $attempt/3)"
             sleep 10
           done
           alembic upgrade head
@@ -291,6 +303,29 @@ jobs:
             mv "$manifest_tmp" "$backup_prefix.manifest"
             export DOCKER_BUILDKIT=1
             docker compose -f docker-compose.prod.yml build api dmrv-worker analysis-worker field-prediction-worker migrate
+            # Keep exact row-count evidence on the production host with mode
+            # 0600/0700. Only the pass/fail status and opaque checksum reach
+            # the public GitHub Actions log; no production counts are exposed.
+            audit_dir="$BACKEND_REMOTE_DIR/var/migration-audit/$SAVEGEO_WORKFLOW_RUN_ID"
+            mkdir -p "$audit_dir"
+            chmod 700 "$BACKEND_REMOTE_DIR/var/migration-audit" "$audit_dir"
+            docker compose -f docker-compose.prod.yml run --rm --no-deps \
+              --volume "$audit_dir:/app/var/migration-audit" migrate \
+              python -m scripts.db_migration_inventory capture \
+              --output "/app/var/migration-audit/before.json"
+            docker compose -f docker-compose.prod.yml run --rm --no-deps migrate \
+              sh -c "python -m alembic upgrade head && python -m scripts.seed_rbac"
+            docker compose -f docker-compose.prod.yml run --rm --no-deps \
+              --volume "$audit_dir:/app/var/migration-audit" migrate \
+              python -m scripts.db_migration_inventory capture \
+              --output "/app/var/migration-audit/after.json" \
+              --salt-source "/app/var/migration-audit/before.json"
+            docker compose -f docker-compose.prod.yml run --rm --no-deps \
+              --volume "$audit_dir:/app/var/migration-audit" migrate \
+              python -m scripts.db_migration_inventory compare \
+              --before "/app/var/migration-audit/before.json" \
+              --after "/app/var/migration-audit/after.json" \
+              --output "/app/var/migration-audit/comparison.json"
             docker compose -f docker-compose.prod.yml run --rm --no-deps \
               --volume "$BACKEND_REMOTE_DIR/../frontend/dist:/frontend-assets:ro" \
               api python -m scripts.check_auth_secret --frontend-dist /frontend-assets

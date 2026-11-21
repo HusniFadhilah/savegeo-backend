@@ -139,6 +139,32 @@ def test_same_plot_cannot_leak_across_calibration_and_validation():
         )
 
 
+def test_same_plot_code_at_different_sites_is_independent_and_single_plot_holdout_is_scored():
+    rows = [
+        observation("1", 20, 24, latitude=-6.59435, longitude=107.83795),
+        observation("1", 90, 100, "validation", latitude=-7.05272, longitude=110.43964),
+    ]
+    result = assess(rows, FieldAssessmentRequest(pool="agb", prediction_source="model-v1"))
+    assert result["calibration_plots"] == 1
+    assert result["validation_plots"] == 1
+    check = result["baseline_validation"]
+    assert check["status"] == "computed"
+    assert check["qualification"] == "single_plot_holdout_not_generalizable"
+    assert check["n_plots"] == 1 and check["r2"] is None
+    assert check["mae"] == pytest.approx(10)
+
+
+def test_same_plot_code_with_gps_jitter_within_plot_area_stays_in_one_split():
+    with pytest.raises(ValueError, match="Plot yang sama"):
+        assess(
+            [
+                observation("1", 20, 24, latitude=-7.05272, longitude=110.43964),
+                observation("1", 90, 100, "validation", latitude=-7.05270, longitude=110.43965),
+            ],
+            FieldAssessmentRequest(pool="agb", prediction_source="model-v1"),
+        )
+
+
 def test_year_pixel_support_and_soil_depth_mismatches_are_visible():
     rows = [observation("P1", 1, 3), observation("P2", 2, 5)]
     rows[0]["predictions"][0]["year"] = 2020

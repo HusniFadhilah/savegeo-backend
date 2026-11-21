@@ -26,11 +26,18 @@ def reset_oneatlas_caches(monkeypatch):
         oneatlas._SCENES.clear()
 
 
-def _client_factory(handler, seen):
-    def factory(**kwargs):
-        return httpx.Client(transport=httpx.MockTransport(handler), **kwargs)
+def _patch_handler(monkeypatch, handler, seen):
+    def request(method, url, *, params=None, data=None, json_body=None, headers=None, **_kwargs):
+        outbound = httpx.Request(method, url, params=params, data=data, json=json_body, headers=headers)
+        upstream = handler(outbound)
+        return httpx.Response(
+            status_code=upstream.status_code,
+            headers=upstream.headers,
+            content=upstream.content,
+            request=outbound,
+        )
 
-    return factory
+    monkeypatch.setattr(oneatlas, "_public_request", request)
 
 
 def _feature(*, rights=True):
@@ -59,7 +66,7 @@ def _feature(*, rights=True):
     }
 
 
-def test_official_search_returns_opaque_scene_and_internal_authenticated_preview():
+def test_official_search_returns_opaque_scene_and_internal_authenticated_preview(monkeypatch):
     calls = []
 
     def handler(request):
@@ -75,6 +82,7 @@ def test_official_search_returns_opaque_scene_and_internal_authenticated_preview
         assert body["cloudCover"] == "[0,20]"
         return httpx.Response(200, json={"features": [_feature()], "itemsPerPage": 500})
 
+    _patch_handler(monkeypatch, handler, calls)
     result = oneatlas.list_scenes(
         {
             "aoi": {"west": 100, "south": -2, "east": 101, "north": -1},
@@ -83,7 +91,6 @@ def test_official_search_returns_opaque_scene_and_internal_authenticated_preview
             "max_cloud_cover": 20,
         },
         SimpleNamespace(base_url="https://savegeo.example/api/"),
-        client_factory=_client_factory(handler, calls),
     )
 
     assert len(calls) == 2
@@ -103,16 +110,17 @@ def test_official_search_returns_opaque_scene_and_internal_authenticated_preview
     assert result["satellite"]["capabilities"]["preview_kind"] == "provider_tiles"
 
 
-def test_scene_without_wmts_right_remains_metadata_only():
+def test_scene_without_wmts_right_remains_metadata_only(monkeypatch):
     def handler(request):
         if request.url.host == "authenticate.foundation.api.oneatlas.airbus.com":
             return httpx.Response(200, json={"access_token": "token", "expires_in": 3600})
         return httpx.Response(200, json={"features": [_feature(rights=False)]})
 
+    calls = []
+    _patch_handler(monkeypatch, handler, calls)
     result = oneatlas.list_scenes(
         {"aoi": {"west": 100, "south": -2, "east": 101, "north": -1}, "start_date": "2025-01-01", "end_date": "2025-01-03"},
         SimpleNamespace(base_url="https://savegeo.example/"),
-        client_factory=_client_factory(handler, []),
     )
     scene = result["scenes"][0]
     assert scene["assets"] == []
@@ -121,7 +129,7 @@ def test_scene_without_wmts_right_remains_metadata_only():
         oneatlas.get_scene_tile({"scene_id": scene["id"]}, SimpleNamespace(base_url="https://savegeo.example/"))
 
 
-def test_wmts_preview_uses_cached_scene_and_rejects_bad_tile_coordinates():
+def test_wmts_preview_uses_cached_scene_and_rejects_bad_tile_coordinates(monkeypatch):
     scene_ref = oneatlas._scene_ref("private-provider-scene-42")
     oneatlas._remember_scene(
         scene_ref,
@@ -138,13 +146,14 @@ def test_wmts_preview_uses_cached_scene_and_rejects_bad_tile_coordinates():
             return httpx.Response(200, json={"access_token": "mock-preview-token", "expires_in": 3600})
         return httpx.Response(200, headers={"Content-Type": "image/png"}, content=png)
 
-    tile = oneatlas.render_tile(scene_ref, 4, 6, 7, client_factory=_client_factory(handler, seen))
+    _patch_handler(monkeypatch, handler, seen)
+    tile = oneatlas.render_tile(scene_ref, 4, 6, 7)
     assert tile == png
     assert len(seen) == 2
     assert seen[1].url.path.endswith("/rgb/EPSG3857/4/6/7.png")
     assert seen[1].headers["Authorization"] == "Bearer mock-preview-token"
     with pytest.raises(AnalysisError, match="coordinates"):
-        oneatlas.render_tile(scene_ref, 4, 16, 0, client_factory=_client_factory(handler, []))
+        oneatlas.render_tile(scene_ref, 4, 16, 0)
 
 
 @pytest.mark.parametrize(

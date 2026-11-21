@@ -10,15 +10,18 @@ planetary-computer). Everything else (rasterio, numpy) already installed.
 from __future__ import annotations
 
 import logging
+from itertools import islice
 
 import numpy as np
 
 from app.providers.feature_engineering_non_gee import NonGeeStack
 from app.providers.local_raster_provider import GridSpec, load_raster_to_grid
+from app.core.stac_http import BoundedStacApiIO, sign_planetary_computer_href
 
 logger = logging.getLogger(__name__)
 
 PC_STAC_URL = "https://planetarycomputer.microsoft.com/api/stac/v1"
+_MAX_STAC_ITEMS = 200
 
 S2_ASSET_MAP = {
     "B2": "B02", "B3": "B03", "B4": "B04", "B5": "B05", "B6": "B06",
@@ -35,7 +38,10 @@ BBox = tuple[float, float, float, float]
 
 def _stac_client():
     from pystac_client import Client
-    return Client.open(PC_STAC_URL)
+    return Client.open(
+        PC_STAC_URL,
+        stac_io=BoundedStacApiIO(allowed_hosts={"planetarycomputer.microsoft.com"}, max_pages=10),
+    )
 
 
 def search_sentinel2_items(
@@ -53,16 +59,14 @@ def search_sentinel2_items(
         datetime=f"{start_date}/{end_date}",
         query={"eo:cloud_cover": {"lt": max_cloud_cover}},
     )
-    items = list(search.items())
+    items = list(islice(search.items(), _MAX_STAC_ITEMS))
     logger.info(f"STAC search sentinel-2-l2a {bbox_lonlat} {start_date}/{end_date}: {len(items)} items")
     return items
 
 
 def _signed_href(item, asset_key: str) -> str:
-    import planetary_computer
     asset = item.assets[asset_key]
-    signed = planetary_computer.sign(asset)
-    return signed.href
+    return sign_planetary_computer_href(asset.href)
 
 
 def _band_scale_offset(item, asset_key: str) -> tuple[float, float]:
@@ -200,7 +204,7 @@ def build_dem_derivatives(grid: GridSpec) -> dict[str, np.ndarray]:
 
     client = _stac_client()
     search = client.search(collections=["cop-dem-glo-30"], bbox=list(grid.bbox_lonlat))
-    items = list(search.items())
+    items = list(islice(search.items(), _MAX_STAC_ITEMS))
     if not items:
         raise ValueError(f"build_dem_derivatives: no cop-dem-glo-30 items found for bbox {grid.bbox_lonlat}")
 
@@ -240,7 +244,7 @@ def build_worldcover(grid: GridSpec, year: int = 2021) -> dict:
         collections=["esa-worldcover"], bbox=list(grid.bbox_lonlat),
         datetime=f"{target_year}-01-01/{target_year}-12-31",
     )
-    items = list(search.items())
+    items = list(islice(search.items(), _MAX_STAC_ITEMS))
     if not items:
         raise ValueError(f"build_worldcover: no esa-worldcover items found for bbox {grid.bbox_lonlat}, year {target_year}")
 
@@ -277,7 +281,7 @@ def build_s1_composite(grid: GridSpec, start_date: str, end_date: str) -> dict |
             collections=["sentinel-1-rtc"], bbox=list(grid.bbox_lonlat),
             datetime=f"{start_date}/{end_date}",
         )
-        items = list(search.items())
+        items = list(islice(search.items(), _MAX_STAC_ITEMS))
         if not items:
             logger.info("build_s1_composite: no sentinel-1-rtc items found, S1 unavailable")
             return None

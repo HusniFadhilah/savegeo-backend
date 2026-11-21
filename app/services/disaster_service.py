@@ -19,6 +19,8 @@ from defusedxml import ElementTree as ET
 import ee
 import requests
 
+from app.core.public_http import public_http
+
 from app.core.config import get_settings
 from app.providers import stac_provider
 from app.services import imagery_service, samgeo_service
@@ -110,10 +112,10 @@ def get_bmkg_alerts(limit: int = 30) -> dict:
     if not feed_url:
         raise AnalysisError("BMKG_CAP_URL belum dikonfigurasi", 503)
     try:
-        r = requests.get(feed_url, timeout=20, headers={"User-Agent": "SAVEGEO/1.0"})
+        r = public_http.get(feed_url, timeout=20, headers={"User-Agent": "SAVEGEO/1.0"})
         r.raise_for_status()
-    except requests.RequestException as e:
-        raise AnalysisError(f"Gagal mengambil data BMKG: {e}", 502)
+    except (requests.RequestException, ValueError) as e:
+        raise AnalysisError("Gagal mengambil data BMKG.", 502) from e
 
     try:
         alerts = _parse_bmkg_warning_xml(r.text)

@@ -58,6 +58,8 @@ def test_granite_model_is_hidden_until_all_runtime_inputs_are_configured(tmp_pat
 
 
 def test_granite_model_listing_obeys_dataset_and_gee_filters(monkeypatch):
+    from app.services import model_catalog_service
+
     granite = {
         "name": registry.MODEL_NAME,
         "metadata_json": {
@@ -66,8 +68,8 @@ def test_granite_model_listing_obeys_dataset_and_gee_filters(monkeypatch):
             "compatible_reference_datasets": [registry.TARGET_DATASET],
         },
     }
-    monkeypatch.setattr(model_routes, "granite_biomass_model", lambda: granite)
-    monkeypatch.setattr(model_routes, "builtin_carbon_models", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(model_catalog_service, "granite_biomass_model", lambda: granite)
+    monkeypatch.setattr(model_catalog_service, "builtin_carbon_models", lambda *_args, **_kwargs: [])
 
     listed = model_routes.models_list(
         model_type="carbon", target_dataset=registry.TARGET_DATASET, gee_deployable=False, db=EmptyDB(), offset=0, limit=100

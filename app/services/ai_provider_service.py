@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
+import json
 import threading
 import time
 from typing import Any, Callable
@@ -18,6 +19,14 @@ HttpCall = Callable[..., "tuple[int, Any]"]
 
 HEALTH_TTL_SECONDS = 30.0
 DEFAULT_TIMEOUT_SECONDS = 5.0
+_MAX_PROVIDER_PROBE_BYTES = 1024 * 1024
+_PINNED_CLOUD_PROBE_HOSTS = frozenset({
+    "openrouter.ai",
+    "api.openai.com",
+    "api.deepseek.com",
+    "api.anthropic.com",
+    "generativelanguage.googleapis.com",
+})
 
 # provider -> (config key holding the API key, probe URL). Probes are free,
 # read-only "who am I / list models" calls so a health check never spends tokens.
@@ -88,16 +97,66 @@ def normalize_ollama_urls(base_url: str) -> tuple[str, str]:
 
 def _default_http(method: str, url: str, *, headers: dict | None = None, json_body: Any = None,
                   timeout: float = DEFAULT_TIMEOUT_SECONDS) -> tuple[int, Any]:
+    """Perform a small, bounded health probe without following redirects.
+
+    Known public AI endpoints use the DNS-pinned HTTPS transport. Ollama may
+    intentionally run on loopback or a private LAN host, so it uses a bounded
+    streaming requests path instead. Probe payloads are capped because model
+    discovery responses can otherwise consume unbounded worker memory.
+    """
+    from urllib.parse import urlsplit
+
+    parsed = urlsplit(url)
+    hostname = (parsed.hostname or "").lower().rstrip(".")
+    if parsed.scheme == "https" and hostname in _PINNED_CLOUD_PROBE_HOSTS:
+        from app.core.public_http import public_http
+
+        response = public_http.request(
+            method,
+            url,
+            headers=headers,
+            json_body=json_body,
+            timeout=timeout,
+            max_bytes=_MAX_PROVIDER_PROBE_BYTES,
+        )
+        try:
+            payload: Any = response.json()
+        except ValueError:
+            payload = None
+        return response.status_code, payload
+
     import requests
 
     response = requests.request(
-        method, url, headers=headers, json=json_body, timeout=timeout, allow_redirects=False
+        method,
+        url,
+        headers=headers,
+        json=json_body,
+        timeout=(min(float(timeout), 5.0), min(float(timeout), 5.0)),
+        allow_redirects=False,
+        stream=True,
     )
     try:
-        payload: Any = response.json()
-    except ValueError:
-        payload = None
-    return response.status_code, payload
+        content_length = response.headers.get("Content-Length")
+        if content_length and int(content_length) > _MAX_PROVIDER_PROBE_BYTES:
+            raise ValueError("Provider probe response exceeds the size limit")
+        body = bytearray()
+        deadline = time.monotonic() + max(0.1, float(timeout))
+        for chunk in response.iter_content(chunk_size=64 * 1024):
+            if time.monotonic() >= deadline:
+                raise requests.Timeout("Provider probe deadline exceeded")
+            if not chunk:
+                continue
+            body.extend(chunk)
+            if len(body) > _MAX_PROVIDER_PROBE_BYTES:
+                raise ValueError("Provider probe response exceeds the size limit")
+        try:
+            payload = json.loads(body) if body else None
+        except (ValueError, RecursionError):
+            payload = None
+        return response.status_code, payload
+    finally:
+        response.close()
 
 
 def _error_code(exc: Exception) -> str:

@@ -16,12 +16,14 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import require_ee
 from app.core.security import get_current_app_viewer
+from app.core.bounded_json import read_typed_json_object
 from app.core.chat_ownership import chat_session_owner_key
 from app.db.models.admin_user import AdminUser
 from app.db.models.user import User
 from app.core.viewer_features import require_feature
 from app.db.session import get_db
 from app.registries.crop_registry import get_catalog_payload
+from app.schemas.analysis_jobs import AnalysisPayload
 from app.registries.weather_provider_registry import get_catalog_payload as get_weather_catalog_payload
 from app.services import crop_monitoring_service
 from app.services.gee_common import AnalysisError, public_analysis_error
@@ -42,7 +44,7 @@ def crop_monitoring_weather_providers():
 
 @router.post("/analyze/crop-monitoring", dependencies=[Depends(get_current_app_viewer), Depends(require_ee)])
 async def analyze_crop_monitoring(request: Request, viewer: User | AdminUser = Depends(get_current_app_viewer), db: Session = Depends(get_db)):
-    data = await request.json()
+    data = await read_typed_json_object(request, AnalysisPayload)
     try:
         return await run_in_threadpool(crop_monitoring_service.run_crop_monitoring, db, data, chat_session_owner_key(viewer))
     except AnalysisError as e:

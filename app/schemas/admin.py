@@ -57,10 +57,9 @@ class ConfigUpdateItem(BaseModel):
 
 
 class ConfigBulkUpdateRequest(BaseModel):
-    updates: list[ConfigUpdateItem] | None = None
+    model_config = ConfigDict(extra="allow")  # legacy also accepts a bare {key: value, ...} object
 
-    class Config:
-        extra = "allow"  # legacy also accepts a bare {key: value, ...} object
+    updates: list[ConfigUpdateItem] | None = None
 
 
 class ConfigResetRequest(BaseModel):

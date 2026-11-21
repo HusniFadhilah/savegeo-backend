@@ -16,11 +16,13 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import require_ee
 from app.core.security import get_current_app_viewer
+from app.core.bounded_json import read_typed_json_object
 from app.core.viewer_features import require_feature
 from app.db.session import get_db
 from app.registries.satellite_provider_registry import DEFAULT_SATELLITE
 from app.registries.vegetation_index_registry import get_catalog_payload
 from app.repositories.satellite_provider_repo import list_satellites
+from app.schemas.analysis_jobs import AnalysisPayload
 from app.services import vegetation_service
 from app.services.gee_common import CLOUD_MASK_TECHNIQUE_INFO, DEFAULT_CLOUD_MASK_TECHNIQUE, AnalysisError, public_analysis_error
 
@@ -52,7 +54,7 @@ def vegetation_cloud_mask_techniques():
 
 @router.post("/analyze/vegetation", dependencies=[Depends(get_current_app_viewer), Depends(require_ee)])
 async def analyze_vegetation(request: Request, db: Session = Depends(get_db)):
-    data = await request.json()
+    data = await read_typed_json_object(request, AnalysisPayload)
     try:
         return await run_in_threadpool(vegetation_service.analyze_vegetation, db, data)
     except AnalysisError as e:
@@ -72,7 +74,7 @@ async def analyze_vegetation(request: Request, db: Session = Depends(get_db)):
 
 @router.post("/analyze/vegetation/compare", dependencies=[Depends(get_current_app_viewer), Depends(require_ee)])
 async def analyze_vegetation_compare(request: Request, db: Session = Depends(get_db)):
-    data = await request.json()
+    data = await read_typed_json_object(request, AnalysisPayload)
     try:
         return await run_in_threadpool(vegetation_service.analyze_vegetation_compare, db, data)
     except AnalysisError as e:
@@ -95,7 +97,7 @@ async def analyze_vegetation_change_hotspots(request: Request, db: Session = Dep
     """Ranked, vectorized vegetation-index change polygons (P0 hotspot detection,
     SaveGeo Assistant's `find_hotspots(metric="vegetation_change")`) - see
     vegetation_service.analyze_vegetation_change_hotspots for the full contract."""
-    data = await request.json()
+    data = await read_typed_json_object(request, AnalysisPayload)
     try:
         return await run_in_threadpool(vegetation_service.analyze_vegetation_change_hotspots, db, data)
     except AnalysisError as e:

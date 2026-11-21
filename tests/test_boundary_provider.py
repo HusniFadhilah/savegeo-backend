@@ -1,4 +1,5 @@
-from app.services.boundary_provider import CachedBoundaryProvider, normalize_geometry
+from app.services import boundary_provider
+from app.services.boundary_provider import CachedBoundaryProvider, RegionBoundaryProvider, normalize_geometry
 
 
 def _fixture():
@@ -47,3 +48,30 @@ def test_boundary_cache_returns_stale_geometry_when_provider_fails():
     fallback, stale = cache.geometry("province", "62")
     assert stale is True
     assert fallback == geometry
+
+
+def test_boundary_provider_uses_pinned_bounded_https_transport(monkeypatch):
+    calls = []
+
+    class Response:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": {"region": _fixture()}}
+
+    monkeypatch.setattr(
+        boundary_provider.public_http,
+        "get",
+        lambda url, **kwargs: calls.append((url, kwargs)) or Response(),
+    )
+    provider = RegionBoundaryProvider(base_url="https://api.sp3stab.id/api/en")
+    provider.dropdown("province")
+    geometry = provider.geometry("province", "62")
+
+    assert geometry["features"][0]["geometry"]["coordinates"][0][0] == [113.0, -1.0]
+    assert all(call[0].startswith("https://api.sp3stab.id/api/en/") for call in calls)
+    assert calls[0][1]["max_bytes"] == 16 * 1024 * 1024
+    assert calls[1][1]["max_bytes"] == 32 * 1024 * 1024

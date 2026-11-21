@@ -682,7 +682,15 @@ async def analysis_preflight(request: Request, viewer: object = Depends(get_curr
     ensure_job_feature_access(viewer, job_type, db, payload)
     result = run_analysis_preflight(job_type, payload)
     if result["status"] == "blocked":
-        return {**result, "http_status": 422}
+        first = result["blocking"][0] if result.get("blocking") else {}
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": str(first.get("code") or "analysis_preflight_blocked"),
+                "message": str(first.get("message") or "Input analisis tidak memenuhi prasyarat."),
+                "preflight": result,
+            },
+        )
     return result
 
 

@@ -9,7 +9,8 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from fastapi.responses import FileResponse
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
@@ -43,6 +44,26 @@ router = APIRouter(
 MAX_MAP_FEATURES = 5000
 logger = logging.getLogger(__name__)
 ADMIN_REGION_LEVELS = {"province", "city", "district", "village"}
+
+
+class CamsAggregateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    mode: str = Field(pattern="^(area|grid)$")
+    geometry: dict | None = None
+    bbox: tuple[float, float, float, float] | None = None
+
+    @model_validator(mode="after")
+    def require_bounded_area(self):
+        if self.geometry is None and self.bbox is None:
+            raise ValueError("geometry or bbox is required")
+        if self.bbox is not None:
+            west, south, east, north = self.bbox
+            if not (-180 <= west < east <= 180 and -90 <= south < north <= 90):
+                raise ValueError("bbox bounds are invalid")
+        if self.geometry is not None and self.geometry.get("type") not in {"Polygon", "MultiPolygon"}:
+            raise ValueError("geometry must be a Polygon or MultiPolygon")
+        return self
 _ADMIN_GEOMETRY_CACHE: dict[tuple[str, str], tuple[float, dict]] = {}
 _ADMIN_GEOMETRY_CACHE_LOCK = threading.RLock()
 _ADMIN_GEOMETRY_CACHE_TTL = 86400
@@ -708,22 +729,19 @@ def aggregate_wildfire_emissions(
     slug: str,
     layer_id: str,
     frame_id: str,
-    payload: dict = Body(...),
+    payload: CamsAggregateRequest,
     viewer=Depends(get_current_disaster_viewer),
     db: Session = Depends(get_db),
 ):
     _event(db, slug)
-    response_mode = payload.get("mode")
-    if response_mode not in {"area", "grid"}:
-        raise HTTPException(status_code=400, detail={"code": "invalid_aggregation_mode", "message": "Mode agregasi tidak valid"})
     try:
         return cams_archive_service.aggregate(
             slug,
             layer_id,
             frame_id,
-            response_mode,
-            geometry=payload.get("geometry"),
-            bbox=payload.get("bbox"),
+            payload.mode,
+            geometry=payload.geometry,
+            bbox=payload.bbox,
         )
     except cams_emissions_service.CamsRequestError as exc:
         raise HTTPException(exc.status_code, detail={"code": exc.code, "message": str(exc)}) from None

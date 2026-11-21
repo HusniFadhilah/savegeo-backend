@@ -1,9 +1,9 @@
 # dMRV field-data fixtures
 
-- `bu_dessy_sample.csv` — the 21 tree rows of Point ID 1 (Tembalang, transect T1) from the Bu Dessy carbon survey
-  (`Paket_Notebook_Estimasi_Stok_Karbon_Full/Data_Pohon_Lengkap.csv`). Source headers are kept, including the junk
-  trailing columns. `Tahun` (2024), `Latitude` and `Longitude` were added from the survey's coordinate table.
-  Biomass values are allometric results reported by the survey, not destructive measurements. The 400 m² plot
-  area used in tests is an assumption, not a measurement.
-- `bu_dessy_sample_synthetic_2022.csv` — **synthetic**. Three trees of the same point, shrunk by an arbitrary
-  factor, used only to test repeat-visit history. It is not measured data.
+- `../../../examples/dmrv/pt_dahana_subang_field_inventory.csv` is the approved PT Dahana calibration reference: 90 tree records from 10 plots, each with a measured 400 m2 area. The source report defines the tree biomass as dry and applies a carbon fraction of 0.47. The regression test checks the import mapping and plot-level AGB carbon-density conversion. It does not use the demo seed's simulated prediction factors as model results.
+- `bu_dessy_sample.csv` contains the 21 tree rows for Point ID 1 (Tembalang, transect T1) from the Bu Dessy carbon survey (`Paket_Notebook_Estimasi_Stok_Karbon_Full/Data_Pohon_Lengkap.csv`). The source headers, including trailing columns, are retained. `Tahun` (2024), `Latitude`, `Longitude`, and `Luas Plot (m2)` were added from the survey coordinate table and plot details confirmed for this review. The plot is 20 x 20 m (400 m2), and the reported biomass is dry. The survey biomass values are allometric estimates, not destructive measurements.
+
+  The default carbon fraction of 0.47 follows the IPCC 2006 Guidelines, Volume 4, Chapter 4, Table 4.3 for aboveground forest biomass. This fixture contains one independent plot, so it supports a single-plot holdout check only and cannot support a generalized accuracy claim. Source: <https://www.ipcc-nggip.iges.or.jp/public/2006gl/pdf/4_Volume4/V4_04_Ch4_Forest_Land.pdf>.
+- `bu_dessy_sample_synthetic_2022.csv` is synthetic. Three tree rows were scaled to exercise repeat-visit history. It is not measured data.
+
+Bu Dessy is the independent validation reference. Its single plot can provide a matched error check after an actual, plot-mean model prediction is recorded for the same plot and year. The report may show that one plot's error, but it must label the result as non-generalizable; one plot cannot support R2 or a broader accuracy claim. The fixture alone supplies the reference value, not a prediction.

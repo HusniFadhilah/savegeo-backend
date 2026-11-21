@@ -283,8 +283,10 @@ def test_vertical_conversion_rejects_nonfinite_values_in_schema_and_service(valu
 @pytest.mark.asyncio
 async def test_slow_analysis_does_not_block_the_event_loop(monkeypatch):
     import asyncio
+    import json
     import threading
     from app.api.routes import vegetation
+    from starlette.requests import Request
     started = threading.Event()
     release = threading.Event()
     main_thread = threading.get_ident()
@@ -296,7 +298,14 @@ async def test_slow_analysis_does_not_block_the_event_loop(monkeypatch):
     async def body():
         return {}
     monkeypatch.setattr(vegetation.vegetation_service, "analyze_vegetation", slow)
-    task = asyncio.create_task(vegetation.analyze_vegetation(SimpleNamespace(json=body), db=None))
+    raw = json.dumps({"aoi": {"type": "Polygon", "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]]}}).encode()
+    async def receive():
+        return {"type": "http.request", "body": raw, "more_body": False}
+    request = Request(
+        {"type": "http", "method": "POST", "path": "/", "headers": [(b"content-length", str(len(raw)).encode())]},
+        receive=receive,
+    )
+    task = asyncio.create_task(vegetation.analyze_vegetation(request, db=None))
     try:
         assert await asyncio.to_thread(started.wait, 2)
         assert not task.done()

@@ -57,6 +57,7 @@ jobs:
           pip install --require-hashes -r requirements-ci.lock
           pip install --no-deps --no-build-isolation -e .
           ruff check . --ignore E501 --ignore B904 --ignore B905
+          bash -n scripts/load_backup_environment.sh scripts/backup_offsite.sh scripts/restore_drill.sh scripts/restore_local_backup_drill.sh
           python scripts/audit_standards.py --check > standards-audit.json
           mypy app
           bandit -r app -lll
@@ -69,6 +70,17 @@ jobs:
               exit 1
             fi
             echo "::warning::pip-audit could not reach its advisory service; retrying in 10 seconds (attempt $attempt/3)"
+            sleep 10
+          done
+          for attempt in 1 2 3; do
+            if pip-audit -r requirements-optional.lock --no-deps --disable-pip; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::pip-audit failed for optional model runtime dependencies after $attempt attempts"
+              exit 1
+            fi
+            echo "::warning::pip-audit could not complete the optional runtime audit; retrying in 10 seconds (attempt $attempt/3)"
             sleep 10
           done
           alembic upgrade head

@@ -20,9 +20,10 @@ from uuid import uuid4
 import ee
 import requests
 
+from app.core.public_http import public_http
 from app.core.config import get_settings
 from app.services import imagery_service
-from app.services.gee_common import AnalysisError, _event_area_ha, create_geometry_from_payload, get_tile_url
+from app.services.gee_common import AnalysisError, _event_area_ha, create_geometry_from_payload, get_tile_url, public_analysis_error
 
 FIRMS_SOURCES = {
     "firms_noaa20": ("VIIRS_NOAA20_NRT", "VIIRS NOAA-20", 375),
@@ -163,7 +164,7 @@ def _fetch_firms(source_id: str, bbox: list, start: date, end: date) -> dict:
     while cursor <= end:
         days = min(5, (end - cursor).days + 1)
         url = f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{settings.nasa_firms_map_key}/{source}/{','.join(map(str, bbox))}/{days}/{cursor.isoformat()}"
-        response = requests.get(url, timeout=25)
+        response = public_http.get(url, timeout=25, max_bytes=16 * 1024 * 1024)
         response.raise_for_status()
         if "latitude" not in response.text[:600]:
             raise AnalysisError(
@@ -182,7 +183,7 @@ def _fetch_firms(source_id: str, bbox: list, start: date, end: date) -> dict:
 
 def _fetch_bmkg(bbox: list, start: date, end: date) -> dict:
     end_exclusive = end + timedelta(days=1)
-    response = requests.get(
+    response = public_http.get(
         f"{BMKG_LAYER}/query",
         params={
             "where": f"date_full >= TIMESTAMP '{start.isoformat()} 00:00:00' AND date_full < TIMESTAMP '{end_exclusive.isoformat()} 00:00:00'",
@@ -302,9 +303,9 @@ def merge_observations(features: list[dict]) -> list[dict]:
 
 
 def _fetch_cdse(bbox: list, start: date, end: date) -> dict:
-    response = requests.post(
+    response = public_http.post(
         f"{CDSE_ROOT}/search",
-        json={
+        json_body={
             "collections": ["sentinel-2-l2a"],
             "bbox": bbox,
             "datetime": f"{start.isoformat()}T00:00:00Z/{end.isoformat()}T23:59:59Z",
@@ -460,7 +461,7 @@ def _fetch_burn(source_id: str, aoi: dict, start: date, end: date, ee_available:
 def _fetch_inarisk() -> dict:
     # ArcGIS OGC services use /services, not /rest/services.
     url = f"{INARISK_ROOT.replace('/rest/', '/')}/WMSServer"
-    response = requests.get(url, params={"request": "GetCapabilities", "service": "WMS"}, timeout=20)
+    response = public_http.get(url, params={"request": "GetCapabilities", "service": "WMS"}, timeout=20, max_bytes=8 * 1024 * 1024)
     response.raise_for_status()
     root = ElementTree.fromstring(response.content)
     layers = [node.text for node in root.iter() if node.tag.split("}")[-1] == "Name" and node.text != "WMS"]
@@ -530,7 +531,7 @@ def load_sources(data: dict, ee_available: bool = False) -> dict:
                     result["features"] = clipped[:MAX_POINTS]
                 results[source] = result
             except AnalysisError as exc:
-                results[source] = {"id": source, "status": "error", "message": str(exc), "features": []}
+                results[source] = {"id": source, "status": "error", "message": public_analysis_error(exc), "features": []}
             except requests.Timeout:
                 results[source] = {
                     "id": source,
@@ -580,7 +581,7 @@ def load_big_boundaries(data: dict) -> dict:
         "KALIMANTAN UTARA",
     }:
         raise AnalysisError("Pilih satu provinsi Kalimantan", 400)
-    response = requests.get(
+    response = public_http.get(
         f"{BIG_LAYER}/query",
         params={
             "where": f"UPPER(wadmpr)='{province}'",

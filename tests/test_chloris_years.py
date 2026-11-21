@@ -141,6 +141,26 @@ def test_bearer_credentials_only_go_to_chloris_origin(chloris_settings):
     assert chloris.chloris_raster_http_options("http://app.chloris.earth/data/file.tif") == {}
 
 
+def test_refresh_token_rejects_untrusted_cognito_region_before_sending_credentials(monkeypatch, chloris_settings):
+    chloris_settings.chloris_refresh_token = "test-refresh-token"
+    monkeypatch.setattr(
+        chloris,
+        "_request_public_json",
+        lambda _url: {"awsRegion": "attacker.example", "awsUserPoolWebClientId": "test-client"},
+    )
+    monkeypatch.setattr(
+        chloris.public_http,
+        "post",
+        lambda *_args, **_kwargs: pytest.fail("Refresh token must not be sent to an untrusted host"),
+    )
+    chloris._refresh_id_token.cache_clear()
+    try:
+        with pytest.raises(ValueError, match="Cognito region/client id"):
+            chloris._refresh_id_token(chloris_settings.chloris_refresh_token)
+    finally:
+        chloris._refresh_id_token.cache_clear()
+
+
 def test_licensed_tiles_require_authentication():
     app = FastAPI()
     app.include_router(carbon_routes.router)

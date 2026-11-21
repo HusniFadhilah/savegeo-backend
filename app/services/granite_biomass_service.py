@@ -36,6 +36,7 @@ from app.registries.granite_biomass_registry import (
 )
 from app.services import config_service
 from app.services.gee_common import AnalysisError, create_geometry_from_payload, geometry_area_ha
+from app.core.public_http import public_http
 
 logger = logging.getLogger(__name__)
 
@@ -77,20 +78,16 @@ def _download_official_asset(destination: Path, filename: str, *, max_bytes: int
     digest = hashlib.sha256()
     byte_count = 0
     try:
-        with requests.get(url, stream=True, timeout=(20, 180), headers={"User-Agent": "SAVEGEO/IBM-Granite-setup"}) as response:
-            response.raise_for_status()
-            content_length = response.headers.get("Content-Length")
-            if content_length and int(content_length) > max_bytes:
-                raise AnalysisError("Ukuran artefak IBM Granite melebihi batas unduhan yang diizinkan.", 413)
-            with temp_path.open("wb") as output:
-                for chunk in response.iter_content(chunk_size=1024 * 1024):
-                    if not chunk:
-                        continue
-                    byte_count += len(chunk)
-                    if byte_count > max_bytes:
-                        raise AnalysisError("Ukuran artefak IBM Granite melebihi batas unduhan yang diizinkan.", 413)
-                    digest.update(chunk)
-                    output.write(chunk)
+        response = public_http.download_to_file(
+            url, temp_path, max_bytes=max_bytes,
+            allowed_redirect_hosts={"huggingface.co", "xethub.hf.co"},
+            timeout=(20, 300), headers={"User-Agent": "SAVEGEO/IBM-Granite-setup"},
+        )
+        response.raise_for_status()
+        byte_count = temp_path.stat().st_size
+        with temp_path.open("rb") as downloaded:
+            for block in iter(lambda: downloaded.read(1024 * 1024), b""):
+                digest.update(block)
         if byte_count == 0:
             raise AnalysisError("IBM Hugging Face mengembalikan artefak model kosong.", 503)
         if expected_sha256 and digest.hexdigest().lower() != expected_sha256.lower():
@@ -236,6 +233,7 @@ def _hls_composite(aoi, start_date: str, end_date: str):
 def _download_hls_raster(image, aoi, destination: Path) -> tuple[Path, int]:
     import rasterio
 
+    download_path = None
     try:
         url = image.getDownloadURL({
             "bands": [*MODEL_BANDS, "valid"],
@@ -244,16 +242,14 @@ def _download_hls_raster(image, aoi, destination: Path) -> tuple[Path, int]:
             "format": "GEO_TIFF",
             "filePerBand": False,
         })
-        response = requests.get(url, stream=True, timeout=(20, 180))
+        download_path = destination / f".granite-hls-{os.getpid()}-{threading.get_ident()}.part"
+        response = public_http.download_to_file(
+            url, download_path, max_bytes=MAX_DOWNLOAD_BYTES,
+            allowed_redirect_hosts={"earthengine.googleapis.com", "storage.googleapis.com", "googleusercontent.com"},
+            timeout=(20, 180), headers={"User-Agent": "SAVEGEO/IBM-Granite-HLS"},
+        )
         response.raise_for_status()
-        content = bytearray()
-        for chunk in response.iter_content(chunk_size=1024 * 1024):
-            if not chunk:
-                continue
-            content.extend(chunk)
-            if len(content) > MAX_DOWNLOAD_BYTES:
-                raise AnalysisError("Raster HLS melebihi batas unduhan aman untuk satu analisis.", 413)
-        payload = bytes(content)
+        payload = download_path.read_bytes()
     except AnalysisError:
         raise
     except requests.RequestException as exc:
@@ -262,6 +258,9 @@ def _download_hls_raster(image, aoi, destination: Path) -> tuple[Path, int]:
     except Exception as exc:  # noqa: BLE001
         logger.warning("IBM Granite HLS export failed (%s)", type(exc).__name__)
         raise AnalysisError("Earth Engine tidak dapat menyiapkan komposit HLS untuk model IBM Granite.", 422) from exc
+    finally:
+        if download_path is not None:
+            download_path.unlink(missing_ok=True)
 
     if zipfile.is_zipfile(io.BytesIO(payload)):
         try:
