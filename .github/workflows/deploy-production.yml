@@ -318,6 +318,10 @@ jobs:
             # actually mounted on this server.
             docker compose -f docker-compose.prod.yml exec -T api \
               python -m scripts.import_legacy_models /app/var/saved_models
+            # Keep the audited, report-based UNDIP demo available to production
+            # users. The seed is idempotent and leaves all records as drafts.
+            docker compose -f docker-compose.prod.yml exec -T api \
+              python -m scripts.seed_undip_dmrv_demo --owner admin --apply
             curl --fail --silent "$BACKEND_HEALTH_URL" >/dev/null
             deployment_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
             # Preserve the validated CI build provenance. The SSH host does
