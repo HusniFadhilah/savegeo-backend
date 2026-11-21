@@ -15,6 +15,16 @@ def test_deploy_archives_private_dmrv_evidence_in_read_only_isolated_container()
     assert "postgres:16-alpine tar -C /source -czf - dmrv/evidence > \"$evidence_tmp\"" in workflow
 
 
+def test_migration_inventory_container_can_write_private_deploy_owned_audit_files() -> None:
+    workflow = (ROOT / ".github/workflows/deploy-production.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'audit_uid="$(id -u)"' in workflow
+    assert 'audit_gid="$(id -g)"' in workflow
+    assert workflow.count('--user "$audit_uid:$audit_gid"') == 3
+
+
 def test_remote_restore_drill_transfers_and_cleans_up_verification_helper() -> None:
     workflow = (
         ROOT / ".github/workflows/restore-local-backup-drill-production.yml"
