@@ -53,6 +53,61 @@ def test_gdal_provider_guard_shares_public_provider_circuit_breaker(monkeypatch)
     assert local_raster_provider.GDAL_HTTP_OPTS["GDAL_HTTP_MAX_RETRY"] == 0
 
 
+def test_gdal_remote_raster_requires_bounded_non_redirecting_range_probe(monkeypatch):
+    calls = {}
+    monkeypatch.setattr(
+        public_http.public_http,
+        "validate_public_destination",
+        lambda url: (url, "assets.example", ["93.184.215.14"]),
+    )
+
+    def request(method, url, **kwargs):
+        calls.update(method=method, url=url, **kwargs)
+        return SimpleNamespace(status_code=206, headers={"Content-Range": "bytes 0-0/1048576"})
+
+    monkeypatch.setattr(public_http.public_http, "request", request)
+    hostname = local_raster_provider.validate_remote_raster_url(
+        "https://assets.example/plot.tif?sig=private",
+        {"GDAL_HTTP_HEADERS": "Authorization: Bearer private\nX-Debug: do-not-forward"},
+    )
+
+    assert hostname == "assets.example"
+    assert calls["method"] == "GET"
+    assert calls["headers"] == {"Range": "bytes=0-0", "Authorization": "Bearer private"}
+    assert calls["max_bytes"] == 1
+    assert calls["timeout"] == (3, 8)
+    assert calls["allow_redirects"] is False
+
+
+@pytest.mark.parametrize(
+    "status,content_range",
+    [
+        (302, ""),
+        (200, ""),
+        (206, ""),
+        (206, "bytes 0-0/536870913"),
+    ],
+)
+def test_gdal_remote_raster_rejects_redirects_unknown_sizes_and_oversized_files(
+    monkeypatch, status, content_range
+):
+    monkeypatch.setattr(
+        public_http.public_http,
+        "validate_public_destination",
+        lambda url: (url, "assets.example", ["93.184.215.14"]),
+    )
+    monkeypatch.setattr(
+        public_http.public_http,
+        "request",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            status_code=status, headers={"Content-Range": content_range}
+        ),
+    )
+
+    with pytest.raises(ValueError, match="bounded public HTTPS range check"):
+        local_raster_provider.validate_remote_raster_url("https://assets.example/plot.tif")
+
+
 def test_public_https_pins_address_with_original_sni_and_no_redirect(monkeypatch):
     calls = {}
     monkeypatch.setattr(socket, 'getaddrinfo', lambda *a, **k: [(2, 1, 6, '', ('93.184.215.14', 443))])

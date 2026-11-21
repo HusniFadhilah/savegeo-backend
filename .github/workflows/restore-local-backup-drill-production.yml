@@ -16,6 +16,11 @@ jobs:
     environment: production
     timeout-minutes: 45
     steps:
+      - name: Checkout restore drill script
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
       - name: Install SSH and VPN tools
         run: sudo apt-get update && sudo apt-get install -y openvpn openssh-client netcat-openbsd
 
@@ -56,9 +61,15 @@ jobs:
           DEPLOY_SSH_PORT: ${{ secrets.DEPLOY_SSH_PORT }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           BACKEND_REMOTE_DIR: ${{ secrets.BACKEND_REMOTE_DIR }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
           test -n "$DEPLOY_HOST" && test -n "$DEPLOY_SSH_PORT" && test -n "$DEPLOY_USER" && test -n "$BACKEND_REMOTE_DIR"
+          remote_script="$BACKEND_REMOTE_DIR/var/restore-local-backup-drill-$GITHUB_RUN_ID.sh"
+          scp -i "$RUNNER_TEMP/savegeo-deploy-key" -P "$DEPLOY_SSH_PORT" \
+            -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/savegeo-known-hosts" \
+            scripts/restore_local_backup_drill.sh "$DEPLOY_USER@$DEPLOY_HOST:$remote_script"
           ssh -i "$RUNNER_TEMP/savegeo-deploy-key" -p "$DEPLOY_SSH_PORT" \
             -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/savegeo-known-hosts" \
-            "$DEPLOY_USER@$DEPLOY_HOST" "cd '$BACKEND_REMOTE_DIR' && bash scripts/restore_local_backup_drill.sh"
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            "set -euo pipefail; chmod 700 '$remote_script'; trap 'rm -f -- \"$remote_script\"' EXIT; SAVEGEO_LOCAL_BACKUP_DIR='$BACKEND_REMOTE_DIR/../private-backups' bash '$remote_script'"
