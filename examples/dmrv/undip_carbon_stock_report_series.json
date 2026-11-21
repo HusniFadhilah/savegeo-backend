@@ -1,0 +1,91 @@
+{
+  "project_name": "CONTOH dMRV - UNDIP carbon stock 2022-2026 (rekonsiliasi data)",
+  "organization": "Universitas Diponegoro",
+  "jurisdiction": "Multi-lokasi Universitas Diponegoro, Jawa Tengah",
+  "activity_type": "carbon_inventory",
+  "methodology_id": null,
+  "methodology_version": null,
+  "status_note": "Draf berbasis laporan; bukan proyek kredit karbon dan belum memiliki batas spasial terverifikasi.",
+  "date_precision": "year",
+  "exact_field_dates_available": false,
+  "periods": [
+    {
+      "measurement_year": 2022,
+      "report_label_year": 2023,
+      "agb_mg_c": 19059.54,
+      "soc_mg_c": null,
+      "vegetation_area_ha": 320.25,
+      "source": "https://sustainability.undip.ac.id/wp-content/uploads/2025/04/Laporan-Carbon-Stock-Undip-2023-Final-0304241.pdf",
+      "source_note": "Tabel 3 menyebut stok AGB tahun 2022 pada tujuh lokasi kampus. Laporan berjudul 2023; tanggal pengukuran harian tidak dicantumkan."
+    },
+    {
+      "measurement_year": 2024,
+      "report_label_year": 2024,
+      "agb_mg_c": 22306.4,
+      "soc_mg_c": 1667798.97,
+      "vegetation_area_ha": null,
+      "source": "https://sustainability.undip.ac.id/wp-content/uploads/2025/06/Laporan_Karbon_Offset-2024_comp.pdf",
+      "source_note": "Ringkasan eksekutif dan Tabel 2 melaporkan AGB serta SOC tahun 2024. Tanggal pengukuran harian tidak dicantumkan."
+    },
+    {
+      "measurement_year": 2026,
+      "report_label_year": 2026,
+      "agb_mg_c": null,
+      "soc_mg_c": null,
+      "vegetation_area_ha": 320.39,
+      "source": "https://drive.google.com/file/d/1yjT3k2Prt6zBr4536Eqz6oDfN1EZrNc9/view",
+      "supporting_sources": [
+        "https://docs.google.com/spreadsheets/d/1Woq1AfB-qsEezr-6kmPhQv25beisfiv_/edit?gid=1711374899#gid=1711374899",
+        "https://docs.google.com/spreadsheets/d/1ml2cFL62vuyLocQQ8HelvcZ-c50DRNNh/edit?rtpof=true"
+      ],
+      "reported_candidates": {
+        "agb_mg_c": [23712.25, 23712.35, 23721.25, 22658.85],
+        "soc_mg_c": [1729329.77, 1623742.6671532108, 1139921.61]
+      },
+      "source_note": "Angka berbeda antar-ringkasan eksekutif, tabel, narasi laporan, dan workbook revisi. Nilai belum direkonsiliasi; tidak ada angka tunggal yang dipilih sebagai hasil final."
+    }
+  ],
+  "sources": [
+    {
+      "title": "Laporan Carbon Stock UNDIP 2023",
+      "url": "https://sustainability.undip.ac.id/wp-content/uploads/2025/04/Laporan-Carbon-Stock-Undip-2023-Final-0304241.pdf",
+      "report_label_year": 2023,
+      "measurement_years": [2022],
+      "exact_field_dates_available": false
+    },
+    {
+      "title": "Laporan Karbon Offset UNDIP 2024",
+      "url": "https://sustainability.undip.ac.id/wp-content/uploads/2025/06/Laporan_Karbon_Offset-2024_comp.pdf",
+      "report_label_year": 2024,
+      "measurement_years": [2024],
+      "exact_field_dates_available": false
+    },
+    {
+      "title": "Carbon Offset 2026 Report Final_Lengkap.pdf",
+      "url": "https://drive.google.com/file/d/1yjT3k2Prt6zBr4536Eqz6oDfN1EZrNc9/view",
+      "report_label_year": 2026,
+      "measurement_years": [2026],
+      "drive_created_at": "2026-08-27T08:25:45.558Z",
+      "drive_modified_at": "2026-08-27T08:33:23.929Z",
+      "note": "Tanggal Drive adalah waktu berkas dibuat/diubah, bukan tanggal survei lapangan."
+    },
+    {
+      "title": "Data Survei Carbon.xlsx",
+      "url": "https://docs.google.com/spreadsheets/d/1Woq1AfB-qsEezr-6kmPhQv25beisfiv_/edit?gid=1711374899#gid=1711374899",
+      "exact_field_dates_available": false
+    },
+    {
+      "title": "OLAH DATA CARBON (REVISI).xlsx",
+      "url": "https://docs.google.com/spreadsheets/d/1ml2cFL62vuyLocQQ8HelvcZ-c50DRNNh/edit?rtpof=true",
+      "drive_modified_at": "2026-11-17T13:51:27.999Z",
+      "note": "Waktu revisi workbook, bukan tanggal pengukuran lapangan."
+    }
+  ],
+  "limitations": [
+    "Tanggal survei sampai hari dan bulan tidak dinyatakan di sumber yang diperiksa; tahun dipakai sebagai presisi periode laporan saja.",
+    "Nilai tahunan pada laporan merupakan ringkasan estimasi stok dan bukan otomatis perubahan stok yang dapat diklaim sebagai serapan atau kredit karbon.",
+    "Data AGB dan SOC antar-sumber/antarbagian belum konsisten, khususnya untuk 2026; hasil harus tetap draf sampai rekonsiliasi sumber selesai.",
+    "Sumber yang diperiksa tidak menyediakan geometri batas resmi multi-lokasi. Seed tidak membuat poligon, periode monitoring operasional, prediksi model, atau hasil validasi sintetis.",
+    "AGB dan SOC tersedia sebagai pool laporan; nilai BGB, litter, dan deadwood tidak disimpulkan dari angka AGB/SOC."
+  ]
+}
