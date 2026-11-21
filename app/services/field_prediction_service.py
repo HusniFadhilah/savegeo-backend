@@ -67,13 +67,14 @@ def _plot_feature(row: CarbonFieldObservation, plot: FieldPlot | None) -> ee.Fea
         area_m2 = float(raw.get("plot_area_m2") or 0)
         longitude, latitude = float(raw["longitude"]), float(raw["latitude"])
         side_m = math.sqrt(area_m2)
-        half_diagonal_m = side_m / math.sqrt(2)
+        half_side_m = side_m / 2
         if not math.isfinite(side_m) or side_m <= 0 or side_m > 2000:
             raise ValueError(f"Plot {raw.get('plot_id')} membutuhkan geometri; sisi persegi ekuivalen harus 0–2.000 m.")
         # If only the survey centroid and area are available, approximate a
-        # square plot aligned to north. This preserves the confirmed 20x20 m
-        # Bu Dessy plot area while keeping the assumption visible in provenance.
-        ee_geometry = ee.Geometry.Point([longitude, latitude]).buffer(half_diagonal_m, maxError=1).bounds(maxError=1)
+        # square plot aligned to north. The envelope of a buffer with radius
+        # half the side is a square with the confirmed plot side (20 m for
+        # Bu Dessy); using half the diagonal here would inflate its area.
+        ee_geometry = ee.Geometry.Point([longitude, latitude]).buffer(half_side_m, maxError=1).bounds(maxError=1)
         support = "north_aligned_square_proxy"
     return ee.Feature(ee_geometry, {"observation_id": row.id, "support": support})
 
