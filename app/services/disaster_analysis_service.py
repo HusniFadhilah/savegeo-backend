@@ -24,6 +24,7 @@ from app.services.gee_common import (
     _event_area_ha,
     create_geometry_from_payload,
     get_tile_url,
+    public_analysis_error,
 )
 from app.services.disaster_exposure_service import (
     compute_building_segmentation_candidate,
@@ -653,7 +654,7 @@ def run_analysis(db: Session, run_id: int, force: bool = False) -> dict:
         logger.exception("Disaster analysis run %s model %s failed", run_id, run.model_id)
         db.rollback()
         run.status = "failed"
-        run.error_message = str(exc)
+        run.error_message = public_analysis_error(exc) if isinstance(exc, AnalysisError) else "Analisis gagal. Coba lagi."
         run.completed_at = dt.datetime.now(dt.UTC)
         db.commit()
         if isinstance(exc, AnalysisError):

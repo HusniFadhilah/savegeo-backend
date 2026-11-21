@@ -31,6 +31,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.api.router import api_router
 from app.services.dmrv.errors import register_dmrv_error_handler
 from app.core.config import get_settings
+from app.core.logging_security import install_secret_redaction
 from app.core.version import get_product_version
 from app.core.cors import setup_cors
 from app.core.http import SecurityHeadersMiddleware
@@ -39,6 +40,7 @@ from app.services import gee_service
 from app.services.arcgis_service import configure_arcgis_from_db
 
 logging.basicConfig(level=logging.INFO)
+install_secret_redaction()
 logger = logging.getLogger(__name__)
 
 
@@ -143,7 +145,22 @@ def _problem_response(
 ):
     """Return RFC 9457-compatible JSON while retaining the legacy ``error`` key."""
     detail_text = detail if isinstance(detail, str) else "Request failed"
-    code = None
+    code = {
+        400: "bad_request",
+        401: "unauthorized",
+        403: "forbidden",
+        404: "not_found",
+        405: "method_not_allowed",
+        409: "conflict",
+        413: "payload_too_large",
+        422: "validation_error",
+        429: "rate_limited",
+        500: "internal_error",
+        501: "not_implemented",
+        502: "upstream_error",
+        503: "service_unavailable",
+        504: "upstream_timeout",
+    }.get(status_code, f"http_{status_code}")
     if isinstance(detail, dict):
         candidate = detail.get("code")
         if isinstance(candidate, str) and candidate.replace("_", "").isalnum() and len(candidate) <= 80:
@@ -165,8 +182,13 @@ def _problem_response(
     }
     if errors is not None:
         body["errors"] = jsonable_encoder(errors)
-    if code:
-        body["code"] = code
+    body["code"] = code
+    if (
+        isinstance(detail, dict)
+        and code in {"invalid_aoi", "invalid_year", "invalid_date_range", "invalid_cloud_threshold", "invalid_resolution", "analysis_preflight_blocked"}
+        and isinstance(detail.get("preflight"), dict)
+    ):
+        body["preflight"] = jsonable_encoder(detail["preflight"])
     return JSONResponse(
         status_code=status_code,
         content=body,

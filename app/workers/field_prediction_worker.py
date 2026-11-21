@@ -109,7 +109,9 @@ def _fail(session_factory, run_id: str, worker_id: str, exc: Exception) -> None:
             db.rollback()
             return
         row.worker_id, row.lease_expires_at = None, None
-        safe = str(exc)[:800] if isinstance(exc, AnalysisError) else "Ekstraksi Earth Engine gagal. Periksa layanan dan coba lagi."
+        # Background jobs may receive provider URLs, tokens, or internal paths.
+        # Keep those details in the protected server log, never in job status.
+        safe = "Ekstraksi Earth Engine gagal. Periksa layanan dan coba lagi."
         row.error = {"code": "field_prediction_failed", "message": safe, "retryable": retryable}
         if retryable and row.attempts < row.max_attempts:
             row.status = "queued"

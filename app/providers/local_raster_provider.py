@@ -25,9 +25,11 @@ from collections.abc import Callable
 from pathlib import Path
 import threading
 import time
+from urllib.parse import urlsplit
 
 import numpy as np
 
+from app.core.public_http import public_http
 from app.providers.feature_engineering_non_gee import NonGeeStack
 
 logger = logging.getLogger(__name__)
@@ -123,11 +125,40 @@ GDAL_HTTP_OPTS = {
     "VSI_CACHE": True,
     "VSI_CACHE_SIZE": 200_000_000,
     "GDAL_CACHEMAX": 200,
-    "GDAL_HTTP_MAX_RETRY": 3,
-    "GDAL_HTTP_RETRY_DELAY": 1,
-    "GDAL_HTTP_TIMEOUT": 30,
-    "GDAL_HTTP_CONNECTTIMEOUT": 10,
+    # Keep transport retry policy in public_http (one bounded retry for safe
+    # GETs); durable analysis jobs provide the higher-level backoff.
+    "GDAL_HTTP_MAX_RETRY": 0,
+    "GDAL_HTTP_TIMEOUT": 20,
+    "GDAL_HTTP_CONNECTTIMEOUT": 5,
+    "GDAL_HTTP_NETRC": "NO",
+    # Never carry CDSE/provider bearer headers through an HTTP redirect.
+    "CPL_VSIL_CURL_AUTHORIZATION_HEADER_ALLOWED_IF_REDIRECT": "NO",
+    # Abort stalled remote range reads instead of letting a provider hold a worker.
+    "GDAL_HTTP_LOW_SPEED_LIMIT": 1,
+    "GDAL_HTTP_LOW_SPEED_TIME": 30,
 }
+MAX_GRID_PIXELS = 50_000_000
+
+
+def validate_remote_raster_url(path_or_url: str) -> str | None:
+    """Require remote rasters to use public HTTPS and return a safe log host."""
+    parsed = urlsplit(str(path_or_url))
+    if parsed.scheme not in {"http", "https"}:
+        return None
+    try:
+        _, hostname, _ = public_http.validate_public_destination(str(path_or_url))
+    except (ValueError, OSError) as exc:
+        raise ValueError("Remote raster must use a public HTTPS destination.") from exc
+    return hostname
+
+
+def raster_provider_guard(hostname: str | None):
+    """Share the public provider circuit breaker with GDAL/libcurl reads."""
+    from contextlib import nullcontext
+
+    if not hostname:
+        return nullcontext()
+    return public_http.provider_guard(hostname)
 
 
 class GridSpec:
@@ -159,6 +190,8 @@ class GridSpec:
         self.transform = transform
         self.width = int(width)
         self.height = int(height)
+        if self.width <= 0 or self.height <= 0 or self.width * self.height > MAX_GRID_PIXELS:
+            raise ValueError(f"Raster grid exceeds the {MAX_GRID_PIXELS:,}-pixel workload limit.")
         self.shape = (self.height, self.width)
 
     def to_affine_and_shape(self):
@@ -188,8 +221,10 @@ def load_raster_to_grid(
     resampling_enum = getattr(Resampling, resampling)
     env_opts = dict(GDAL_HTTP_OPTS) if str(path_or_url).startswith("http") else {}
     env_opts.update(http_options or {})
+    safe_host = None
     try:
-        with rasterio.Env(**env_opts), rasterio.open(path_or_url) as src:
+        safe_host = validate_remote_raster_url(path_or_url)
+        with raster_provider_guard(safe_host), rasterio.Env(**env_opts), rasterio.open(path_or_url) as src:
             nodata = src.nodata if src_nodata is None else src_nodata
             with WarpedVRT(
                 src,
@@ -207,7 +242,8 @@ def load_raster_to_grid(
         if http_options is not None:
             logger.warning("Configured carbon raster could not be read (%s)", type(exc).__name__)
         else:
-            logger.warning(f"load_raster_to_grid: could not read '{path_or_url}': {exc}")
+            logger.warning("load_raster_to_grid: remote/local raster unavailable host=%s error_type=%s",
+                           safe_host or "local", type(exc).__name__)
         return None
 
 
@@ -535,7 +571,8 @@ def render_carbon_reference_tile(
     for url in urls:
         _tile_stat("source_reads")
         try:
-            with rasterio.Env(**{**GDAL_HTTP_OPTS, **http_options}), rasterio.open(url) as src:
+            raster_host = validate_remote_raster_url(url)
+            with raster_provider_guard(raster_host), rasterio.Env(**{**GDAL_HTTP_OPTS, **http_options}), rasterio.open(url) as src:
                 src_nodata = meta.get("nodata") if meta.get("nodata") is not None else src.nodata
                 with WarpedVRT(
                     src,

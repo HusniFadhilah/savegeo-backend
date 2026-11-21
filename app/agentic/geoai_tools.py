@@ -25,8 +25,10 @@ turn's tool-calling loop.
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime
+import json
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -132,14 +134,14 @@ GEOAI_TOOLS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {
                 "metric": {"type": "string", "enum": ["vegetation_change", "landcover_transition"]},
-                "from_year": {"type": "integer", "description": "Start year of the comparison period."},
-                "to_year": {"type": "integer", "description": "End year of the comparison period."},
+                "from_year": {"type": "integer", "minimum": 1984, "maximum": 2200, "description": "Start year of the comparison period."},
+                "to_year": {"type": "integer", "minimum": 1984, "maximum": 2200, "description": "End year of the comparison period."},
                 "index": {"type": "string", "description": "Vegetation index to use (metric=vegetation_change only). Default NDVI."},
                 "direction": {"type": "string", "enum": ["decline", "increase", "any"], "description": "metric=vegetation_change only. Default decline (vegetation loss)."},
-                "threshold": {"type": "number", "description": "Change threshold that defines a 'hotspot' pixel. Default -0.2 for decline, 0.2 for increase."},
+                "threshold": {"type": "number", "minimum": -2, "maximum": 2, "description": "Change threshold that defines a 'hotspot' pixel. Default -0.2 for decline, 0.2 for increase."},
                 "dataset": {"type": "string", "description": "Land cover dataset key (metric=landcover_transition only)."},
-                "top_n": {"type": "integer", "description": "Max ranked polygons to return, default 10, max 100."},
-                "min_area_ha": {"type": "number", "description": "Drop polygons smaller than this many hectares, default 1."},
+                "top_n": {"type": "integer", "minimum": 1, "maximum": 25, "description": "Max ranked polygons to return, default 10, max 25."},
+                "min_area_ha": {"type": "number", "minimum": 0, "maximum": 1_000_000, "description": "Drop polygons smaller than this many hectares, default 1."},
             },
             "required": ["metric", "from_year", "to_year"],
         },
@@ -551,9 +553,9 @@ def find_hotspots(
             }
 
         return {"error": f"Unknown metric '{metric}'."}
-    except Exception as exc:  # noqa: BLE001 - surfaced to the model as a tool error, not fabricated data
-        logger.warning("find_hotspots tool failed: %s", exc)
-        return {"available": False, "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001 - keep provider details out of tool output
+        logger.warning("find_hotspots failed error_type=%s", type(exc).__name__)
+        return {"available": False, "error": "The hotspot service is temporarily unavailable."}
 
 
 def get_hotspot_detail(tool_ctx: dict, hotspot_id: str) -> dict[str, Any]:
@@ -582,6 +584,51 @@ TOOL_REGISTRY: dict[str, Callable[..., dict[str, Any]]] = {
     "get_hotspot_detail": get_hotspot_detail,
 }
 
+_TOOL_SCHEMAS = {item["name"]: item["parameters"] for item in GEOAI_TOOLS}
+_MAX_AGENT_TOOL_CALLS = 12
+_MAX_AGENT_TOOL_ARGUMENT_BYTES = 16 * 1024
+_MAX_AGENT_TOOL_RESULT_BYTES = 256 * 1024
+_MAX_AGENT_WALL_SECONDS = 90
+
+
+def _tool_arguments_error(name: str, args: object) -> str | None:
+    if not isinstance(args, dict):
+        return "Tool arguments must be an object."
+    try:
+        encoded = json.dumps(args, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return "Tool arguments must contain valid JSON values."
+    if len(encoded.encode("utf-8")) > _MAX_AGENT_TOOL_ARGUMENT_BYTES:
+        return "Tool arguments exceed the supported size."
+
+    schema = _TOOL_SCHEMAS.get(name, {})
+    properties = schema.get("properties", {})
+    if set(args) - set(properties):
+        return "Tool arguments include unsupported fields."
+    missing = set(schema.get("required", ())) - set(args)
+    if missing:
+        return "Required tool arguments are missing."
+    for key, value in args.items():
+        rule = properties[key]
+        kind = rule.get("type")
+        valid_type = (
+            kind == "string" and isinstance(value, str)
+            or kind == "integer" and isinstance(value, int) and not isinstance(value, bool)
+            or kind == "number" and isinstance(value, (int, float)) and not isinstance(value, bool)
+        )
+        if not valid_type:
+            return "A tool argument has the wrong type."
+        if "enum" in rule and value not in rule["enum"]:
+            return "A tool argument is outside its allowed values."
+        if isinstance(value, (int, float)):
+            if "minimum" in rule and value < rule["minimum"] or "maximum" in rule and value > rule["maximum"]:
+                return "A numeric tool argument is outside its allowed range."
+        if isinstance(value, str) and len(value) > 256:
+            return "A text tool argument is too long."
+    if name == "find_hotspots" and args["from_year"] >= args["to_year"]:
+        return "The hotspot comparison period is invalid."
+    return None
+
 
 def execute_geoai_tool(name: str, args: dict, tool_ctx: dict) -> dict[str, Any]:
     """Dispatch a model-issued tool call to its whitelisted implementation.
@@ -592,6 +639,9 @@ def execute_geoai_tool(name: str, args: dict, tool_ctx: dict) -> dict[str, Any]:
     fn = TOOL_REGISTRY.get(name)
     if not fn:
         return {"error": f"Tool '{name}' is not whitelisted."}
+    error = _tool_arguments_error(name, args)
+    if error:
+        return {"error": error}
     allowed = tool_ctx.get("allowed_features")
     if allowed is not None:
         required: str | None = {
@@ -624,13 +674,15 @@ def execute_geoai_tool(name: str, args: dict, tool_ctx: dict) -> dict[str, Any]:
                 "disaster": "app.feature.disaster_mapping",
             }
             if kind == "all":
-                safe_args = dict(args or {})
-                result = fn(tool_ctx, **safe_args)
+                # Query only authorized result families. Calling the legacy
+                # all-results branch first would read unauthorized results
+                # before filtering them out of the response.
                 safe_results = {
-                    key: value for key, value in result.items()
-                    if key in kind_features and kind_features[key] in allowed
+                    key: fn(tool_ctx, kind=key)
+                    for key, feature in kind_features.items()
+                    if feature in allowed
                 }
-                direct_result = result.get("direct")
+                direct_result = fn(tool_ctx, kind="direct") if "app.feature.carbon_stock" in allowed else None
                 direct_layers = filter_direct_reference_layers(
                     direct_result.get("data") if isinstance(direct_result, dict) else None,
                     allowed,
@@ -643,6 +695,8 @@ def execute_geoai_tool(name: str, args: dict, tool_ctx: dict) -> dict[str, Any]:
                         "period": _direct_reference_period(direct_layers),
                     }
                     safe_results["direct"] = safe_direct
+                if not safe_results:
+                    return {"error": "Akses ke data fitur ini tidak diizinkan."}
                 return safe_results
             if kind == "direct":
                 direct_result = fn(tool_ctx, **(args or {}))
@@ -662,10 +716,24 @@ def execute_geoai_tool(name: str, args: dict, tool_ctx: dict) -> dict[str, Any]:
             required = kind_features.get(kind, "invalid")
         if required and required not in allowed:
             return {"error": "Akses ke data fitur ini tidak diizinkan."}
+    deadline = tool_ctx.get("_deadline_monotonic")
+    if isinstance(deadline, (int, float)) and time.monotonic() >= deadline:
+        return {"available": False, "error": "Agent time budget exhausted. Narrow the request and try again."}
+    budget = tool_ctx.setdefault("_budget", {"calls": 0})
+    if budget.get("calls", 0) >= _MAX_AGENT_TOOL_CALLS:
+        return {"error": "Tool-call budget exhausted. Ask the user to narrow the request."}
+    budget["calls"] = budget.get("calls", 0) + 1
     try:
-        return fn(tool_ctx, **(args or {}))
-    except TypeError as exc:
-        return {"error": f"Invalid arguments for tool '{name}': {exc}"}
+        result = fn(tool_ctx, **args)
+        if isinstance(deadline, (int, float)) and time.monotonic() >= deadline:
+            return {"available": False, "error": "Agent time budget exhausted. Narrow the request and try again."}
+        encoded_result = json.dumps(result, ensure_ascii=False, allow_nan=False, default=str)
+        if len(encoded_result.encode("utf-8")) > _MAX_AGENT_TOOL_RESULT_BYTES:
+            return {"available": False, "error": "Tool output exceeds the supported size. Narrow the area or request fewer results."}
+        return result
+    except (TypeError, ValueError) as exc:
+        logger.info("geoai tool rejected input name=%s error_type=%s", name, type(exc).__name__)
+        return {"error": "Tool input is invalid. Check the requested values and try again."}
     except Exception as exc:  # noqa: BLE001
-        logger.warning("geoai tool '%s' failed: %s", name, exc)
-        return {"error": str(exc)}
+        logger.warning("geoai tool failed name=%s error_type=%s", name, type(exc).__name__)
+        return {"available": False, "error": "The requested data service is temporarily unavailable."}

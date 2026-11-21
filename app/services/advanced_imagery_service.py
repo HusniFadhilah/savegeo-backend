@@ -113,7 +113,9 @@ def spectral_profile(data: dict[str, Any]) -> dict[str, Any]:
     from app.services import imagery_service
 
     href = imagery_service._readable_stac_asset_href(item_url, asset_key, provider_key)
-    with rasterio.open(href) as source:
+    from app.providers.local_raster_provider import GDAL_HTTP_OPTS, raster_provider_guard, validate_remote_raster_url
+    raster_host = validate_remote_raster_url(href)
+    with raster_provider_guard(raster_host), rasterio.Env(**GDAL_HTTP_OPTS), rasterio.open(href) as source:
         if source.crs is None:
             raise AnalysisError("Asset hyperspectral tidak memiliki CRS", 422)
         source_x, source_y = transform_coordinates("EPSG:4326", source.crs, [longitude], [latitude])

@@ -30,8 +30,8 @@ import math
 from typing import Any
 
 import ee
-import httpx
-
+import requests
+from app.core.public_http import public_http
 from app.services.gee_common import AnalysisError
 
 logger = logging.getLogger(__name__)
@@ -168,7 +168,7 @@ def _weather_gee(aoi, start_date: str, end_date: str, historical_years: int) -> 
 
 def _openmeteo_daily(lat: float, lon: float, start_date: str, end_date: str) -> dict[str, Any]:
     try:
-        resp = httpx.get(
+        resp = public_http.get(
             _OPENMETEO_ARCHIVE_URL,
             params={
                 "latitude": lat,
@@ -181,8 +181,8 @@ def _openmeteo_daily(lat: float, lon: float, start_date: str, end_date: str) -> 
             timeout=20,
         )
         resp.raise_for_status()
-    except httpx.HTTPError as exc:
-        raise AnalysisError(f"Gagal mengambil data Open-Meteo: {exc}", 502) from exc
+    except (requests.RequestException, ValueError) as exc:
+        raise AnalysisError("Gagal mengambil data Open-Meteo.", 502) from exc
     return resp.json().get("daily", {})
 
 

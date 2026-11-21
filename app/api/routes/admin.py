@@ -15,6 +15,7 @@ import math
 import os
 import re
 import tempfile
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
@@ -22,15 +23,16 @@ from pathlib import Path
 from threading import BoundedSemaphore
 from urllib.parse import urlparse
 
-import requests
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.concurrency import run_in_threadpool
-from sqlalchemy import inspect as sa_inspect, select, text
+from sqlalchemy import MetaData, Table, inspect as sa_inspect, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core import auth_throttle
+from app.core.public_http import public_http, requests as safe_requests
 from app.core.config import get_settings
+from app.core.bounded_json import read_bounded_json_object
 from app.core.default_configs import is_sensitive_config_key
 from app.core.security import (
     admin_has_permission,
@@ -440,7 +442,7 @@ async def update_arcgis_config(
     db: Session = Depends(get_db),
 ):
     """Save ArcGIS connection options and an optional write-only API key."""
-    body = await request.json()
+    body = await read_bounded_json_object(request)
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="ArcGIS settings must be a JSON object")
 
@@ -522,7 +524,7 @@ def config_by_category(category: str, admin: AdminUser = Depends(require_permiss
 
 @router.put("/config")
 async def config_update(request: Request, admin: AdminUser = Depends(require_permission("config.write")), db: Session = Depends(get_db)):
-    body = await request.json()
+    body = await read_bounded_json_object(request)
     if isinstance(body, dict) and "updates" in body and isinstance(body["updates"], list):
         items = [(u["key"], u.get("value")) for u in body["updates"]]
     else:
@@ -695,13 +697,12 @@ def admin_models_list(
         selected_columns = [name for name in legacy_columns if name in model_columns]
         if "id" not in selected_columns:
             raise HTTPException(status_code=503, detail="Model catalog schema is unavailable")
-        sql_columns = ", ".join(f'"{name}"' for name in selected_columns)
-        where_clause = ' WHERE "model_type" = :model_type' if model_type and "model_type" in model_columns else ""
+        legacy_table = Table("uploaded_models", MetaData(), autoload_with=db.get_bind())
+        statement = select(*(legacy_table.c[name] for name in selected_columns))
+        if model_type and "model_type" in model_columns:
+            statement = statement.where(legacy_table.c.model_type == model_type)
         order_column = "updated_at" if "updated_at" in model_columns else "uploaded_at" if "uploaded_at" in model_columns else "id"
-        raw_rows = db.execute(
-            text(f'SELECT {sql_columns} FROM uploaded_models{where_clause} ORDER BY "{order_column}" DESC'),
-            {"model_type": model_type} if where_clause else {},
-        ).mappings().all()
+        raw_rows = db.execute(statement.order_by(legacy_table.c[order_column].desc())).mappings().all()
 
         def decode_json_value(value, default):
             for _ in range(2):
@@ -1327,6 +1328,10 @@ _OVERPASS_SERVERS = [
     "https://overpass.kumi.systems/api/interpreter",
     "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
 ]
+_OVERPASS_IMPORT_DEADLINE_S = 240
+_OVERPASS_MAX_CONCURRENT_REQUESTS = 4
+_OVERPASS_RESPONSE_LIMIT_BYTES = 32 * 1024 * 1024
+_overpass_semaphore = BoundedSemaphore(_OVERPASS_MAX_CONCURRENT_REQUESTS)
 
 # Area-like OSM objects only. The importer stores company boundaries/AOIs, so
 # point-only company offices are intentionally not imported here.
@@ -1515,6 +1520,8 @@ def admin_companies_list(
     industry_type: str | None = None,
     province: str | None = None,
     search: str | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0, le=100_000),
     admin: AdminUser = Depends(require_permission("company.read")),
     db: Session = Depends(get_db),
 ):
@@ -1535,8 +1542,16 @@ def admin_companies_list(
             searchable_columns=[CompanyBoundary.name, CompanyBoundary.company_name, CompanyBoundary.province],
         )
 
-    companies = query.all()
-    return {"companies": [c.to_dict() for c in companies], "count": len(companies)}
+    total = query.order_by(None).count()
+    companies = query.offset(offset).limit(limit).all()
+    return {
+        "companies": [c.to_dict() for c in companies],
+        "count": len(companies),
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "has_more": offset + len(companies) < total,
+    }
 
 
 @router.get("/companies/provinces")
@@ -1575,7 +1590,7 @@ async def admin_company_create(
         elif form.get("geojson_text"):
             geojson_raw = str(form.get("geojson_text"))
     else:
-        data = await request.json()
+        data = await read_bounded_json_object(request)
         name = str(data.get("name") or "").strip()
         industry_type = str(data.get("industry_type") or "").strip()
         company_name = str(data.get("company_name") or "").strip()
@@ -1637,7 +1652,7 @@ async def admin_company_update(
     company = db.get(CompanyBoundary, cid)
     if not company:
         raise HTTPException(status_code=404, detail="Company not found")
-    data = await request.json()
+    data = await read_bounded_json_object(request)
     for field in ("name", "company_name", "industry_type", "sub_type", "province", "district", "description"):
         if field in data:
             setattr(company, field, data[field])
@@ -1668,29 +1683,40 @@ def admin_company_delete(cid: int, admin: AdminUser = Depends(require_permission
 
 def _fetch_osm_overpass(overpass_query: str) -> tuple[dict | None, str]:
     """Try Overpass mirrors in order; queries are split by industry before this call."""
+    deadline = time.monotonic() + _OVERPASS_IMPORT_DEADLINE_S
+    if not _overpass_semaphore.acquire(timeout=5):
+        return None, "Overpass import capacity is busy; retry later"
     failures = []
-    for server in _OVERPASS_SERVERS:
-        try:
-            resp = requests.post(
-                server,
-                data={"data": overpass_query},
-                headers={"User-Agent": "SaveGeo company-boundary importer/1.0"},
-                timeout=(15, _OVERPASS_QUERY_TIMEOUT_S + 30),
-            )
-            if resp.status_code == 200:
-                payload = resp.json()
-                if not isinstance(payload, dict):
-                    failures.append(f"{server}: respons JSON bukan objek")
-                    continue
-                if payload.get("remark") and not payload.get("elements"):
-                    failures.append(f"{server}: {str(payload['remark'])[:200]}")
-                    continue
-                return payload, ""
-            failures.append(f"HTTP {resp.status_code} dari {server}")
-        except (requests.RequestException, ValueError, TypeError) as exc:
-            failures.append(f"{server}: {str(exc)[:200]}")
-        logger.info("Overpass endpoint %s gagal; mencoba mirror berikutnya", server)
-    return None, " | ".join(failures)
+    try:
+        for server in _OVERPASS_SERVERS:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                failures.append("Total Overpass import deadline exceeded")
+                break
+            try:
+                resp = public_http.post(
+                    server,
+                    data={"data": overpass_query},
+                    headers={"User-Agent": "SaveGeo/1.0 company-boundary importer"},
+                    timeout=min(60, remaining),
+                    max_bytes=_OVERPASS_RESPONSE_LIMIT_BYTES,
+                )
+                if resp.status_code == 200:
+                    payload = resp.json()
+                    if not isinstance(payload, dict):
+                        failures.append("Overpass returned a non-object JSON response")
+                        continue
+                    if payload.get("remark") and not payload.get("elements"):
+                        failures.append("Overpass query was rejected or timed out")
+                        continue
+                    return payload, ""
+                failures.append(f"HTTP {resp.status_code} from Overpass")
+            except (safe_requests.RequestException, ValueError, TypeError) as exc:
+                failures.append(f"Overpass request failed: {type(exc).__name__}")
+            logger.info("Overpass mirror failed; trying next configured mirror")
+        return None, " | ".join(failures)
+    finally:
+        _overpass_semaphore.release()
 
 
 # A single nationwide Overpass query per industry exceeds the public servers'
@@ -1865,7 +1891,7 @@ async def admin_companies_import_osm(
 ):
     """Queue an OSM import so Overpass latency cannot hold open the gateway request."""
     try:
-        data = await request.json()
+        data = await read_bounded_json_object(request)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Body JSON tidak valid") from exc
     if not isinstance(data, dict):
@@ -2023,7 +2049,7 @@ async def admin_imagery_provider_update(
 ):
     if key not in imagery_provider_repo.provider_catalog():
         raise HTTPException(status_code=404, detail="Provider citra tidak ditemukan")
-    payload = await request.json()
+    payload = await read_bounded_json_object(request)
     if not isinstance(payload, dict):
         raise HTTPException(status_code=422, detail="Payload harus berupa objek")
     allowed = {
@@ -2064,7 +2090,7 @@ async def admin_imagery_provider_connection_update(
 ):
     if key not in COMMERCIAL_PROVIDER_KEYS:
         raise HTTPException(status_code=404, detail="Provider ini tidak memiliki konfigurasi koneksi komersial")
-    payload = await request.json()
+    payload = await read_bounded_json_object(request)
     if not isinstance(payload, dict):
         raise HTTPException(status_code=422, detail="Payload harus berupa objek")
     if (payload.get("credential") or payload.get("clear_credential")) and not admin_has_permission(admin, "secret.write"):
@@ -2145,11 +2171,10 @@ def openrouter_models(
     now = _time.time()
     if not _OR_MODEL_CACHE["data"] or now - _OR_MODEL_CACHE["ts"] > _OR_CACHE_TTL:
         try:
-            import requests
-
-            r = requests.get(
+            r = public_http.get(
                 "https://openrouter.ai/api/v1/models",
                 timeout=10,
+                max_bytes=8 * 1024 * 1024,
                 headers={"User-Agent": "SaveGeo/1.0"},
             )
             r.raise_for_status()

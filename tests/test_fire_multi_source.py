@@ -79,7 +79,7 @@ class FireMultiSourceTests(unittest.TestCase):
     def test_missing_key_does_not_request(self):
         with (
             patch.object(fire, "get_settings", return_value=SimpleNamespace(nasa_firms_map_key="")),
-            patch.object(fire.requests, "get") as get,
+            patch.object(fire.public_http, "get") as get,
         ):
             self.assertEqual(
                 fire._fetch_firms("firms_modis", [], date(2026, 1, 1), date(2026, 1, 1))["status"],

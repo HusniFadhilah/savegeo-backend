@@ -11,7 +11,9 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import require_ee
 from app.core.viewer_features import require_feature
+from app.core.bounded_json import read_typed_json_object
 from app.db.session import get_db
+from app.schemas.analysis_jobs import AnalysisPayload
 from app.services import vegetation_service
 from app.services.gee_common import AnalysisError, public_analysis_error
 
@@ -21,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 @router.post("/timeseries", dependencies=[Depends(require_feature("app.feature.vegetation_indices")), Depends(require_ee)])
 async def analyze_timeseries(request: Request, db: Session = Depends(get_db)):
-    data = await request.json()
+    data = await read_typed_json_object(request, AnalysisPayload)
     try:
         return await run_in_threadpool(vegetation_service.analyze_timeseries, db, data)
     except AnalysisError as e:

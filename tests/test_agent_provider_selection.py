@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -128,6 +129,61 @@ def test_ollama_outage_falls_back_to_healthy_allowed_provider_and_keeps_session(
     assert result["session_id"]  # conversation persisted
 
 
+@pytest.mark.parametrize(
+    ("primary_provider", "primary_model", "fallback_provider", "fallback_model"),
+    [
+        ("anthropic", "claude-3-5-sonnet-20241022", "openrouter", "openai/gpt-4o-mini"),
+        ("deepseek", "deepseek-chat", "openrouter", "openai/gpt-4o-mini"),
+        ("gemini", "gemini-2.5-flash", "openrouter", "openai/gpt-4o-mini"),
+        ("openai", "gpt-4o-mini", "openrouter", "openai/gpt-4o-mini"),
+        ("openrouter", "openai/gpt-4o-mini", "deepseek", "deepseek-chat"),
+        ("ollama", "qwen3:8b", "openrouter", "openai/gpt-4o-mini"),
+        ("opencode", "opencode/test-model", "openrouter", "openai/gpt-4o-mini"),
+    ],
+)
+def test_each_supported_provider_falls_back_once_on_transient_outage(
+    db_session, monkeypatch, primary_provider, primary_model, fallback_provider, fallback_model
+):
+    cfg = {
+        "provider": primary_provider,
+        "model": primary_model,
+        "fallback_provider": fallback_provider,
+        "fallback_model": fallback_model,
+        "ollama_base_url": "http://localhost:11434/v1",
+        "opencode_base_url": "http://localhost:4096/v1",
+        "allowed_models": [
+            {"provider": primary_provider, "model": primary_model},
+            {"provider": fallback_provider, "model": fallback_model},
+        ],
+    }
+    monkeypatch.setattr(
+        providers,
+        "check_provider_health",
+        lambda provider, _cfg, model, **_kwargs: {"provider": provider, "model": model, "status": "ok"},
+    )
+    calls = []
+
+    def plan(*_args):
+        provider = agentic_ai._get_ai_config()["provider"]
+        calls.append(provider)
+        if provider == primary_provider:
+            raise ConnectionError("temporary provider outage")
+        return {"message": "fallback response", "actions": []}
+
+    result, status, _ = _control(db_session, monkeypatch, {}, plan=plan, cfg=cfg)
+
+    assert status == 200
+    assert calls == [primary_provider, fallback_provider]
+    assert result["message"] == "fallback response"
+    assert result["ai"] == {
+        "provider": fallback_provider,
+        "model": fallback_model,
+        "fallback_used": True,
+        "fallback_from": primary_provider,
+        "fallback_reason": "provider_unavailable",
+    }
+
+
 def test_known_down_ollama_is_skipped_without_a_new_request(db_session, monkeypatch):
     providers.mark_unavailable("ollama", CFG, "qwen3:8b", "unreachable")
     calls = []
@@ -173,3 +229,21 @@ def test_non_availability_errors_do_not_trigger_fallback(db_session, monkeypatch
 def test_ai_selection_context_is_reset_after_request(db_session, monkeypatch):
     _control(db_session, monkeypatch, {}, plan=lambda *a, **k: {"message": "ok", "actions": []})
     assert agentic_ai._AI_SELECTION.get() is None
+
+
+def test_plan_endpoint_uses_shared_per_account_quota(db_session, monkeypatch):
+    monkeypatch.setattr(rate_limiter, "get_limits", lambda: {"max_chars": 4000})
+    monkeypatch.setattr(rate_limiter, "check", lambda owner: (False, "limited", 17))
+    monkeypatch.setattr(agent_service, "build_capabilities_document", lambda *_args: pytest.fail("must not build a plan"))
+    with pytest.raises(HTTPException) as error:
+        agent_service.run_agent_analyze(db_session, _request(), {"message": "plan"}, set(), "user:9")
+    assert error.value.status_code == 429
+    assert error.value.headers["Retry-After"] == "17"
+
+
+def test_plan_endpoint_enforces_configured_prompt_limit(db_session, monkeypatch):
+    monkeypatch.setattr(rate_limiter, "get_limits", lambda: {"max_chars": 4})
+    monkeypatch.setattr(rate_limiter, "check", lambda _owner: pytest.fail("quota should not be consumed"))
+    with pytest.raises(HTTPException) as error:
+        agent_service.run_agent_analyze(db_session, _request(), {"message": "too long"}, set(), "user:9")
+    assert error.value.status_code == 413

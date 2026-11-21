@@ -13,9 +13,8 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-import requests
-
 from app.core.config import get_settings
+from app.core.public_http import public_http
 
 INDONESIA_BBOX = (94.0, -12.0, 142.0, 8.0)
 
@@ -167,7 +166,9 @@ class RegionBoundaryProvider:
         params = {"is_for_dropdown": 1}
         if parent_code:
             params["parent_code"] = parent_code
-        response = requests.get(f"{self.base_url}/{level}", params=params, timeout=self.timeout)
+        response = public_http.get(
+            f"{self.base_url}/{level}", params=params, timeout=self.timeout, max_bytes=16 * 1024 * 1024,
+        )
         response.raise_for_status()
         payload = response.json()
         return payload.get("data", payload) if isinstance(payload, dict) else payload
@@ -178,7 +179,9 @@ class RegionBoundaryProvider:
         params = {"code": code, "is_dropdown": 0}
         if parent_code:
             params["parent_code"] = parent_code
-        response = requests.get(f"{self.base_url}/{level}", params=params, timeout=self.timeout)
+        response = public_http.get(
+            f"{self.base_url}/{level}", params=params, timeout=self.timeout, max_bytes=32 * 1024 * 1024,
+        )
         response.raise_for_status()
         payload = response.json()
         region = payload.get("data", {}).get("region") if isinstance(payload, dict) else None

@@ -1,8 +1,73 @@
 from __future__ import annotations
 
 import pytest
+import requests
 
 from app.services import ai_provider_service as svc
+
+
+def test_default_http_bounds_ollama_probe_and_disables_redirects(monkeypatch):
+    calls = {}
+
+    class Response:
+        status_code = 200
+        headers = {"Content-Length": "7"}
+
+        def iter_content(self, chunk_size):
+            calls["chunk_size"] = chunk_size
+            yield b'{"ok":'
+            yield b"true}"
+
+        def close(self):
+            calls["closed"] = True
+
+    def fake_request(method, url, **kwargs):
+        calls.update(method=method, url=url, **kwargs)
+        return Response()
+
+    monkeypatch.setattr(requests, "request", fake_request)
+    status, payload = svc._default_http("GET", "http://127.0.0.1:11434/api/tags")
+
+    assert (status, payload) == (200, {"ok": True})
+    assert calls["stream"] is True and calls["allow_redirects"] is False
+    assert calls["chunk_size"] == 64 * 1024 and calls["closed"] is True
+
+
+def test_default_http_rejects_oversized_ollama_probe(monkeypatch):
+    class Response:
+        status_code = 200
+        headers = {"Content-Length": str(svc._MAX_PROVIDER_PROBE_BYTES + 1)}
+
+        def close(self):
+            self.closed = True
+
+    response = Response()
+    monkeypatch.setattr(requests, "request", lambda *_args, **_kwargs: response)
+    with pytest.raises(ValueError, match="size limit"):
+        svc._default_http("GET", "http://127.0.0.1:11434/api/tags")
+    assert response.closed is True
+
+
+def test_default_http_uses_pinned_transport_for_known_cloud_probe(monkeypatch):
+    from app.core.public_http import public_http
+
+    calls = {}
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"data": []}
+
+    def fake_request(*args, **kwargs):
+        calls.update(args=args, kwargs=kwargs)
+        return Response()
+
+    monkeypatch.setattr(public_http, "request", fake_request)
+    status, payload = svc._default_http("GET", "https://api.openai.com/v1/models")
+
+    assert (status, payload) == (200, {"data": []})
+    assert calls["kwargs"]["max_bytes"] == svc._MAX_PROVIDER_PROBE_BYTES
 
 
 class FakeHttp:

@@ -12,8 +12,9 @@ import requests
 from playwright.sync_api import expect, sync_playwright
 
 ROOT = Path(__file__).parent
-SHOTS = ROOT / "shots"  # git-ignored output
-SHOTS.mkdir(exist_ok=True)
+OUTPUT_DIR = Path(os.environ.get("DMRV_E2E_OUTPUT_DIR", str(ROOT))).resolve()
+SHOTS = OUTPUT_DIR / "shots"  # generated test evidence, separate from source by default
+SHOTS.mkdir(parents=True, exist_ok=True)
 APP = "http://localhost:5501"
 API = "http://127.0.0.1:8086/api"
 PASSWORD = "E2e-Passw0rd!"
@@ -144,7 +145,7 @@ with sync_playwright() as p:
     expect(page.get_by_text("Mg C/ha")).to_be_visible(timeout=15000)
     density_text = page.get_by_text(re.compile(r"\d+,\d\d Mg C/ha")).first.inner_text()
     check("density shown with unit", "Mg C/ha" in density_text, density_text)
-    check("area basis 'Asumsi' shown beside the density", page.get_by_text("dasar luas: Asumsi").count() == 1)
+    check("area basis 'Terukur' shown beside the density", page.get_by_text("dasar luas: Terukur").count() == 1)
     check("year-only visit labelled", page.get_by_text("2024 (hanya tahun)").count() == 1)
     shot(page, "09_field_density")
 
@@ -185,7 +186,9 @@ with sync_playwright() as p:
     # English
     page.evaluate("localStorage.setItem('savegeo_language','en')")
     page.goto(f"{APP}/dmrv/projects", wait_until="networkidle")
-    check("English heading after language switch", page.get_by_role("heading", name="dMRV projects").is_visible())
+    english_heading = page.get_by_role("heading", name="dMRV projects")
+    expect(english_heading).to_be_visible(timeout=15000)
+    check("English heading after language switch", english_heading.is_visible())
     shot(page, "12_projects_en")
 
     # mobile layout
@@ -229,7 +232,12 @@ with sync_playwright() as p:
     check("operator: boundary form hidden (read-only)", page.get_by_label("Alasan versi ini").count() == 0)
     shot(page, "15_operator_boundary_readonly")
     page.get_by_role("tab", name="Data lapangan").click()
-    check("operator: field import form available", page.get_by_label("Berkas CSV atau XLSX").is_visible())
+    operator_import_label = page.get_by_text("Berkas CSV atau XLSX", exact=True)
+    expect(operator_import_label).to_be_visible(timeout=15000)
+    check(
+        "operator: field import form available",
+        operator_import_label.is_visible(),
+    )
     shot(page, "16_operator_field")
     ctx.close()
     browser.close()
@@ -242,6 +250,6 @@ meta = {
     "results": results,
     "console_errors": console_errors,
 }
-(ROOT / "browser_e2e_report.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+(OUTPUT_DIR / "browser_e2e_report.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 print(f"\n{sum(r['passed'] for r in results)}/{len(results)} browser checks passed")
 sys.exit(1 if any(not r["passed"] for r in results) else 0)

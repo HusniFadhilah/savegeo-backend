@@ -71,6 +71,17 @@ jobs:
             echo "::warning::pip-audit could not reach its advisory service; retrying in 10 seconds (attempt $attempt/3)"
             sleep 10
           done
+          for attempt in 1 2 3; do
+            if pip-audit -r requirements-optional.lock --no-deps --disable-pip; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::pip-audit failed for optional model runtime dependencies after $attempt attempts"
+              exit 1
+            fi
+            echo "::warning::pip-audit could not complete the optional runtime audit; retrying in 10 seconds (attempt $attempt/3)"
+            sleep 10
+          done
           alembic upgrade head
           pytest
 

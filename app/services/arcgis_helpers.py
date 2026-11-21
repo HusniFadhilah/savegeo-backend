@@ -12,8 +12,7 @@ import logging
 import math
 from datetime import UTC, datetime
 
-import requests
-
+from app.core.public_http import public_http as requests
 from app.providers.arcgis_client import _is_allowed_domain, get_arcgis_client
 from app.registries.landcover_dataset_registry import LAND_COVER_LEGENDS
 

@@ -174,12 +174,14 @@ def test_viewer_without_role_features_fails_closed_when_role_lookup_is_empty():
 
 def test_viewer_api_gates_alternate_user_auth_and_analysis_payload(monkeypatch):
     from app.main import app
+    from app.db.models.geospatial_dataset import GeospatialDataset
 
     engine = create_engine(
         "sqlite://",
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
+    GeospatialDataset.__table__.create(engine)
     Role.__table__.create(engine)
     Permission.__table__.create(engine)
     role_permissions.create(engine)
@@ -296,15 +298,19 @@ def test_viewer_api_gates_alternate_user_auth_and_analysis_payload(monkeypatch):
         )
         assert denied_geospatial_dataset.status_code == 403
 
-        from app.api.routes import geospatial
+        from app.db.models.geospatial_dataset import GeospatialDataset
         carbon_dataset_id = "viewer-carbon-access-test"
         disaster_dataset_id = "viewer-disaster-access-test"
-        monkeypatch.setitem(geospatial._catalog, carbon_dataset_id, {
-            "id": carbon_dataset_id, "name": "Carbon test", "format": "cog", "module": "carbon",
-        })
-        monkeypatch.setitem(geospatial._catalog, disaster_dataset_id, {
-            "id": disaster_dataset_id, "name": "Disaster test", "format": "cog", "module": "disaster",
-        })
+        with local_sessions() as db:
+            db.add_all([
+                GeospatialDataset(id=carbon_dataset_id, document={
+                    "id": carbon_dataset_id, "name": "Carbon test", "format": "cog", "module": "carbon",
+                }, created_by="admin:test"),
+                GeospatialDataset(id=disaster_dataset_id, document={
+                    "id": disaster_dataset_id, "name": "Disaster test", "format": "cog", "module": "disaster",
+                }, created_by="admin:test"),
+            ])
+            db.commit()
         dataset_allowed = client.get(
             f"/api/geospatial/datasets/{carbon_dataset_id}",
             cookies={USER_SESSION_COOKIE: user_token},

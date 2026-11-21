@@ -67,7 +67,7 @@ def test_get_fires_uses_cache_and_never_returns_map_key(monkeypatch):
         calls.append((url, kwargs))
         return Response()
 
-    monkeypatch.setattr(firms_service.requests, "get", fake_get)
+    monkeypatch.setattr(firms_service.public_http, "get", fake_get)
     query = {
         "source": "VIIRS_NOAA20_NRT",
         "day_range": 1,
@@ -105,7 +105,7 @@ def test_get_fires_splits_ranges_longer_than_nasa_limit(monkeypatch):
         calls.append((url, kwargs))
         return Response()
 
-    monkeypatch.setattr(firms_service.requests, "get", fake_get)
+    monkeypatch.setattr(firms_service.public_http, "get", fake_get)
     result = firms_service.get_fires(
         source="VIIRS_NOAA20_NRT",
         day_range=7,
@@ -134,7 +134,7 @@ def test_get_fires_for_period_filters_sensor_and_confidence(monkeypatch):
         def raise_for_status(self):
             return None
 
-    monkeypatch.setattr(firms_service.requests, "get", lambda url, **kwargs: Response())
+    monkeypatch.setattr(firms_service.public_http, "get", lambda url, **kwargs: Response())
     result = firms_service.get_fires_for_period(
         source="VIIRS_NOAA20_NRT",
         from_date="2026-09-15",
@@ -161,7 +161,7 @@ def test_upstream_request_error_traceback_never_contains_map_key(monkeypatch, re
     def raise_with_url(url, **kwargs):
         raise exception_type(f"connection failed: {url}")
 
-    monkeypatch.setattr(firms_service.requests, "get", raise_with_url)
+    monkeypatch.setattr(firms_service.public_http, "get", raise_with_url)
     with pytest.raises(firms_service.FirmsRequestError) as captured:
         if request_kind == "area":
             firms_service._fetch_source_uncached(

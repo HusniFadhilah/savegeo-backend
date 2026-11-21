@@ -12,7 +12,7 @@ from pydantic import BaseModel, ValidationError
 T = TypeVar("T", bound=BaseModel)
 
 
-async def read_typed_json_object(request: Request, schema: type[T], *, max_bytes: int = 10 * 1024 * 1024) -> dict:
+async def read_bounded_json_object(request: Request, *, max_bytes: int = 10 * 1024 * 1024) -> dict:
     content_length = request.headers.get("content-length")
     if content_length:
         try:
@@ -49,6 +49,15 @@ async def read_typed_json_object(request: Request, schema: type[T], *, max_bytes
         elif isinstance(value, list):
             stack.extend((child, depth + 1) for child in value)
 
+    return payload
+
+
+async def read_typed_json_object(request: Request, schema: type[T], *, max_bytes: int = 10 * 1024 * 1024) -> dict:
+    payload = await read_bounded_json_object(request, max_bytes=max_bytes)
+    return validate_typed_json_object(payload, schema)
+
+
+def validate_typed_json_object(payload: dict, schema: type[T]) -> dict:
     try:
         parsed = schema.model_validate(payload)
     except ValidationError as exc:

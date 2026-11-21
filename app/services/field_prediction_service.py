@@ -66,11 +66,15 @@ def _plot_feature(row: CarbonFieldObservation, plot: FieldPlot | None) -> ee.Fea
         raw = row.raw or {}
         area_m2 = float(raw.get("plot_area_m2") or 0)
         longitude, latitude = float(raw["longitude"]), float(raw["latitude"])
-        radius = math.sqrt(area_m2 / math.pi)
-        if not math.isfinite(radius) or radius <= 0 or radius > 1000:
-            raise ValueError(f"Plot {raw.get('plot_id')} membutuhkan geometri; luas ekuivalen lingkaran harus 0–1.000 m radius.")
-        ee_geometry = ee.Geometry.Point([longitude, latitude]).buffer(radius, maxError=1)
-        support = "equal_area_circle_proxy"
+        side_m = math.sqrt(area_m2)
+        half_diagonal_m = side_m / math.sqrt(2)
+        if not math.isfinite(side_m) or side_m <= 0 or side_m > 2000:
+            raise ValueError(f"Plot {raw.get('plot_id')} membutuhkan geometri; sisi persegi ekuivalen harus 0–2.000 m.")
+        # If only the survey centroid and area are available, approximate a
+        # square plot aligned to north. This preserves the confirmed 20x20 m
+        # Bu Dessy plot area while keeping the assumption visible in provenance.
+        ee_geometry = ee.Geometry.Point([longitude, latitude]).buffer(half_diagonal_m, maxError=1).bounds(maxError=1)
+        support = "north_aligned_square_proxy"
     return ee.Feature(ee_geometry, {"observation_id": row.id, "support": support})
 
 
@@ -169,7 +173,7 @@ def run_field_prediction(db: Session, run_id: str, worker_id: str) -> None:
     parameters.update(prediction_source=source, prediction_snapshot_sha256=snapshot_sha256)
     locked_run.parameters = parameters
     locked_run.metrics = {
-        "status": "computed" if saved else "not_computed", "pool": parameters.get("pool"),
+        "status": "computed" if saved or reused else "not_computed", "pool": parameters.get("pool"),
         "analysis_year": analysis_year, "prediction_source": source,
         "model": {"id": model.id, "name": model.name, "version": model.version,
                   "artifact_sha256": model.artifact_sha256, "approval_digest": model.approval_digest},
@@ -177,9 +181,9 @@ def run_field_prediction(db: Session, run_id: str, worker_id: str) -> None:
         "predictions_saved": saved, "predictions_reused": reused,
         "without_valid_pixels": len(without_pixels), "without_valid_pixel_observation_ids": without_pixels,
         "prediction_snapshot_sha256": snapshot_sha256,
-        "support_note": "Geometri plot tersimpan digunakan bila tersedia; jika tidak, area plot didekati lingkaran dengan luas setara dari titik pusat.",
+        "support_note": "Batas plot tersimpan digunakan bila tersedia. Jika hanya centroid dan luas yang tersedia, plot didekati dengan persegi ekuivalen yang diarahkan utara; perkiraan ini bukan pengganti poligon survei.",
     }
-    locked_run.progress, locked_run.status = 100, "complete" if saved else "not_computed"
+    locked_run.progress, locked_run.status = 100, "complete" if saved or reused else "not_computed"
     locked_run.completed_at = now
     locked_run.worker_id = None
     locked_run.lease_expires_at = None

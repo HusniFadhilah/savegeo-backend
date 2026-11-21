@@ -6,13 +6,13 @@ import os
 import re
 import threading
 import time
+from itertools import islice
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
 from urllib.parse import urlencode, urlsplit
 
-import requests
-
+from app.core.public_http import public_http
 from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -282,7 +282,7 @@ def _resolve_planetary_computer_download(year: int | None = None) -> ChlorisDown
         raise ValueError("Dependency pystac-client/planetary-computer belum terpasang.")
 
     from pystac_client import Client
-    import planetary_computer
+    from app.core.stac_http import BoundedStacApiIO, sign_planetary_computer_href
 
     requested_year = int(year) if year is not None else PC_CHLORIS_YEAR_RANGE[1]
     if requested_year < PC_CHLORIS_YEAR_RANGE[0] or requested_year > PC_CHLORIS_YEAR_RANGE[1]:
@@ -291,13 +291,18 @@ def _resolve_planetary_computer_download(year: int | None = None) -> ChlorisDown
             f"{PC_CHLORIS_YEAR_RANGE[1]}; tahun yang diminta: {requested_year}."
         )
 
-    client = Client.open(PC_STAC_URL)
+    client = Client.open(
+        PC_STAC_URL,
+        stac_io=BoundedStacApiIO(allowed_hosts={"planetarycomputer.microsoft.com"}, max_pages=10),
+    )
     start = f"{requested_year}-01-01T00:00:00Z"
     end = f"{requested_year}-12-31T23:59:59Z"
-    items = list(client.search(
+    items = list(islice(client.search(
         collections=[PC_CHLORIS_COLLECTION],
         datetime=f"{start}/{end}",
-    ).items())
+        max_items=10,
+        limit=10,
+    ).items(), 10))
     if not items:
         raise ValueError(f"Tidak ada item STAC Chloris untuk tahun {requested_year}.")
 
@@ -306,10 +311,10 @@ def _resolve_planetary_computer_download(year: int | None = None) -> ChlorisDown
     if asset is None:
         raise ValueError(f"Item STAC Chloris '{item.id}' tidak memiliki asset biomass.")
 
-    signed_asset = planetary_computer.sign(asset)
+    signed_href = sign_planetary_computer_href(asset.href)
     item_year = item.datetime.year if item.datetime else requested_year
     return ChlorisDownload(
-        url=signed_asset.href,
+        url=signed_href,
         product=DEFAULT_PRODUCT,
         date=str(item_year),
         format="cog",
@@ -334,14 +339,15 @@ def _planetary_computer_chloris_item(year: int) -> tuple[str, float]:
             f"{PC_CHLORIS_YEAR_RANGE[1]}; tahun yang diminta: {requested_year}."
         )
 
-    response = requests.post(
+    response = public_http.post(
         f"{PC_STAC_URL}/search",
-        json={
+        json_body={
             "collections": [PC_CHLORIS_COLLECTION],
             "datetime": f"{requested_year}-01-01T00:00:00Z/{requested_year}-12-31T23:59:59Z",
             "limit": 10,
         },
         timeout=(5, 20),
+        max_bytes=16 * 1024 * 1024,
     )
     response.raise_for_status()
     items = response.json().get("features", [])
@@ -427,7 +433,9 @@ def _get_reporting_unit() -> dict[str, Any]:
     payload: dict[str, Any] = {"organizationId": settings.chloris_organization_id}
     if settings.chloris_reporting_unit_id:
         payload["reportingUnitId"] = settings.chloris_reporting_unit_id
-    response = requests.post(url, json=payload, headers=_auth_headers(), timeout=45)
+    response = public_http.post(
+        url, json_body=payload, headers=_auth_headers(), timeout=45, max_bytes=8 * 1024 * 1024,
+    )
     response.raise_for_status()
     data = response.json()
 
@@ -547,7 +555,10 @@ def _auth_headers() -> dict[str, str]:
 
 
 def _request_json(url: str) -> Any:
-    response = requests.get(url, headers=_auth_headers() if _is_chloris_origin(url) else {}, timeout=45)
+    response = public_http.get(
+        url, headers=_auth_headers() if _is_chloris_origin(url) else {}, timeout=45,
+        max_bytes=16 * 1024 * 1024,
+    )
     response.raise_for_status()
     return response.json()
 
@@ -567,7 +578,7 @@ def _refresh_id_token(refresh_token: str, _time_bucket: int = 0) -> str:
     api_info = _request_public_json(_join_url(settings.chloris_base_url, "api/info"))
     region = api_info.get("awsRegion")
     client_id = api_info.get("awsUserPoolWebClientId")
-    if not region or not client_id:
+    if not isinstance(region, str) or not re.fullmatch(r"[a-z]{2}(?:-[a-z]+)+-\d+", region) or not client_id:
         raise ValueError("Chloris /api/info tidak mengembalikan Cognito region/client id.")
 
     endpoint = f"https://cognito-idp.{region}.amazonaws.com/"
@@ -576,14 +587,15 @@ def _refresh_id_token(refresh_token: str, _time_bucket: int = 0) -> str:
         "ClientId": client_id,
         "AuthParameters": {"REFRESH_TOKEN": refresh_token},
     }
-    response = requests.post(
+    response = public_http.post(
         endpoint,
-        json=payload,
+        json_body=payload,
         headers={
             "Content-Type": "application/x-amz-json-1.1",
             "X-Amz-Target": "AWSCognitoIdentityProviderService.InitiateAuth",
         },
         timeout=45,
+        max_bytes=2 * 1024 * 1024,
     )
     response.raise_for_status()
     data = response.json()
@@ -594,7 +606,7 @@ def _refresh_id_token(refresh_token: str, _time_bucket: int = 0) -> str:
 
 
 def _request_public_json(url: str) -> Any:
-    response = requests.get(url, timeout=45)
+    response = public_http.get(url, timeout=45, max_bytes=4 * 1024 * 1024)
     response.raise_for_status()
     return response.json()
 

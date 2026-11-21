@@ -31,9 +31,7 @@ import logging
 import hashlib
 import re
 import secrets
-import socket
 import threading
-from ipaddress import ip_address
 from functools import lru_cache
 from typing import Any
 from urllib.parse import quote, urljoin, urlparse
@@ -51,6 +49,7 @@ from rio_tiler.io import Reader
 from rio_tiler.models import ImageData
 
 from app.core.config import get_settings
+from app.core.public_http import public_http
 from app.registries.imagery_provider_registry import (
     IMAGERY_PROVIDERS,
     provider_capabilities,
@@ -137,7 +136,7 @@ def _copernicus_geosave_service():
 
 
 def _copernicus_geosave_available() -> bool:
-    return find_spec("geosave_engine") is not None and _copernicus_geosave_service() is not None
+    return find_spec("pystac_client") is not None and _copernicus_geosave_service() is not None
 
 
 def get_imagery_provider_meta(key: str | None) -> dict[str, Any]:
@@ -149,7 +148,7 @@ def list_providers(settings=None) -> dict:
     """GET /imagery/providers - static (no GEE) catalog for the satellite picker."""
     providers = dict(IMAGERY_PROVIDERS)
     copernicus_service = _copernicus_geosave_service()
-    if find_spec("geosave_engine") is not None and copernicus_service is not None:
+    if find_spec("pystac_client") is not None and copernicus_service is not None:
         providers.update(copernicus_service.COPERNICUS_PROVIDERS)
     catalog = {}
     entries = list(providers.items())
@@ -263,11 +262,57 @@ def _url_origin(url: str) -> tuple[str, str | None, int | None]:
     return parsed.scheme.lower(), parsed.hostname.lower() if parsed.hostname else None, port
 
 
+def _public_httpx_request(
+    method: str,
+    url: str,
+    *,
+    client: httpx.Client | None = None,
+    params: dict[str, Any] | None = None,
+    json_body: dict[str, Any] | None = None,
+    timeout: float | None = None,
+    max_bytes: int = 4 * 1024 * 1024,
+    allow_redirect_status: bool = False,
+) -> httpx.Response:
+    """Use the pinned-IP public HTTPS transport for STAC and provider JSON."""
+    allowed_headers = {"accept", "user-agent", "content-type", "authorization", "x-amz-target"}
+    headers = {
+        str(key): str(value)
+        for key, value in (client.headers.items() if client is not None else [])
+        if str(key).lower() in allowed_headers
+    }
+    if timeout is None and client is not None:
+        timeout = getattr(client.timeout, "read", None)
+    timeout = float(timeout or 30)
+    request = httpx.Request(method.upper(), url, params=params)
+    try:
+        upstream = public_http.request(
+            method.upper(),
+            url,
+            params=params,
+            json_body=json_body,
+            timeout=timeout,
+            max_bytes=max_bytes,
+            headers=headers,
+            allow_redirect_status=allow_redirect_status,
+        )
+    except Exception as exc:  # noqa: BLE001 - provider details may contain signed URLs
+        raise httpx.RequestError("Bounded public HTTPS request failed", request=request) from exc
+    response = httpx.Response(
+        status_code=upstream.status_code,
+        headers=dict(upstream.headers),
+        content=upstream.content,
+        request=request,
+    )
+    if response.status_code >= 400:
+        raise httpx.HTTPStatusError("Public provider returned an HTTP error", request=request, response=response)
+    return response
+
+
 def _fetch_json(client: httpx.Client, url: str) -> dict[str, Any]:
     for _ in range(6):
         previous_url = url
         _validate_public_http_url(url)
-        response = client.get(url, follow_redirects=False)
+        response = _public_httpx_request("GET", url, client=client, allow_redirect_status=True)
         if response.status_code in {301, 302, 303, 307, 308}:
             location = response.headers.get("location")
             if not location:
@@ -276,42 +321,17 @@ def _fetch_json(client: httpx.Client, url: str) -> dict[str, Any]:
             if client.headers.get("Authorization") and _url_origin(previous_url) != _url_origin(url):
                 raise AnalysisError("Redirect STAC lintas host saat autentikasi diblokir", 502)
             continue
-        response.raise_for_status()
+        if not 200 <= response.status_code < 300:
+            raise httpx.HTTPStatusError("STAC catalog returned an unexpected redirect status", request=response.request, response=response)
         return response.json()
     raise AnalysisError("Terlalu banyak redirect STAC", 502)
 
 
 def _validate_public_http_url(url: str, label: str = "URL") -> None:
-    parsed = urlparse(url)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        raise AnalysisError(f"{label} harus berupa URL http/https yang valid", 400)
-
-    host = parsed.hostname.strip().lower()
-    if host in {"localhost", "localhost.localdomain"} or host.endswith(".localhost"):
-        raise AnalysisError(f"{label} tidak boleh mengarah ke host lokal/private", 400)
-
     try:
-        addresses = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)
-    except socket.gaierror as exc:
-        raise AnalysisError(f"{label} tidak dapat di-resolve: {host}", 400) from exc
-
-    for family, _, _, _, sockaddr in addresses:
-        if family not in {socket.AF_INET, socket.AF_INET6}:
-            continue
-        raw_ip = sockaddr[0].split("%", 1)[0]
-        try:
-            resolved_ip = ip_address(raw_ip)
-        except ValueError:
-            continue
-        if (
-            resolved_ip.is_private
-            or resolved_ip.is_loopback
-            or resolved_ip.is_link_local
-            or resolved_ip.is_multicast
-            or resolved_ip.is_reserved
-            or resolved_ip.is_unspecified
-        ):
-            raise AnalysisError(f"{label} tidak boleh mengarah ke jaringan lokal/private", 400)
+        public_http.validate_public_destination(url)
+    except (ValueError, OSError) as exc:
+        raise AnalysisError(f"{label} harus HTTPS dan mengarah ke alamat publik yang valid", 400) from exc
 
 
 def _stac_datetime_range(data: dict, provider_label: str) -> tuple[datetime, datetime, str]:
@@ -487,13 +507,14 @@ def _stac_api_search(
         if meta.get("key") in COMMERCIAL_PROVIDER_KEYS and _url_origin(url) != _url_origin(search_url):
             raise AnalysisError("Pagination STAC lintas host dengan credential diblokir", 502)
         if method == "GET":
-            response = client.get(url, follow_redirects=False)
+            response = _public_httpx_request("GET", url, client=client)
         else:
-            response = client.post(url, json=body, follow_redirects=False)
+            response = _public_httpx_request("POST", url, client=client, json_body=body)
             if response.status_code in {405, 501}:
                 params = {key: ",".join(map(str, value)) if isinstance(value, list) else value for key, value in body.items()}
-                response = client.get(url, params=params, follow_redirects=False)
-        response.raise_for_status()
+                response = _public_httpx_request("GET", url, client=client, params=params)
+        if not 200 <= response.status_code < 300:
+            raise httpx.HTTPStatusError("STAC search returned an unexpected redirect status", request=response.request, response=response)
         payload = response.json()
         for feature in payload.get("features", []):
             scene_url = _stac_item_url(url, feature)
@@ -660,12 +681,9 @@ def _list_cog_stac_scenes(
                 else "provider gagal memproses pencarian"
             )
             raise AnalysisError(f"{meta['name']} STAC error (HTTP {status}): {message}.", 502)
-        detail = exc.response.text[:500].strip()
-        suffix = f" - {detail}" if detail else ""
-        raise AnalysisError(f"{meta['name']} STAC error: HTTP {exc.response.status_code}{suffix}", 502)
+        raise AnalysisError(f"{meta['name']} STAC error: HTTP {exc.response.status_code}", 502)
     except httpx.HTTPError as exc:
-        detail = "network timeout or connection failure" if provider_key in COMMERCIAL_PROVIDER_KEYS else str(exc)
-        raise AnalysisError(f"Gagal menghubungi {meta['name']}: {detail}", 502)
+        raise AnalysisError(f"Gagal menghubungi {meta['name']} melalui koneksi yang dibatasi", 502) from exc
     except ValueError as exc:
         raise AnalysisError(f"Respons {meta['name']} tidak valid: {exc}", 502)
 
@@ -694,16 +712,14 @@ def _list_openaerialmap_scenes(data: dict) -> dict:
     }
 
     try:
-        with httpx.Client(timeout=30) as client:
-            response = client.post(_OAM_STAC_SEARCH_URL, json=body)
-            response.raise_for_status()
-            payload = response.json()
+        response = _public_httpx_request("POST", _OAM_STAC_SEARCH_URL, json_body=body, max_bytes=4 * 1024 * 1024)
+        if not 200 <= response.status_code < 300:
+            raise httpx.HTTPStatusError("OpenAerialMap returned an unexpected redirect status", request=response.request, response=response)
+        payload = response.json()
     except httpx.HTTPStatusError as exc:
-        detail = exc.response.text[:500].strip()
-        suffix = f" - {detail}" if detail else ""
-        raise AnalysisError(f"OpenAerialMap menolak pencarian STAC: HTTP {exc.response.status_code}{suffix}", 502)
-    except httpx.HTTPError as exc:
-        raise AnalysisError(f"Gagal menghubungi OpenAerialMap STAC: {exc}", 502)
+        raise AnalysisError(f"OpenAerialMap menolak pencarian STAC: HTTP {exc.response.status_code}", 502)
+    except httpx.HTTPError:
+        raise AnalysisError("Gagal menghubungi OpenAerialMap STAC melalui koneksi yang dibatasi", 502)
     except ValueError as exc:
         raise AnalysisError(f"Respons OpenAerialMap STAC tidak valid: {exc}", 502)
 
@@ -758,7 +774,7 @@ def _list_maxar_open_data_scenes(data: dict, request=None) -> dict:
 
     try:
         scenes = []
-        with httpx.Client(timeout=30, follow_redirects=True) as client:
+        with httpx.Client(timeout=30, follow_redirects=False) as client:
             root = _fetch_json(client, _MAXAR_EVENTS_CATALOG_URL)
             for event_link in [link for link in root.get("links", []) if link.get("rel") == "child"]:
                 event_url = _abs_stac_href(_MAXAR_EVENTS_CATALOG_URL, event_link["href"])
@@ -838,9 +854,9 @@ def _asset_resolution_m(asset: dict[str, Any]) -> float | None:
 def _big_ctsrt_service_names() -> tuple[str, ...]:
     """Discover the currently published CTSRT ImageServer mosaics."""
     try:
-        with httpx.Client(timeout=45, follow_redirects=True) as client:
-            response = client.get(_BIG_CTSRT_IMAGERY_FOLDER_URL)
-            response.raise_for_status()
+        response = _public_httpx_request("GET", _BIG_CTSRT_IMAGERY_FOLDER_URL, timeout=45, max_bytes=4 * 1024 * 1024)
+        if not 200 <= response.status_code < 300:
+            raise httpx.HTTPStatusError("BIG catalog returned an unexpected redirect status", request=response.request, response=response)
     except httpx.HTTPError as exc:
         raise AnalysisError(f"Gagal membaca katalog service BIG/CTSRT: {exc}", 502) from exc
 
@@ -860,10 +876,10 @@ def _big_ctsrt_service_meta(service_name: str) -> dict[str, Any]:
         raise AnalysisError("Nama service BIG/CTSRT tidak valid", 400)
     url = f"{_BIG_CTSRT_IMAGERY_ROOT_URL}/{quote(service_name, safe='')}/ImageServer"
     try:
-        with httpx.Client(timeout=30, follow_redirects=True) as client:
-            response = client.get(url, params={"f": "json"})
-            response.raise_for_status()
-            payload = response.json()
+        response = _public_httpx_request("GET", url, params={"f": "json"}, timeout=30, max_bytes=2 * 1024 * 1024)
+        if not 200 <= response.status_code < 300:
+            raise httpx.HTTPStatusError("BIG metadata returned an unexpected redirect status", request=response.request, response=response)
+        payload = response.json()
     except httpx.HTTPError as exc:
         raise AnalysisError(f"Gagal membaca metadata {service_name}: {exc}", 502) from exc
     except ValueError as exc:
@@ -964,11 +980,11 @@ def render_big_ctsrt_tile(z: int, x: int, y: int, service_name: str | None = Non
     else:
         params["layers"] = "show:0"
     try:
-        with httpx.Client(timeout=20, follow_redirects=True) as client:
-            response = client.get(export_url, params=params)
-            response.raise_for_status()
-            content_type = response.headers.get("content-type", "")
-            return response.content if content_type.startswith("image/") else None
+        response = _public_httpx_request("GET", export_url, params=params, timeout=20, max_bytes=2 * 1024 * 1024)
+        if not 200 <= response.status_code < 300:
+            raise httpx.HTTPStatusError("BIG tile returned an unexpected redirect status", request=response.request, response=response)
+        content_type = response.headers.get("content-type", "")
+        return response.content if content_type.startswith("image/") else None
     except httpx.HTTPError as exc:
         logger.warning("BIG/CTSRT tile request failed z=%s x=%s y=%s: %s", z, x, y, exc)
         return None
@@ -1053,8 +1069,8 @@ def list_scenes(data: dict, request=None, settings=None) -> dict:
     if data.get("satellite") in _COPERNICUS_PROVIDER_KEYS:
         if not _copernicus_geosave_available():
             raise AnalysisError(
-                "Provider Copernicus CDSE membutuhkan paket opsional geosave_engine. "
-                "Install paket tersebut atau gunakan provider GEE/Esri Wayback.",
+                "Klien STAC Copernicus CDSE belum tersedia. "
+                "Gunakan provider GEE/Esri Wayback atau hubungi administrator.",
                 503,
             )
         return _copernicus_geosave_service().list_scenes(data)
@@ -1504,8 +1520,8 @@ def get_scene_tile(data: dict, request=None, settings=None) -> dict:
     if data.get("satellite") in _COPERNICUS_PROVIDER_KEYS:
         if not _copernicus_geosave_available():
             raise AnalysisError(
-                "Provider Copernicus CDSE membutuhkan paket opsional geosave_engine. "
-                "Install paket tersebut atau gunakan provider GEE/Esri Wayback.",
+                "Klien STAC Copernicus CDSE belum tersedia. "
+                "Gunakan provider GEE/Esri Wayback atau hubungi administrator.",
                 503,
             )
         if request is None:
@@ -1654,7 +1670,7 @@ def _stac_asset_href(item_url: str, asset_key: str, provider_key: str | None = N
     fetch_url = _resolve_commercial_item(provider_key, item_url) if provider_key in COMMERCIAL_PROVIDER_KEYS else item_url
     headers = commercial_request_headers(provider_key, settings) if provider_key in COMMERCIAL_PROVIDER_KEYS else None
     timeout = max(5, (settings or get_settings()).commercial_imagery_timeout_seconds) if provider_key in COMMERCIAL_PROVIDER_KEYS else 30
-    with httpx.Client(timeout=timeout, follow_redirects=True, headers=headers or {}) as client:
+    with httpx.Client(timeout=timeout, follow_redirects=False, headers=headers or {}) as client:
         item = _fetch_json(client, fetch_url)
     assets = item.get("assets") or {}
     asset = assets.get(asset_key)
@@ -1670,8 +1686,8 @@ def _readable_stac_asset_href(item_url: str, asset_key: str, provider_key: str |
     _validate_public_http_url(href, "URL asset COG")
     # Cache the stable asset URL, never an expiring SAS token.
     if urlparse(item_url).hostname == "planetarycomputer.microsoft.com":
-        import planetary_computer
-        href = planetary_computer.sign(href)
+        from app.core.stac_http import sign_planetary_computer_href
+        href = sign_planetary_computer_href(href)
     return href
 
 
@@ -1724,7 +1740,9 @@ def _render_cog_tile(item_url: str, z: int, x: int, y: int, asset_key: str, band
     href = _readable_stac_asset_href(item_url, asset_key, provider_key, settings)
     _validate_public_http_url(href, "URL asset COG")
     indexes = _parse_cog_bands(bands)
-    with rasterio.Env():
+    from app.providers.local_raster_provider import GDAL_HTTP_OPTS, raster_provider_guard, validate_remote_raster_url
+    raster_host = validate_remote_raster_url(href)
+    with raster_provider_guard(raster_host), rasterio.Env(**GDAL_HTTP_OPTS):
         with Reader(href) as reader:
             if not reader.tile_exists(x, y, z):
                 return None
@@ -1752,7 +1770,6 @@ def open_commercial_asset_stream(
     scene_id: str,
     asset_key: str,
     *,
-    client_factory=httpx.Client,
     settings=None,
 ):
     """Open a validated commercial asset for a bounded, credential-safe proxy.
@@ -1771,48 +1788,37 @@ def open_commercial_asset_stream(
     config = commercial_configuration(provider_key, settings)
     catalog_origin = _url_origin(config["catalog_url"])
     timeout = max(5, (settings or get_settings()).commercial_imagery_timeout_seconds)
-    client = client_factory(timeout=timeout, follow_redirects=False)
-    url = href
-    headers = commercial_request_headers(provider_key, settings) if _url_origin(url) == catalog_origin else {"User-Agent": "SAVEGEO/1.0"}
-    response = None
+    parsed_asset = urlparse(href)
+    asset_host = (parsed_asset.hostname or "").lower()
+    catalog_host = (urlparse(catalog_origin).hostname or "").lower()
+    if parsed_asset.scheme != "https" or not asset_host or parsed_asset.username or parsed_asset.password:
+        raise AnalysisError("URL asset commercial tidak valid", 400)
+    headers = commercial_request_headers(provider_key, settings) if asset_host == catalog_host else {"User-Agent": "SAVEGEO/1.0"}
+    max_size = 5 * 1024 * 1024 * 1024
+    redirect_hosts = {
+        asset_host,
+        catalog_host,
+        "amazonaws.com",
+        "blob.core.windows.net",
+        "cloudfront.net",
+    }
     try:
-        for _ in range(6):
-            _validate_public_http_url(url, "URL asset commercial")
-            request = client.build_request("GET", url, headers=headers)
-            response = client.send(request, stream=True, follow_redirects=False)
-            if response.status_code not in {301, 302, 303, 307, 308}:
-                break
-            location = response.headers.get("location")
-            response.close()
-            if not location:
-                raise AnalysisError("Redirect asset commercial tidak memiliki tujuan", 502)
-            next_url = urljoin(url, location)
-            if _url_origin(url) != _url_origin(next_url):
-                headers = {"User-Agent": "SAVEGEO/1.0"}
-            url = next_url
-        else:
-            raise AnalysisError("Terlalu banyak redirect asset commercial", 502)
-
-        if response is None:
-            raise AnalysisError("Provider tidak mengembalikan asset", 502)
+        response = public_http.open_stream(
+            href,
+            max_bytes=max_size,
+            allowed_redirect_hosts=redirect_hosts,
+            timeout=min(max(timeout, 5), 600),
+            headers=headers,
+        )
         if response.status_code in {401, 403}:
+            response.close()
             raise AnalysisError("Provider menolak asset ini (401/403). Periksa hak download untuk akun dan produk.", 403)
         if response.status_code == 429:
+            response.close()
             raise AnalysisError("Provider membatasi download (429). Coba lagi nanti.", 429)
-        try:
-            response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            status = exc.response.status_code
-            raise AnalysisError(f"Provider gagal mengirim asset (HTTP {status})", 502)
-
-        max_size = 5 * 1024 * 1024 * 1024
-        content_length = response.headers.get("content-length")
-        if content_length:
-            try:
-                if int(content_length) > max_size:
-                    raise AnalysisError("Asset commercial melampaui batas download 5 GiB", 413)
-            except ValueError:
-                pass
+        if not 200 <= response.status_code < 300:
+            response.close()
+            raise AnalysisError(f"Provider gagal mengirim asset (HTTP {response.status_code})", 502)
         upstream_type = response.headers.get("content-type", "application/octet-stream").split(";", 1)[0].strip().lower()
         media_type = upstream_type if upstream_type in {
             "application/octet-stream", "application/geotiff", "application/x-geotiff",
@@ -1820,24 +1826,23 @@ def open_commercial_asset_stream(
         } else "application/octet-stream"
 
         def stream():
-            total = 0
             try:
-                for chunk in response.iter_bytes():
-                    total += len(chunk)
-                    if total > max_size:
-                        raise AnalysisError("Asset commercial melampaui batas download 5 GiB", 413)
-                    if chunk:
-                        yield chunk
+                yield from response.iter_bytes()
             finally:
                 response.close()
-                client.close()
 
         return stream(), media_type, f"{provider_key}-{asset_key}"
-    except Exception:
-        if response is not None:
-            response.close()
-        client.close()
+    except AnalysisError:
         raise
+    except ValueError as exc:
+        if "size" in str(exc).lower():
+            raise AnalysisError("Asset commercial melampaui batas download 5 GiB", 413) from exc
+        raise AnalysisError("URL asset commercial tidak memenuhi kebijakan keamanan.", 400) from exc
+    except Exception as exc:
+        if "response" in locals():
+            response.close()
+        logger.warning("Commercial asset download failed provider=%s error_type=%s", provider_key, type(exc).__name__)
+        raise AnalysisError("Provider gagal mengirim asset dengan aman. Coba lagi nanti.", 502) from exc
 
 
 def render_stac_cog_tile(
@@ -1857,8 +1862,8 @@ def render_stac_cog_tile(
     except AnalysisError:
         raise
     except Exception as exc:  # noqa: BLE001
-        logger.exception("STAC COG tile render failed")
-        raise AnalysisError(f"Gagal merender tile STAC COG: {exc}", 502)
+        logger.warning("STAC COG tile render failed error_type=%s", type(exc).__name__)
+        raise AnalysisError("Gagal merender tile STAC COG.", 502) from exc
 
 
 def raster_toolbox(data: dict) -> dict:
@@ -1871,7 +1876,9 @@ def raster_toolbox(data: dict) -> dict:
     if not geometry:
         raise AnalysisError("AOI diperlukan untuk Raster Toolbox", 400)
     bands = _parse_cog_bands(data.get("bands")) or [1, 2, 3]
-    with rasterio.Env(GDAL_HTTP_TIMEOUT=60, GDAL_HTTP_MAX_RETRY=2):
+    from app.providers.local_raster_provider import GDAL_HTTP_OPTS, raster_provider_guard, validate_remote_raster_url
+    raster_host = validate_remote_raster_url(href)
+    with raster_provider_guard(raster_host), rasterio.Env(**GDAL_HTTP_OPTS):
         with rasterio.open(href) as source:
             selected = [band for band in bands if band <= source.count]
             if not selected:

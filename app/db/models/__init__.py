@@ -51,6 +51,7 @@ from app.db.models.carbon_calibration import (
     FieldTree,
 )
 from app.db.models.green_ranking import GreenRankingSnapshot, GreenRankingSnapshotRow
+from app.db.models.geospatial_dataset import GeospatialDataset
 
 __all__ = [
     "DmrvIntegrityRecord", "DmrvIntegrityRevision", "DmrvIntegrityDocument", "DmrvRiskPolicy",
@@ -59,6 +60,7 @@ __all__ = [
     "CarbonFieldObservation",
     "GreenRankingSnapshot",
     "GreenRankingSnapshotRow",
+    "GeospatialDataset",
     "AdminUser",
     "AnalysisResult",
     "AnalysisRun",

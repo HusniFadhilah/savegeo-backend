@@ -16,7 +16,9 @@ from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from sqlalchemy import func, text
 
 from app.core.security import get_current_app_viewer, require_permission
 from app.core.viewer_features import (
@@ -27,6 +29,7 @@ from app.core.viewer_features import (
 )
 from app.db.models.admin_user import AdminUser
 from app.db.models.user import User
+from app.db.models.geospatial_dataset import GeospatialDataset
 from app.db.session import get_db
 from app.schemas.metadata import DatasetMetadata
 
@@ -59,9 +62,6 @@ def _dataset_feature_allowed(principal: AdminUser | User, module: str | None, db
 
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _URL = re.compile(r"^https?://", re.IGNORECASE)
-_catalog: dict[str, dict[str, Any]] = {}
-
-
 def _safe_remote_url(value: str) -> str:
     parsed = urlparse(value)
     host = parsed.hostname
@@ -143,13 +143,14 @@ class QueryRequest(BaseModel):
 
 @router.get("/datasets")
 def list_cloud_datasets(
-    module: str | None = None,
+    module: str | None = Query(default=None, max_length=64),
     format: str | None = Query(default=None),
-    search: str | None = None,
+    search: str | None = Query(default=None, max_length=120),
     viewer: AdminUser | User = Depends(get_current_app_viewer),
     db: Session = Depends(get_db),
 ):
-    values = list(_catalog.values())
+    rows = db.query(GeospatialDataset).order_by(GeospatialDataset.id).all()
+    values = [row.document for row in rows]
     if module is not None:
         _ensure_dataset_feature_access(viewer, module, db)
         values = [item for item in values if item.get("module") == module]
@@ -173,32 +174,54 @@ def get_cloud_dataset(
     viewer: AdminUser | User = Depends(get_current_app_viewer),
     db: Session = Depends(get_db),
 ):
-    dataset = _catalog.get(dataset_id)
-    if dataset is None:
+    row = db.get(GeospatialDataset, dataset_id)
+    if row is None:
         raise HTTPException(status_code=404, detail="Dataset not found")
+    dataset = row.document
     _ensure_dataset_feature_access(viewer, dataset.get("module"), db)
     return dataset
 
 
 @router.post("/datasets/register", status_code=status.HTTP_201_CREATED)
-def register_cloud_dataset(reference: DatasetReference, _admin: object = Depends(require_permission("geospatial.write"))):
+def register_cloud_dataset(
+    reference: DatasetReference,
+    admin: object = Depends(require_permission("geospatial.write")),
+    db: Session = Depends(get_db),
+):
     data = reference.model_dump(exclude_none=True)
     if reference.access in {"private", "signed"} and (reference.url or reference.assetUrl):
         raise HTTPException(
             status_code=400, detail="Private dataset URLs must be issued by the access endpoint"
         )
-    if reference.id in _catalog:
+    if db.bind.dialect.name == "postgresql":
+        # Serialize capacity checks across API workers. The primary key below
+        # still handles duplicate registration races safely.
+        db.execute(text("SELECT pg_advisory_xact_lock(729401702)"))
+    if db.get(GeospatialDataset, reference.id) is not None:
         raise HTTPException(status_code=409, detail="Dataset already registered")
-    if len(_catalog) >= 2000:
+    if db.query(func.count(GeospatialDataset.id)).scalar() >= 2000:
         raise HTTPException(status_code=503, detail="Dataset catalog capacity reached")
-    _catalog[reference.id] = data
+    admin_id = getattr(admin, "id", None)
+    db.add(GeospatialDataset(id=reference.id, document=data, created_by=f"admin:{admin_id or 'unknown'}"))
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Dataset already registered") from exc
     return data
 
 
 @router.delete("/datasets/{dataset_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_cloud_dataset(dataset_id: str, _admin: object = Depends(require_permission("geospatial.write"))):
-    if _catalog.pop(dataset_id, None) is None:
+def delete_cloud_dataset(
+    dataset_id: str,
+    _admin: object = Depends(require_permission("geospatial.write")),
+    db: Session = Depends(get_db),
+):
+    row = db.get(GeospatialDataset, dataset_id)
+    if row is None:
         raise HTTPException(status_code=404, detail="Dataset not found")
+    db.delete(row)
+    db.commit()
 
 
 @router.get("/datasets/{dataset_id}/access")
@@ -207,9 +230,10 @@ def dataset_access(
     viewer: AdminUser | User = Depends(get_current_app_viewer),
     db: Session = Depends(get_db),
 ):
-    dataset = _catalog.get(dataset_id)
-    if dataset is None:
+    row = db.get(GeospatialDataset, dataset_id)
+    if row is None:
         raise HTTPException(status_code=404, detail="Dataset not found")
+    dataset = row.document
     _ensure_dataset_feature_access(viewer, dataset.get("module"), db)
     if dataset.get("access") != "public":
         raise HTTPException(status_code=501, detail="Signed access provider is not configured")
@@ -222,9 +246,10 @@ def export_cog(
     viewer: AdminUser | User = Depends(get_current_app_viewer),
     db: Session = Depends(get_db),
 ):
-    dataset = _catalog.get(request.datasetId)
-    if dataset is None:
+    row = db.get(GeospatialDataset, request.datasetId)
+    if row is None:
         raise HTTPException(status_code=404, detail="Dataset not found")
+    dataset = row.document
     _ensure_dataset_feature_access(viewer, dataset.get("module"), db)
     raise HTTPException(501, "Server COG export is unavailable; use browser processing")
 
@@ -235,9 +260,10 @@ def export_geoparquet(
     viewer: AdminUser | User = Depends(get_current_app_viewer),
     db: Session = Depends(get_db),
 ):
-    dataset = _catalog.get(request.datasetId)
-    if dataset is None:
+    row = db.get(GeospatialDataset, request.datasetId)
+    if row is None:
         raise HTTPException(status_code=404, detail="Dataset not found")
+    dataset = row.document
     _ensure_dataset_feature_access(viewer, dataset.get("module"), db)
     raise HTTPException(501, "Server GeoParquet export is unavailable; use browser processing")
 

@@ -57,7 +57,8 @@ async def agent_analyze(
     """
     payload = await read_typed_json_object(request, AgentRequest)
     return await run_in_threadpool(
-        agent_service.run_agent_analyze, db, request, payload, viewer_feature_codes(db, viewer)
+        agent_service.run_agent_analyze, db, request, payload, viewer_feature_codes(db, viewer),
+        chat_session_owner_key(viewer),
     )
 
 

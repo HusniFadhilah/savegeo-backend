@@ -87,7 +87,7 @@ def test_existing_stack_model_is_listed_under_gedi_without_double_counting():
                 "compatible_reference_datasets": ["GEDI_L4B_STACK", "GEDI"],
                 "feature_stack": "full_s2_s1_dem_dw"}
     model = SimpleNamespace(name="full_stack_model", metadata_json=metadata,
-                            to_dict_public=lambda: {"name": "full_stack_model", "metadata_json": metadata})
+                            to_dict_public=lambda **_kwargs: {"name": "full_stack_model", "metadata_json": metadata})
     db = DB([model])
     assert carbon_service.active_carbon_model_compatibility(db)["GEDI"] == ["full_stack_model"]
     assert models_list(target_dataset="GEDI", db=db, offset=0, limit=100)["count"] == 1
