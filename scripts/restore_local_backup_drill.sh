@@ -10,8 +10,8 @@ for command in docker sha256sum python3; do
 done
 [[ -d "$BACKUP_DIR" && ! -L "$BACKUP_DIR" ]] || { echo "Local pre-deploy backup directory is missing or unsafe." >&2; exit 3; }
 
-backup_name="$(find "$BACKUP_DIR" -maxdepth 1 -type f -name 'predeploy_*.dump' -printf '%f\n' | LC_ALL=C sort | tail -n 1)"
-[[ -n "$backup_name" ]] || { echo "No local pre-deploy database dump is available." >&2; exit 4; }
+backup_name="$(python3 "${SAVEGEO_BACKUP_SELECTOR:-$(dirname -- "$0")/select_verified_backup.py}" "$BACKUP_DIR")"
+[[ -n "$backup_name" ]] || { echo "No verified local pre-deploy database dump is available." >&2; exit 4; }
 backup_path="$BACKUP_DIR/$backup_name"
 manifest_path="${backup_path%.dump}.manifest"
 [[ -f "$backup_path" && ! -L "$backup_path" && -f "$manifest_path" && ! -L "$manifest_path" ]] || {

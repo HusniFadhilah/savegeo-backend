@@ -66,10 +66,14 @@ jobs:
           set -euo pipefail
           test -n "$DEPLOY_HOST" && test -n "$DEPLOY_SSH_PORT" && test -n "$DEPLOY_USER" && test -n "$BACKEND_REMOTE_DIR"
           remote_script="$BACKEND_REMOTE_DIR/var/restore-local-backup-drill-$GITHUB_RUN_ID.sh"
+          remote_selector="$BACKEND_REMOTE_DIR/var/select-verified-backup-$GITHUB_RUN_ID.py"
           scp -i "$RUNNER_TEMP/savegeo-deploy-key" -P "$DEPLOY_SSH_PORT" \
             -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/savegeo-known-hosts" \
             scripts/restore_local_backup_drill.sh "$DEPLOY_USER@$DEPLOY_HOST:$remote_script"
+          scp -i "$RUNNER_TEMP/savegeo-deploy-key" -P "$DEPLOY_SSH_PORT" \
+            -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/savegeo-known-hosts" \
+            scripts/select_verified_backup.py "$DEPLOY_USER@$DEPLOY_HOST:$remote_selector"
           ssh -i "$RUNNER_TEMP/savegeo-deploy-key" -p "$DEPLOY_SSH_PORT" \
             -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/savegeo-known-hosts" \
             "$DEPLOY_USER@$DEPLOY_HOST" \
-            "set -euo pipefail; chmod 700 '$remote_script'; trap 'rm -f -- \"$remote_script\"' EXIT; SAVEGEO_LOCAL_BACKUP_DIR='$BACKEND_REMOTE_DIR/../private-backups' bash '$remote_script'"
+            "set -euo pipefail; chmod 700 '$remote_script' '$remote_selector'; trap 'rm -f -- \"$remote_script\" \"$remote_selector\"' EXIT; SAVEGEO_LOCAL_BACKUP_DIR='$BACKEND_REMOTE_DIR/../private-backups' SAVEGEO_BACKUP_SELECTOR='$remote_selector' bash '$remote_script'"
