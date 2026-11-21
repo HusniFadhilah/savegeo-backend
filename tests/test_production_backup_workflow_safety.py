@@ -26,10 +26,15 @@ def test_migration_inventory_container_can_write_private_deploy_owned_audit_file
 
 
 def test_restore_drills_use_actual_restore_to_validate_stdin_archive_streams() -> None:
-    for script_name in ("restore_local_backup_drill.sh", "restore_drill.sh"):
-        script = (ROOT / "scripts" / script_name).read_text(encoding="utf-8")
+    local_script = (ROOT / "scripts/restore_local_backup_drill.sh").read_text(
+        encoding="utf-8"
+    )
+    offsite_script = (ROOT / "scripts/restore_drill.sh").read_text(encoding="utf-8")
+    for script in (local_script, offsite_script):
         assert "pg_restore --list -" not in script
         assert "pg_restore -U postgres -d savegeo_restore_check" in script
+    assert '--no-owner --no-privileges < "$backup_path"' in local_script
+    assert '--no-owner --no-privileges - < "$backup_path"' not in local_script
 
 
 def test_remote_restore_drill_transfers_and_cleans_up_verification_helper() -> None:

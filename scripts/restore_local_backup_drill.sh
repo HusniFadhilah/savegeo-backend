@@ -59,7 +59,7 @@ done
 docker exec "$container" pg_isready -U postgres >/dev/null
 docker exec "$container" createdb -U postgres savegeo_restore_check
 docker exec -i "$container" pg_restore -U postgres -d savegeo_restore_check \
-  --no-owner --no-privileges - < "$backup_path"
+  --no-owner --no-privileges < "$backup_path"
 
 restored_tables="$(docker exec "$container" psql -U postgres -d savegeo_restore_check -Atc \
   "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE'")"
