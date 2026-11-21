@@ -65,6 +65,7 @@ jobs:
           pip install --no-deps --no-build-isolation -e .
           ruff check . --ignore E501 --ignore B904 --ignore B905
           mypy app
+          bash -n scripts/backup_offsite.sh scripts/restore_drill.sh scripts/restore_local_backup_drill.sh
           bandit -r app -lll
           for attempt in 1 2 3; do
             if pip-audit -r requirements-api.lock --no-deps --disable-pip; then
