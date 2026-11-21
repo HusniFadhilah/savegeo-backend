@@ -285,7 +285,15 @@ jobs:
             evidence_sha256="absent"
             if [ -d var/dmrv/evidence ]; then
               evidence_tmp="$backup_prefix.dmrv-evidence.tar.gz.partial"
-              tar -C var -czf "$evidence_tmp" dmrv/evidence
+              # Evidence can be owned by the API runtime UID and mode 0600.
+              # Read it in a disposable, network-isolated, read-only container
+              # with only DAC read/search override; stream the archive back so
+              # the host backup remains owned by the deploy user.
+              docker run --rm --network none --read-only --user 0:0 \
+                --cap-drop ALL --cap-add DAC_READ_SEARCH \
+                --volume "$BACKEND_REMOTE_DIR/var/dmrv:/source/dmrv:ro" \
+                postgres:16-alpine tar -C /source -czf - dmrv/evidence > "$evidence_tmp"
+              test -s "$evidence_tmp"
               tar -tzf "$evidence_tmp" > /dev/null
               mv "$evidence_tmp" "$backup_prefix.dmrv-evidence.tar.gz"
               evidence_sha256="$(sha256sum "$backup_prefix.dmrv-evidence.tar.gz" | awk '{print $1}')"
