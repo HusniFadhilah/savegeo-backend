@@ -58,7 +58,6 @@ for attempt in $(seq 1 60); do
 done
 docker exec "$container" pg_isready -U postgres >/dev/null
 docker exec "$container" createdb -U postgres savegeo_restore_check
-docker exec -i "$container" pg_restore --list - < "$backup_path" > /dev/null
 docker exec -i "$container" pg_restore -U postgres -d savegeo_restore_check \
   --no-owner --no-privileges - < "$backup_path"
 

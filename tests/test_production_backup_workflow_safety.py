@@ -25,6 +25,13 @@ def test_migration_inventory_container_can_write_private_deploy_owned_audit_file
     assert workflow.count('--user "$audit_uid:$audit_gid"') == 3
 
 
+def test_restore_drills_use_actual_restore_to_validate_stdin_archive_streams() -> None:
+    for script_name in ("restore_local_backup_drill.sh", "restore_drill.sh"):
+        script = (ROOT / "scripts" / script_name).read_text(encoding="utf-8")
+        assert "pg_restore --list -" not in script
+        assert "pg_restore -U postgres -d savegeo_restore_check" in script
+
+
 def test_remote_restore_drill_transfers_and_cleans_up_verification_helper() -> None:
     workflow = (
         ROOT / ".github/workflows/restore-local-backup-drill-production.yml"
