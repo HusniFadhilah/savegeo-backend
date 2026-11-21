@@ -15,6 +15,28 @@ def test_deploy_archives_private_dmrv_evidence_in_read_only_isolated_container()
     assert "postgres:16-alpine tar -C /source -czf - dmrv/evidence > \"$evidence_tmp\"" in workflow
 
 
+def test_migration_inventory_container_can_write_private_deploy_owned_audit_files() -> None:
+    workflow = (ROOT / ".github/workflows/deploy-production.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'audit_uid="$(id -u)"' in workflow
+    assert 'audit_gid="$(id -g)"' in workflow
+    assert workflow.count('--user "$audit_uid:$audit_gid"') == 3
+
+
+def test_restore_drills_use_actual_restore_to_validate_stdin_archive_streams() -> None:
+    local_script = (ROOT / "scripts/restore_local_backup_drill.sh").read_text(
+        encoding="utf-8"
+    )
+    offsite_script = (ROOT / "scripts/restore_drill.sh").read_text(encoding="utf-8")
+    for script in (local_script, offsite_script):
+        assert "pg_restore --list -" not in script
+        assert "pg_restore -U postgres -d savegeo_restore_check" in script
+    assert '--no-owner --no-privileges < "$backup_path"' in local_script
+    assert '--no-owner --no-privileges - < "$backup_path"' not in local_script
+
+
 def test_remote_restore_drill_transfers_and_cleans_up_verification_helper() -> None:
     workflow = (
         ROOT / ".github/workflows/restore-local-backup-drill-production.yml"

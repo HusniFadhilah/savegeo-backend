@@ -317,18 +317,26 @@ jobs:
             audit_dir="$BACKEND_REMOTE_DIR/var/migration-audit/$SAVEGEO_WORKFLOW_RUN_ID"
             mkdir -p "$audit_dir"
             chmod 700 "$BACKEND_REMOTE_DIR/var/migration-audit" "$audit_dir"
+            # Keep the inventory private on the host and run the short-lived
+            # migration container as the deploy owner so its atomic 0600 files
+            # can be written to this 0700 bind mount without relaxing access.
+            audit_uid="$(id -u)"
+            audit_gid="$(id -g)"
             docker compose -f docker-compose.prod.yml run --rm --no-deps \
+              --user "$audit_uid:$audit_gid" \
               --volume "$audit_dir:/app/var/migration-audit" migrate \
               python -m scripts.db_migration_inventory capture \
               --output "/app/var/migration-audit/before.json"
             docker compose -f docker-compose.prod.yml run --rm --no-deps migrate \
               sh -c "python -m alembic upgrade head && python -m scripts.seed_rbac"
             docker compose -f docker-compose.prod.yml run --rm --no-deps \
+              --user "$audit_uid:$audit_gid" \
               --volume "$audit_dir:/app/var/migration-audit" migrate \
               python -m scripts.db_migration_inventory capture \
               --output "/app/var/migration-audit/after.json" \
               --salt-source "/app/var/migration-audit/before.json"
             docker compose -f docker-compose.prod.yml run --rm --no-deps \
+              --user "$audit_uid:$audit_gid" \
               --volume "$audit_dir:/app/var/migration-audit" migrate \
               python -m scripts.db_migration_inventory compare \
               --before "/app/var/migration-audit/before.json" \
