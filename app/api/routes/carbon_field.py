@@ -7,8 +7,9 @@ import json
 import uuid
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import Response
+from sqlalchemy import Text, cast, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -40,6 +41,9 @@ from app.services.carbon_field_service import (
 )
 
 router = APIRouter()
+MAX_FIELD_OBSERVATIONS_PER_DATASET = 20_000
+FIELD_OBSERVATION_PAGE_SIZE = 100
+MAX_FIELD_OBSERVATION_SEARCH_LENGTH = 120
 
 
 @router.get(
@@ -193,6 +197,7 @@ def import_records(db, dataset, records, admin):
     db.query(CarbonCalibrationDataset).filter_by(id=dataset.id).with_for_update().one()
     existing = db.query(CarbonFieldObservation).filter_by(dataset_pk=dataset.id).with_for_update().all()
     identities = {row.identity_key: row for row in existing}
+    stored_count = len(existing)
     roles = {(row.pool, row.raw["plot_id"]): row.role for row in existing}
     created = skipped = 0
     for record in records:
@@ -217,6 +222,11 @@ def import_records(db, dataset, records, admin):
             row.predictions = merge_prediction(row.predictions, normalized["prediction"])
             skipped += 1
         else:
+            if stored_count >= MAX_FIELD_OBSERVATIONS_PER_DATASET:
+                raise HTTPException(
+                    413,
+                    f"Satu dataset dibatasi hingga {MAX_FIELD_OBSERVATIONS_PER_DATASET:,} pengukuran. Pisahkan data menurut wilayah atau periode survei.",
+                )
             row = CarbonFieldObservation(
                 id=str(uuid.uuid4()),
                 dataset_pk=dataset.id,
@@ -231,6 +241,7 @@ def import_records(db, dataset, records, admin):
             )
             identities[row.identity_key] = row
             db.add(row)
+            stored_count += 1
             created += 1
     try:
         db.flush()
@@ -276,7 +287,13 @@ def field_methods():
 @router.get(
     "/datasets/{dataset_id}/observations", dependencies=[Depends(require_permission("calibration.read"))]
 )
-def observations(dataset_id: str, page: int = 1, pool: str | None = None, db: Session = Depends(get_db)):
+def observations(
+    dataset_id: str,
+    page: int = Query(default=1, ge=1, le=200),
+    pool: str | None = None,
+    q: str | None = Query(default=None, max_length=MAX_FIELD_OBSERVATION_SEARCH_LENGTH),
+    db: Session = Depends(get_db),
+):
     dataset = dataset_or_404(db, dataset_id)
     if page < 1:
         raise HTTPException(422, "Halaman minimal 1.")
@@ -286,13 +303,42 @@ def observations(dataset_id: str, page: int = 1, pool: str | None = None, db: Se
             raise HTTPException(422, "Pool tidak dikenal.")
         query = query.filter_by(pool=pool)
     total = query.count()
+    search = q.strip() if q else ""
+    if len(search) > MAX_FIELD_OBSERVATION_SEARCH_LENGTH:
+        raise HTTPException(422, "Pencarian dibatasi hingga 120 karakter.")
+    if search:
+        query = query.filter(
+            or_(
+                CarbonFieldObservation.pool.icontains(search, autoescape=True),
+                CarbonFieldObservation.role.icontains(search, autoescape=True),
+                cast(CarbonFieldObservation.observed_mg_c_ha, Text).icontains(search, autoescape=True),
+                # Search user-facing raw values only. Searching the serialized
+                # JSON document also matches field names (e.g. every row has
+                # the key "plot_id"), which makes literal wildcard searches
+                # return unrelated observations.
+                *(
+                    CarbonFieldObservation.raw[key]
+                    .as_string()
+                    .icontains(search, autoescape=True)
+                    for key in ("plot_id", "method", "source", "reference_type", "survey_date")
+                ),
+            )
+        )
+    filtered = query.count()
     rows = (
         query.order_by(CarbonFieldObservation.created_at, CarbonFieldObservation.id)
-        .offset((page - 1) * 100)
-        .limit(100)
+        .offset((page - 1) * FIELD_OBSERVATION_PAGE_SIZE)
+        .limit(FIELD_OBSERVATION_PAGE_SIZE)
         .all()
     )
-    return {"rows": [row.to_dict() for row in rows], "total": total, "page": page, "page_size": 100}
+    return {
+        "rows": [row.to_dict() for row in rows],
+        "total": filtered,
+        "records_total": total,
+        "records_filtered": filtered,
+        "page": page,
+        "page_size": FIELD_OBSERVATION_PAGE_SIZE,
+    }
 
 
 @router.post("/datasets/{dataset_id}/observations")

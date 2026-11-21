@@ -118,13 +118,40 @@ def green_rankings_page(
     search: str = Query(default="", max_length=100),
     sort_by: str = Query(default="rank", max_length=40),
     sort_dir: str = Query(default="asc", pattern="^(asc|desc)$"),
+    year: int | None = Query(default=None, ge=2015),
+    start_month: int | None = Query(default=None, ge=1, le=12),
+    end_month: int | None = Query(default=None, ge=1, le=12),
+    level: str | None = Query(default=None, pattern="^(province|city|district|village)$"),
+    province: str | None = Query(default=None, max_length=40),
+    city: str | None = Query(default=None, max_length=40),
+    district: str | None = Query(default=None, max_length=40),
     viewer: object = Depends(get_current_app_viewer),
 ):
     from app.api.routes.analysis_jobs import job_owner_key
-    from app.services.green_rankings import publish_snapshot, result_page, snapshot_page
+    from app.services.green_rankings import (
+        publish_snapshot,
+        ranking_config,
+        result_page,
+        snapshot_page,
+    )
 
     try:
         owner = job_owner_key(viewer)
+        filter_config = None
+        if run_id.startswith("snapshot:") and all(
+            value is not None for value in (year, start_month, end_month, level)
+        ):
+            filter_config = ranking_config(
+                {
+                    "level": level,
+                    "province": province,
+                    "city": city,
+                    "district": district,
+                },
+                year,
+                start_month,
+                end_month,
+            )
         result = result_page(
             run_id,
             owner,
@@ -133,6 +160,7 @@ def green_rankings_page(
             search=search,
             sort_by=sort_by,
             sort_dir=sort_dir,
+            filter_config=filter_config,
         )
         if result["done"] and not result.get("snapshot_saved_at"):
             scope_key = publish_snapshot(run_id, owner)
@@ -144,6 +172,7 @@ def green_rankings_page(
                     search=search,
                     sort_by=sort_by,
                     sort_dir=sort_dir,
+                    filter_config=filter_config,
                 )
         return result
     except AnalysisError as exc:
@@ -151,12 +180,38 @@ def green_rankings_page(
 
 
 @router.get("/carbon/green-rankings/{run_id}/export")
-def export_green_rankings(run_id: str, viewer: object = Depends(get_current_app_viewer)):
+def export_green_rankings(
+    run_id: str,
+    year: int | None = Query(default=None, ge=2015),
+    start_month: int | None = Query(default=None, ge=1, le=12),
+    end_month: int | None = Query(default=None, ge=1, le=12),
+    level: str | None = Query(default=None, pattern="^(province|city|district|village)$"),
+    province: str | None = Query(default=None, max_length=40),
+    city: str | None = Query(default=None, max_length=40),
+    district: str | None = Query(default=None, max_length=40),
+    viewer: object = Depends(get_current_app_viewer),
+):
     from app.api.routes.analysis_jobs import job_owner_key
+    from app.services.green_rankings import ranking_config
     from app.services.green_rankings import csv_rows
 
     try:
-        rows = csv_rows(run_id, job_owner_key(viewer))
+        filter_config = None
+        if run_id.startswith("snapshot:") and all(
+            value is not None for value in (year, start_month, end_month, level)
+        ):
+            filter_config = ranking_config(
+                {
+                    "level": level,
+                    "province": province,
+                    "city": city,
+                    "district": district,
+                },
+                year,
+                start_month,
+                end_month,
+            )
+        rows = csv_rows(run_id, job_owner_key(viewer), filter_config=filter_config)
         return StreamingResponse(rows, media_type="text/csv; charset=utf-8", headers={"Content-Disposition": 'attachment; filename="savegeo_green_rankings.csv"'})
     except AnalysisError as exc:
         raise HTTPException(status_code=exc.status_code, detail=public_analysis_error(exc)) from exc

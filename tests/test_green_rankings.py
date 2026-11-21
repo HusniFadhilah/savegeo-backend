@@ -86,3 +86,36 @@ def test_new_run_returns_checkpoint_before_expensive_computation(tmp_path, monke
     assert result["run_id"] and result["cursor"]
     assert result["statistics"]["processed"] == 0
     assert result["done"] is False
+
+
+def test_latest_snapshot_falls_back_to_nearest_saved_parent_scope(monkeypatch):
+    config = {
+        "level": "village",
+        "year": 2026,
+        "start_month": 1,
+        "end_month": 12,
+        "scale": 10,
+        "algorithm": 1,
+        "province": "11",
+        "city": "1101",
+        "district": "110101",
+    }
+    lookups = []
+
+    def fake_scope_key(candidate):
+        return "/".join(candidate.get(key, "-") for key in ("province", "city", "district"))
+
+    def fake_snapshot_page(scope_key, **options):
+        lookups.append((scope_key, options["filter_config"]))
+        if scope_key == "11/1101/-":
+            return {"run_id": "snapshot:nearest-parent", "config": config}
+        raise AnalysisError("Snapshot tidak ditemukan.", 404)
+
+    monkeypatch.setattr(service, "snapshot_scope_key", fake_scope_key)
+    monkeypatch.setattr(service, "snapshot_page", fake_snapshot_page)
+
+    result = service.latest_snapshot(config, page=2)
+
+    assert result["run_id"] == "snapshot:nearest-parent"
+    assert [scope for scope, _ in lookups] == ["11/1101/110101", "11/1101/-"]
+    assert all(requested is config for _, requested in lookups)

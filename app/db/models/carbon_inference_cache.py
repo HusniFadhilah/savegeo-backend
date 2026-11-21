@@ -1,7 +1,8 @@
-"""Short-lived cache for completed carbon analyses.
+"""Short-lived cache for completed analyses.
 
 Earth Engine map IDs are temporary, so GEE-backed results are cached only for
 the configured map-ID window. Local inference results use a separate TTL.
+The table is shared by carbon and land-cover analysis jobs.
 """
 
 from __future__ import annotations
