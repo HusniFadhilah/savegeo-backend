@@ -158,11 +158,11 @@ def test_geocode_search_route_returns_ranked_contract(monkeypatch):
 
     captured = {}
 
-    def fake_get(url, params=None, **kwargs):
-        captured["params"] = params
-        return FakeResponse()
+    def fake_search(q, *, limit, polygon=False):
+        captured.update(q=q, limit=limit, polygon=polygon)
+        return FakeResponse().json()
 
-    monkeypatch.setattr(utils.requests, "get", fake_get)
+    monkeypatch.setattr(utils, "search_places", fake_search)
     app = FastAPI()
     app.include_router(utils.router)
     app.dependency_overrides[get_current_app_viewer] = lambda: object()
@@ -172,7 +172,7 @@ def test_geocode_search_route_returns_ranked_contract(monkeypatch):
     results = response.json()["results"]
     assert [r["area_id"] for r in results] == ["osm:relation:2", "osm:relation:1"]
     assert results[0]["exact_match"] is True
-    assert captured["params"]["polygon_threshold"] > 0
+    assert captured == {"q": "Kota Semarang", "limit": 8, "polygon": True}
 
 
 def test_geocode_search_route_rejects_non_list_upstream(monkeypatch):
@@ -189,7 +189,7 @@ def test_geocode_search_route_rejects_non_list_upstream(monkeypatch):
         def json(self):
             return {"error": "rate limited"}
 
-    monkeypatch.setattr(utils.requests, "get", lambda *a, **k: FakeResponse())
+    monkeypatch.setattr(utils, "search_places", lambda *a, **k: FakeResponse().json())
     app = FastAPI()
     app.include_router(utils.router)
     app.dependency_overrides[get_current_app_viewer] = lambda: object()

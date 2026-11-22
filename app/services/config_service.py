@@ -8,6 +8,8 @@ an admin PUT/reset so changes are visible immediately without waiting for the TT
 """
 from __future__ import annotations
 
+import math
+import re
 import time
 
 from sqlalchemy.orm import Session
@@ -19,6 +21,8 @@ from app.db.models.system_config import SystemConfig
 _cache: dict[str, object] = {}
 _cache_ts: float = 0.0
 _CFG_TTL = 30.0
+_CARBON_POOL_STYLE_KEY = re.compile(r"^carbon\.pool\.(agb|bgb|soc|litter|deadwood)\.(vis_min|vis_max|vis_palette)$")
+_CARBON_POOLS = ("agb", "bgb", "soc", "litter", "deadwood")
 
 
 def _refresh(db: Session) -> None:
@@ -155,6 +159,27 @@ def get_analysis_defaults(db: Session) -> dict:
     """
     settings = get_settings()
     palette_raw = get_setting(db, "carbon.vis_palette", settings.carbon_vis_palette)
+    config_defaults = {entry[0]: entry[1] for entry in DEFAULT_CONFIGS}
+    pool_visualization = {}
+    for pool in _CARBON_POOLS:
+        prefix = f"carbon.pool.{pool}"
+        min_raw = get_setting(db, f"{prefix}.vis_min", config_defaults[f"{prefix}.vis_min"])
+        max_raw = get_setting(db, f"{prefix}.vis_max", config_defaults[f"{prefix}.vis_max"])
+        pool_palette_raw = get_setting(db, f"{prefix}.vis_palette", config_defaults[f"{prefix}.vis_palette"])
+        try:
+            vis_min, vis_max = float(min_raw), float(max_raw)
+        except (TypeError, ValueError):
+            vis_min = float(config_defaults[f"{prefix}.vis_min"])
+            vis_max = float(config_defaults[f"{prefix}.vis_max"])
+        if not math.isfinite(vis_min) or not math.isfinite(vis_max) or vis_min < 0 or vis_max <= vis_min:
+            vis_min = float(config_defaults[f"{prefix}.vis_min"])
+            vis_max = float(config_defaults[f"{prefix}.vis_max"])
+        palette = pool_palette_raw.split(",") if isinstance(pool_palette_raw, str) else list(pool_palette_raw or [])
+        palette = [str(color).strip().lstrip("#") for color in palette if str(color).strip()]
+        if not 2 <= len(palette) <= 12 or any(not re.fullmatch(r"[0-9a-fA-F]{6}", color) for color in palette):
+            palette = config_defaults[f"{prefix}.vis_palette"].split(",")
+        pool_visualization[pool] = {"min": vis_min, "max": vis_max, "palette": palette}
+
     return {
         "cloud_threshold": int(get_setting(db, "analysis.cloud_threshold", settings.default_cloud_threshold)),
         "carbon_scale": int(get_setting(db, "analysis.carbon_scale", settings.default_carbon_scale)),
@@ -165,8 +190,58 @@ def get_analysis_defaults(db: Session) -> dict:
         "carbon_vis_max": float(get_setting(db, "carbon.vis_max", settings.carbon_vis_max)),
         "carbon_vis_palette": palette_raw.split(",") if isinstance(palette_raw, str) else list(palette_raw),
         "carbon_legend_bins": int(get_setting(db, "carbon.legend_bins", settings.carbon_legend_bins)),
+        "carbon_pool_visualization": pool_visualization,
         "carbon_co2_factor": float(get_setting(db, "carbon.co2_factor", settings.carbon_co2_factor)),
     }
+
+
+def validate_carbon_pool_visualization_updates(db: Session, updates: dict) -> dict[str, str]:
+    """Validate admin-edited pool color ramps and density ranges before saving."""
+    matched = {key: value for key, value in updates.items()
+               if isinstance(key, str) and _CARBON_POOL_STYLE_KEY.fullmatch(key)}
+    if not matched:
+        return {}
+
+    defaults = {entry[0]: entry[1] for entry in DEFAULT_CONFIGS}
+    style_keys = [f"carbon.pool.{pool}.{suffix}" for pool in _CARBON_POOLS
+                  for suffix in ("vis_min", "vis_max", "vis_palette")]
+    stored = {row.key: row.value for row in db.query(SystemConfig).filter(SystemConfig.key.in_(style_keys)).all()}
+    candidates = {}
+    for pool in _CARBON_POOLS:
+        prefix = f"carbon.pool.{pool}"
+        for suffix in ("vis_min", "vis_max", "vis_palette"):
+            key = f"{prefix}.{suffix}"
+            candidates[key] = matched.get(key, stored.get(key) if stored.get(key) is not None else defaults[key])
+
+    errors: dict[str, str] = {}
+    for key, value in matched.items():
+        field = _CARBON_POOL_STYLE_KEY.fullmatch(key).group(2)
+        if field in {"vis_min", "vis_max"}:
+            try:
+                number = float(value)
+                if not math.isfinite(number) or number < 0:
+                    raise ValueError
+            except (TypeError, ValueError):
+                errors[key] = "Rentang densitas harus berupa angka terbatas dan tidak negatif."
+        else:
+            colors = [part.strip().lstrip("#") for part in str(value).split(",") if part.strip()]
+            if not 2 <= len(colors) <= 12 or any(not re.fullmatch(r"[0-9a-fA-F]{6}", color) for color in colors):
+                errors[key] = "Palet harus berisi 2–12 warna HEX enam digit, dipisahkan koma."
+
+    for pool in _CARBON_POOLS:
+        prefix = f"carbon.pool.{pool}"
+        min_key, max_key = f"{prefix}.vis_min", f"{prefix}.vis_max"
+        if min_key not in matched and max_key not in matched:
+            continue
+        try:
+            low, high = float(candidates[min_key]), float(candidates[max_key])
+            if math.isfinite(low) and math.isfinite(high) and low >= high:
+                for key in (min_key, max_key):
+                    if key in matched and key not in errors:
+                        errors[key] = "Nilai minimum harus lebih kecil daripada nilai maksimum."
+        except (TypeError, ValueError):
+            continue
+    return errors
 
 
 def reset_setting(db: Session, key: str | None = None, *, include_secrets: bool = True) -> int:

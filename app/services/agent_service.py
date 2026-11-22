@@ -21,6 +21,7 @@ from typing import Any
 from fastapi import Request
 from sqlalchemy.orm import Session
 
+from app.core.client_ip import get_client_ip
 from app.agentic import agentic_ai, rate_limiter
 from app.agentic.geoai_tools import filter_direct_reference_layers
 from app.agentic.agentic_ai import (
@@ -32,10 +33,10 @@ from app.agentic.agentic_ai import (
 )
 from app.db.models.chat_message import ChatMessage
 from app.db.models.chat_session import ChatSession
-from app.db.models.uploaded_model import UploadedModel
 from app.providers.arcgis_client import get_arcgis_client
 from app.registries.landcover_dataset_registry import get_dataset_list
 from app.services import ai_provider_service as providers
+from app.services.model_catalog_service import list_carbon_models
 from app.services.carbon_service import get_carbon_dataset_list
 
 logger = logging.getLogger(__name__)
@@ -49,10 +50,7 @@ def build_capabilities_document(
     """Build capabilities consumed by the agent planner and frontend."""
     carbon_datasets = get_carbon_dataset_list(db, require_model=True)
     landcover_datasets = get_dataset_list(module="landcover")
-    models = [
-        model.to_dict_public(include_path=False)
-        for model in db.query(UploadedModel).filter_by(model_type="carbon", is_active=True).all()
-    ]
+    models = list_carbon_models(db)
     features = allowed_features or set()
     if allowed_features is not None:
         if "app.feature.carbon_stock" not in features:
@@ -90,6 +88,7 @@ def run_agent_analyze(
     request: Request,
     payload: dict,
     allowed_features: set[str] | None = None,
+    owner_key: str = "",
 ) -> dict:
     """
     Agentic AI entrypoint.
@@ -104,6 +103,19 @@ def run_agent_analyze(
     By default the agent returns a validated plan. Set execute=true to run the
     whitelisted GeoMoka analysis endpoint selected by the planner.
     """
+    limits = rate_limiter.get_limits()
+    message = str(payload.get("message") or payload.get("prompt") or "")
+    if len(message) > limits["max_chars"]:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=413, detail="Pesan melampaui batas panjang yang diizinkan.")
+    allowed, _message, retry_after = rate_limiter.check(owner_key or _client_ip(request))
+    if not allowed:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=429, detail="Batas permintaan AI tercapai. Coba lagi nanti.",
+                            headers={"Retry-After": str(retry_after)})
+
     capabilities = build_capabilities_document(db, request, allowed_features)
     plan = plan_agent_request(payload, capabilities)
     tool_features = {
@@ -157,10 +169,7 @@ def run_agent_analyze(
 
 
 def _client_ip(request: Request) -> str:
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else ""
+    return get_client_ip(request)
 
 
 class _AiCallError(Exception):
@@ -256,7 +265,9 @@ def run_agent_control(
     """
     # ── Rate limiting ────────────────────────────────────────────
     client_ip = _client_ip(request)
-    allowed, rl_msg, retry_after = rate_limiter.check(client_ip)
+    # The viewer is authenticated before owner_key is constructed. Separate
+    # accounts behind one proxy do not share the expensive AI quota.
+    allowed, rl_msg, retry_after = rate_limiter.check(owner_key or client_ip)
     if not allowed:
         return (
             {

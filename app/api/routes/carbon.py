@@ -8,16 +8,19 @@ from datetime import UTC, datetime
 
 import ee
 import requests
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response, StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_ee
 from app.core.security import get_current_admin_panel, get_current_app_viewer
+from app.core.bounded_json import read_typed_json_object
 from app.core.viewer_features import require_feature
 from app.db.session import get_db
 from app.services import carbon_service
 from app.services.gee_common import AnalysisError, public_analysis_error
+from app.schemas.carbon_analysis import CarbonAnalysisRequest
 
 router = APIRouter(tags=["carbon"], dependencies=[Depends(require_feature("app.feature.carbon_stock"))])
 logger = logging.getLogger(__name__)
@@ -118,13 +121,40 @@ def green_rankings_page(
     search: str = Query(default="", max_length=100),
     sort_by: str = Query(default="rank", max_length=40),
     sort_dir: str = Query(default="asc", pattern="^(asc|desc)$"),
+    year: int | None = Query(default=None, ge=2015),
+    start_month: int | None = Query(default=None, ge=1, le=12),
+    end_month: int | None = Query(default=None, ge=1, le=12),
+    level: str | None = Query(default=None, pattern="^(province|city|district|village)$"),
+    province: str | None = Query(default=None, max_length=40),
+    city: str | None = Query(default=None, max_length=40),
+    district: str | None = Query(default=None, max_length=40),
     viewer: object = Depends(get_current_app_viewer),
 ):
     from app.api.routes.analysis_jobs import job_owner_key
-    from app.services.green_rankings import publish_snapshot, result_page, snapshot_page
+    from app.services.green_rankings import (
+        publish_snapshot,
+        ranking_config,
+        result_page,
+        snapshot_page,
+    )
 
     try:
         owner = job_owner_key(viewer)
+        filter_config = None
+        if run_id.startswith("snapshot:") and all(
+            value is not None for value in (year, start_month, end_month, level)
+        ):
+            filter_config = ranking_config(
+                {
+                    "level": level,
+                    "province": province,
+                    "city": city,
+                    "district": district,
+                },
+                year,
+                start_month,
+                end_month,
+            )
         result = result_page(
             run_id,
             owner,
@@ -133,6 +163,7 @@ def green_rankings_page(
             search=search,
             sort_by=sort_by,
             sort_dir=sort_dir,
+            filter_config=filter_config,
         )
         if result["done"] and not result.get("snapshot_saved_at"):
             scope_key = publish_snapshot(run_id, owner)
@@ -144,6 +175,7 @@ def green_rankings_page(
                     search=search,
                     sort_by=sort_by,
                     sort_dir=sort_dir,
+                    filter_config=filter_config,
                 )
         return result
     except AnalysisError as exc:
@@ -151,12 +183,38 @@ def green_rankings_page(
 
 
 @router.get("/carbon/green-rankings/{run_id}/export")
-def export_green_rankings(run_id: str, viewer: object = Depends(get_current_app_viewer)):
+def export_green_rankings(
+    run_id: str,
+    year: int | None = Query(default=None, ge=2015),
+    start_month: int | None = Query(default=None, ge=1, le=12),
+    end_month: int | None = Query(default=None, ge=1, le=12),
+    level: str | None = Query(default=None, pattern="^(province|city|district|village)$"),
+    province: str | None = Query(default=None, max_length=40),
+    city: str | None = Query(default=None, max_length=40),
+    district: str | None = Query(default=None, max_length=40),
+    viewer: object = Depends(get_current_app_viewer),
+):
     from app.api.routes.analysis_jobs import job_owner_key
+    from app.services.green_rankings import ranking_config
     from app.services.green_rankings import csv_rows
 
     try:
-        rows = csv_rows(run_id, job_owner_key(viewer))
+        filter_config = None
+        if run_id.startswith("snapshot:") and all(
+            value is not None for value in (year, start_month, end_month, level)
+        ):
+            filter_config = ranking_config(
+                {
+                    "level": level,
+                    "province": province,
+                    "city": city,
+                    "district": district,
+                },
+                year,
+                start_month,
+                end_month,
+            )
+        rows = csv_rows(run_id, job_owner_key(viewer), filter_config=filter_config)
         return StreamingResponse(rows, media_type="text/csv; charset=utf-8", headers={"Content-Disposition": 'attachment; filename="savegeo_green_rankings.csv"'})
     except AnalysisError as exc:
         raise HTTPException(status_code=exc.status_code, detail=public_analysis_error(exc)) from exc
@@ -217,7 +275,8 @@ def direct_carbon_reference_layer(
 
 
 @router.post("/analyze/carbon", dependencies=[Depends(get_current_app_viewer)])
-def analyze_carbon(request: Request, data: dict = Body(...), db: Session = Depends(get_db), viewer: object = Depends(get_current_app_viewer)):
+async def analyze_carbon(request: Request, db: Session = Depends(get_db), viewer: object = Depends(get_current_app_viewer)):
+    data = await read_typed_json_object(request, CarbonAnalysisRequest)
     from app.api.routes.analysis_jobs import job_owner_key
 
     data = {**data, "_request_owner": job_owner_key(viewer)}
@@ -244,7 +303,7 @@ def analyze_carbon(request: Request, data: dict = Body(...), db: Session = Depen
     if requires_ee and not getattr(request.app.state, "ee_initialized", False):
         raise HTTPException(status_code=503, detail="Google Earth Engine belum diinisialisasi. Cek kredensial di Admin Panel.")
     try:
-        return carbon_service.analyze_carbon(db, data)
+        return await run_in_threadpool(carbon_service.analyze_carbon, db, data)
     except AnalysisError as e:
         raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
     except ValueError as e:
@@ -262,15 +321,16 @@ def analyze_carbon(request: Request, data: dict = Body(...), db: Session = Depen
 
 
 @router.post("/analyze/carbon-local", dependencies=[Depends(get_current_app_viewer)])
-def analyze_carbon_local(request: Request, data: dict = Body(...), db: Session = Depends(get_db)):
+async def analyze_carbon_local(request: Request, db: Session = Depends(get_db)):
     """Local/STAC inference; Granite additionally downloads its HLS source from EE."""
+    data = await read_typed_json_object(request, CarbonAnalysisRequest)
     if (
         data.get("model_name") == "ibm_granite_geospatial_biomass"
         and not getattr(request.app.state, "ee_initialized", False)
     ):
         raise HTTPException(status_code=503, detail="Google Earth Engine belum diinisialisasi. Cek kredensial di Admin Panel.")
     try:
-        return carbon_service.analyze_carbon_local(db, data)
+        return await run_in_threadpool(carbon_service.analyze_carbon_local, db, data)
     except AnalysisError as e:
         raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
     except ValueError as e:
@@ -288,11 +348,12 @@ def analyze_carbon_local(request: Request, data: dict = Body(...), db: Session =
 
 
 @router.post("/analyze/carbon-delta", dependencies=[Depends(get_current_app_viewer), Depends(require_ee)])
-def analyze_carbon_delta(data: dict = Body(...), db: Session = Depends(get_db)):
+async def analyze_carbon_delta(request: Request, db: Session = Depends(get_db)):
+    data = await read_typed_json_object(request, CarbonAnalysisRequest)
     if "aoi" not in data:
         raise HTTPException(status_code=400, detail="Missing required field: aoi")
     try:
-        return carbon_service.analyze_carbon_delta(db, data)
+        return await run_in_threadpool(carbon_service.analyze_carbon_delta, db, data)
     except AnalysisError as e:
         raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
     except ValueError as e:

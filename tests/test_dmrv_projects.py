@@ -1,4 +1,5 @@
 import os
+import uuid
 
 import pytest
 from fastapi import Depends, FastAPI, Request
@@ -8,6 +9,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
+from sqlalchemy.schema import CreateSchema, DropSchema
 
 from app.api.routes import dmrv as dmrv_routes
 from app.core.security import get_current_app_viewer
@@ -59,9 +61,14 @@ def env():
     # Set DMRV_TEST_DATABASE_URL to a THROWAWAY PostgreSQL database to run these
     # tests on PostgreSQL; the tables are dropped afterwards. Default: SQLite.
     url = os.environ.get("DMRV_TEST_DATABASE_URL")
+    root_engine = None
+    schema = None
     if url:
-        engine = create_engine(url)
-        Base.metadata.drop_all(engine, tables=TABLES)
+        root_engine = create_engine(url)
+        schema = "dmrv_api_test_" + uuid.uuid4().hex
+        with root_engine.begin() as connection:
+            connection.execute(CreateSchema(schema))
+        engine = create_engine(url, connect_args={"options": f"-csearch_path={schema}"})
     else:
         engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     Base.metadata.create_all(engine, tables=TABLES)
@@ -70,8 +77,8 @@ def env():
         seed.add(Role(id=1, name="limited"))
         seed.add_all([
             User(id=1, username="field-user", email="f@x.test", password_hash="x"),
-            AdminUser(id=1, username="owner-a", password_hash="x"),
-            AdminUser(id=2, username="owner-b", password_hash="x"),
+            AdminUser(id=1, username="owner-a", password_hash="x", is_superuser=True),
+            AdminUser(id=2, username="owner-b", password_hash="x", is_superuser=True),
             AdminUser(id=3, username="no-permission", password_hash="x", role_id=1),
         ])
         seed.commit()
@@ -92,8 +99,11 @@ def env():
     app.dependency_overrides[get_current_app_viewer] = test_viewer
     client = TestClient(app, raise_server_exceptions=False)
     yield client, factory
-    if url:
-        Base.metadata.drop_all(engine, tables=TABLES)
+    if root_engine is not None:
+        engine.dispose()
+        with root_engine.begin() as connection:
+            connection.execute(DropSchema(schema, cascade=True))
+        root_engine.dispose()
     engine.dispose()
 
 

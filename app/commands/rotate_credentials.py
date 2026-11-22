@@ -24,7 +24,7 @@ def main() -> int:
             try:
                 result = storage_service.rotate_credential(row.bucket_path, apply=args.apply)
                 if args.apply:
-                    audit_service.log_audit(db, None, "credential.encryption.rotate", "gee_credential", row.id, detail=result)
+                    audit_service.log_audit(db, None, "credential.encryption.rotate", "gee_credential", str(row.id), detail=result)
                 print(json.dumps({"credential_id": row.id, **result}))
             except Exception as exc:  # noqa: BLE001 - output never includes object/key material
                 failures += 1

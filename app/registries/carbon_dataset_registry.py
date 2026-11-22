@@ -614,7 +614,7 @@ CARBON_EXTERNAL_REGISTRY: dict[str, dict] = {
             "ESA CCI Biomass v4.0 AGB map (Mg biomass/ha, x0.47 for carbon), 100 m, "
             "10x10 degree GeoTIFF tiles served anonymously (no login) from CEDA's dap.ceda.ac.uk "
             "archive. Verified 2026-07-09: HTTP 200, byte-range (accept-ranges) capable, no auth "
-            "required — confirmed compatible with rasterio's /vsicurl/ windowed reads. "
+            "required. Byte ranges are fetched through SaveGeo's bounded HTTPS proxy. "
             "Real calibrated AGB (not a proxy), unlike HANSEN_TREECOVER_AGB_PROXY."
         ),
         "attribution":      "ESA Climate Change Initiative (CCI) Biomass project / CEDA",
@@ -693,7 +693,7 @@ CARBON_EXTERNAL_REGISTRY: dict[str, dict] = {
         "transform":        "divide_10_multiply_0.47",
         "description":      (
             "CTrees global above-ground biomass density, annual 2000-2025 at 100 m. "
-            "Public COGs are read with HTTP range requests over the requested AOI, "
+            "Public COGs are read through bounded HTTP range requests for the requested AOI, "
             "then converted from scaled biomass to Mg C/ha."
         ),
         "attribution":      "CTrees / Yang, Saatchi et al.",

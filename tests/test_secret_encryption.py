@@ -13,6 +13,7 @@ from app.services import storage_service as storage
 def settings(tmp_path, monkeypatch):
     config = SimpleNamespace(secret_encryption_keys=SecretStr(json.dumps({"v1": base64.b64encode(b"a" * 32).decode()})),
                              secret_encryption_active_key_id="v1", credential_allow_legacy_plaintext_read=True,
+                             app_env="development",
                              supabase_url="", supabase_service_role_key="", supabase_gee_credentials_bucket="test-private",
                              upload_path=tmp_path)
     monkeypatch.setattr(crypto, "get_settings", lambda: config)
@@ -67,6 +68,14 @@ def test_legacy_rotation_dry_run_backup_and_restore(settings):
     path.write_bytes(data)
     with pytest.raises(crypto.SecretEncryptionError):
         storage.download_credential("old.json")
+
+
+def test_hosted_runtime_refuses_legacy_plaintext_credentials(settings):
+    path = storage._safe_local_path("hosted-old.json")
+    path.write_bytes(b'{"private_key":"fixture-only"}')
+    settings.app_env = "production"
+    with pytest.raises(crypto.SecretEncryptionError):
+        storage.download_credential("hosted-old.json")
 
 
 @pytest.mark.parametrize("path", ["../outside", "x/../../outside", "C:/secret", "a\\..\\secret", "/absolute", ""])

@@ -3,10 +3,12 @@
 from types import SimpleNamespace
 from threading import BoundedSemaphore
 import asyncio
+import json
 
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 from app.api.routes import analysis_jobs
 from app.api.routes import carbon, crop_monitoring, landcover, regions, vegetation
@@ -30,6 +32,23 @@ def _feature_dependency(router, route_path: str):
         for dependency in [*router.dependencies, *route.dependencies]
         if getattr(dependency.dependency, "__name__", None) == "_dependency"
     )
+
+
+def _json_request(payload: dict) -> Request:
+    body = json.dumps(payload).encode()
+    received = False
+
+    async def receive():
+        nonlocal received
+        if received:
+            return {"type": "http.request", "body": b"", "more_body": False}
+        received = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    return Request({
+        "type": "http", "method": "POST", "path": "/api/analyze/landcover",
+        "headers": [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode())],
+    }, receive)
 
 
 def test_samgeo_jobs_require_login():
@@ -65,7 +84,7 @@ def test_analysis_routes_hide_internal_errors(monkeypatch, path, service, method
 
     monkeypatch.setattr(service, method, fail)
     app.dependency_overrides[require_ee] = lambda: None
-    app.dependency_overrides[get_current_app_viewer] = lambda: object()
+    app.dependency_overrides[get_current_app_viewer] = lambda: AdminUser(id=1)
     app.dependency_overrides[get_db] = lambda: object()
     router, route_path = {
         "/api/analyze/landcover": (landcover.router, "/analyze/landcover"),
@@ -75,11 +94,33 @@ def test_analysis_routes_hide_internal_errors(monkeypatch, path, service, method
     app.dependency_overrides[_feature_dependency(router, route_path)] = lambda: None
     try:
         with TestClient(app) as client:
-            response = client.post(path, json={})
+            response = client.post(path, json={"year": 2026})
     finally:
         app.dependency_overrides.clear()
     assert response.status_code == 500
     assert "private-upstream-token" not in response.text
+
+
+@pytest.mark.parametrize(
+    ("path", "router", "route_path"),
+    [
+        ("/api/analyze/landcover", landcover.router, "/analyze/landcover"),
+        ("/api/analyze/vegetation", vegetation.router, "/analyze/vegetation"),
+        ("/api/analyze/crop-monitoring", crop_monitoring.router, "/analyze/crop-monitoring"),
+    ],
+)
+def test_analysis_routes_reject_out_of_range_year_before_service(monkeypatch, path, router, route_path):
+    app.dependency_overrides[require_ee] = lambda: None
+    app.dependency_overrides[get_current_app_viewer] = lambda: AdminUser(id=1)
+    app.dependency_overrides[_feature_dependency(router, route_path)] = lambda: None
+    try:
+        with TestClient(app) as client:
+            response = client.post(path, json={"year": 2201})
+    finally:
+        app.dependency_overrides.clear()
+    assert response.status_code == 422
+    assert response.headers["content-type"].startswith("application/problem+json")
+    assert response.json()["code"] == "validation_error"
 
 
 def test_region_provider_errors_do_not_expose_upstream_details(monkeypatch):
@@ -138,12 +179,9 @@ def test_landcover_invalid_aoi_returns_client_error(monkeypatch):
     def invalid(_data):
         raise ValueError("private-coordinate-context")
 
-    async def request_json():
-        return {"aoi": {}}
-
     monkeypatch.setattr(landcover.landcover_service, "analyze_landcover", invalid)
     with pytest.raises(HTTPException) as error:
-        asyncio.run(landcover.analyze_landcover(SimpleNamespace(json=request_json)))
+        asyncio.run(landcover.analyze_landcover(_json_request({"aoi": {}})))
     assert error.value.status_code == 400
     assert "private-coordinate-context" not in str(error.value.detail)
 
@@ -152,12 +190,9 @@ def test_upstream_analysis_error_keeps_status_and_hides_details(monkeypatch):
     def unavailable(_data):
         raise AnalysisError("https://provider.example/?token=private-token", 502)
 
-    async def request_json():
-        return {}
-
     monkeypatch.setattr(landcover.landcover_service, "analyze_landcover", unavailable)
     with pytest.raises(HTTPException) as error:
-        asyncio.run(landcover.analyze_landcover(SimpleNamespace(json=request_json)))
+        asyncio.run(landcover.analyze_landcover(_json_request({"year": 2026})))
     assert error.value.status_code == 502
     assert "private-token" not in str(error.value.detail)
 
@@ -174,7 +209,7 @@ def test_dataset_health_hides_upstream_url_and_error(monkeypatch):
     def fail(*_args, **_kwargs):
         raise requests.RequestException("https://provider.example/?token=private-token")
 
-    monkeypatch.setattr(carbon_service.requests, "head", fail)
+    monkeypatch.setattr(carbon_service.public_http, "head", fail)
     key = next(iter(CARBON_EXTERNAL_REGISTRY))
     carbon_service._DATASET_HEALTH_CACHE.pop(key, None)
     result = carbon_service.check_external_dataset_health(key, refresh=True)
@@ -187,7 +222,7 @@ def test_public_dataset_health_uses_cache_without_network(monkeypatch):
     def fail(*_args, **_kwargs):
         raise AssertionError("Public status endpoint must not probe upstream")
 
-    monkeypatch.setattr(carbon_service.requests, "head", fail)
+    monkeypatch.setattr(carbon_service.public_http, "head", fail)
     carbon_service._DATASET_HEALTH_CACHE.clear()
     result = carbon.carbon_dataset_health()
     assert result["datasets"]
@@ -198,8 +233,8 @@ def test_dataset_health_closes_probe_responses(monkeypatch):
     closed = []
     head_response = SimpleNamespace(status_code=405, close=lambda: closed.append("HEAD"))
     get_response = SimpleNamespace(status_code=206, close=lambda: closed.append("GET"))
-    monkeypatch.setattr(carbon_service.requests, "head", lambda *_a, **_kw: head_response)
-    monkeypatch.setattr(carbon_service.requests, "get", lambda *_a, **_kw: get_response)
+    monkeypatch.setattr(carbon_service.public_http, "head", lambda *_a, **_kw: head_response)
+    monkeypatch.setattr(carbon_service.public_http, "get", lambda *_a, **_kw: get_response)
     key = next(iter(CARBON_EXTERNAL_REGISTRY))
     result = carbon_service.check_external_dataset_health(key, refresh=True)
     assert result["status"] == "healthy"
@@ -220,10 +255,10 @@ def test_analysis_job_queue_rejects_overload(monkeypatch):
     monkeypatch.setattr(analysis_jobs, "_job_slots", slots)
 
     with pytest.raises(HTTPException) as error:
-        analysis_jobs.create_analysis_job(
+        analysis_jobs._create_analysis_job_sync(
             request=SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(ee_initialized=False))),
             data={"type": "carbon_local", "payload": {}},
-            viewer=AdminUser(id=1, username="test-admin", password_hash="", role_id=None),
+            viewer=AdminUser(id=1, username="test-admin", password_hash="", role_id=None, is_superuser=True),
             db=object(),
         )
     assert error.value.status_code == 429
@@ -240,10 +275,10 @@ def test_analysis_job_slot_released_after_invalid_provenance(monkeypatch):
     db = SimpleNamespace(rollback=lambda: None)
     monkeypatch.setattr(analysis_jobs.provenance_service, "create_analysis_provenance", invalid)
     with pytest.raises(HTTPException) as error:
-        analysis_jobs.create_analysis_job(
+        analysis_jobs._create_analysis_job_sync(
             request=SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(ee_initialized=False))),
             data={"type": "carbon_local", "payload": {}},
-            viewer=AdminUser(id=1, username="test-admin", password_hash="", role_id=None),
+            viewer=AdminUser(id=1, username="test-admin", password_hash="", role_id=None, is_superuser=True),
             db=db,
         )
     assert error.value.status_code == 422
@@ -275,14 +310,14 @@ def test_analysis_job_result_is_visible_only_to_its_owner(monkeypatch, tmp_path)
     analysis_jobs._write_job(job_id, {"type": "carbon_local", "status": "succeeded", "result": {"value": 7}})
 
     db = SimpleNamespace(get=lambda _model, _key: None)
-    owner = AdminUser(id=1, username="test-admin", password_hash="", role_id=None)
+    owner = AdminUser(id=1, username="test-admin", password_hash="", role_id=None, is_superuser=True)
     own_result = analysis_jobs.get_analysis_job(job_id, viewer=owner, db=db)
     assert own_result["result"] == {"value": 7}
     assert "owner" not in own_result
     with pytest.raises(HTTPException) as denied:
         analysis_jobs.get_analysis_job(
             job_id,
-            viewer=AdminUser(id=2, username="other-admin", password_hash="", role_id=None),
+            viewer=AdminUser(id=2, username="other-admin", password_hash="", role_id=None, is_superuser=True),
             db=db,
         )
     assert denied.value.status_code == 404

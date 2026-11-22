@@ -22,6 +22,7 @@ class Role(Base):
     name: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_viewer: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default="false")
     # Separates an intentionally empty Viewer feature selection from a role
     # that has not received its one-time default feature seed yet.
     feature_permissions_configured: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
@@ -35,6 +36,7 @@ class Role(Base):
             "name": self.name,
             "description": self.description,
             "is_default": self.is_default,
+            "is_viewer": self.is_viewer,
             "permissions": [p.code for p in self.permissions],
         }
 

@@ -147,7 +147,7 @@ def test_ai_response_preserves_load_only_queue_and_requires_confirmation(monkeyp
         {"action": "set_parameter", "target": "carbon.loadOnly", "parameters": {"value": True}},
         {"action": "run_analysis", "target": "carbon.analysis", "parameters": {}},
     ]
-    monkeypatch.setattr(agentic_ai, "_call_openai_compat_tools", lambda *args: json.dumps({
+    monkeypatch.setattr(agentic_ai, "_call_openai_compat_tools", lambda *args, **kwargs: json.dumps({
         "message": "Layer sudah dimuat.", "actions": actions,
     }))
     response = agentic_ai.geoai_with_ai("Muat layer referensi", {}, None,

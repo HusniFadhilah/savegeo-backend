@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -192,6 +192,7 @@ class FieldTree(Base):
 
 class CarbonCalibrationRun(Base):
     __tablename__ = "carbon_calibration_runs"
+    __table_args__ = (Index("ix_carbon_calibration_run_queue", "method", "status", "run_after"),)
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     dataset_pk: Mapped[int] = mapped_column(
@@ -206,6 +207,12 @@ class CarbonCalibrationRun(Base):
     artifact_sha256: Mapped[str | None] = mapped_column(String(64))
     error: Mapped[dict | None] = mapped_column(JSONB)
     progress: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    worker_id: Mapped[str | None] = mapped_column(String(96))
+    lease_expires_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    heartbeat_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    run_after: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: dt.datetime.now(dt.UTC))
     created_by: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id", ondelete="SET NULL"))
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: dt.datetime.now(dt.UTC)
@@ -226,6 +233,9 @@ class CarbonCalibrationRun(Base):
                 "artifact_sha256",
                 "error",
                 "progress",
+                "attempts",
+                "max_attempts",
+                "run_after",
                 "created_at",
                 "completed_at",
             )

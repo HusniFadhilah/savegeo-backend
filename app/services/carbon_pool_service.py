@@ -103,16 +103,38 @@ def _landsat_predictors(region, year, fill_gaps=False):
     return optical.addBands([ndvi, ndmi, dem.rename("elevation"), ee.Terrain.slope(dem).rename("slope")])
 
 
-def _random_forest(reference, roi, meta, model, analysis_year):
+def _detritus_prediction_mask(roi, analysis_year):
+    """Limit detritus predictions to observed tropical tree cover, not reference sample pixels."""
+    year = max(2015, int(analysis_year))
+    labels = (
+        ee.ImageCollection("GOOGLE/DYNAMICWORLD/V1")
+        .filterBounds(roi)
+        .filterDate(f"{year}-01-01", f"{year + 1}-01-01")
+    )
+    if not labels.size().getInfo():
+        raise AnalysisError(f"Dynamic World tahun {year} belum tersedia untuk memetakan tutupan pohon.", 404)
+    tree_cover = labels.select("label").mode().eq(1)
+    mangrove = ee.ImageCollection("LANDSAT/MANGROVE_FORESTS").mosaic().select("1").unmask(0).eq(1)
+    tropical = ee.Image.pixelLonLat().select("latitude").abs().lte(23.5)
+    return tree_cover.And(mangrove.Not()).And(tropical)
+
+
+def _training_sample_plan(is_detritus, area, sample_count):
+    use_land_geometry = bool(is_detritus and area > 100000)
+    return (max(sample_count, 10000) if use_land_geometry else sample_count), use_land_geometry
+
+
+def _random_forest(reference, roi, meta, model, analysis_year, *, allow_large=False, cached_model_info=None):
     # Bounded regional fitting keeps global-load requests separate from model calibration.
     region = roi.bounds(maxError=100).buffer(20000, maxError=100).bounds(maxError=100)
     area = region.area(maxError=100).divide(1e6).getInfo()
-    if area > 100000:
+    if area > 100000 and not allow_large:
         raise AnalysisError("Model RF BGB/SOC mendukung AOI regional hingga 100.000 km² termasuk buffer. Kecilkan AOI atau muat raster referensi langsung.", 422)
     reference_year = meta.get("selection_year") or (meta.get("year") if isinstance(meta.get("year"), int) else 2020)
-    training_predictors = _landsat_predictors(region, reference_year)
+    is_detritus = meta.get("target_pool") in {"litter_carbon", "deadwood_carbon"}
+    training_predictors = _landsat_predictors(region, reference_year, fill_gaps=is_detritus)
     prediction_predictors = (
-        training_predictors if analysis_year == reference_year else _landsat_predictors(region, analysis_year)
+        training_predictors if analysis_year == reference_year else _landsat_predictors(region, analysis_year, fill_gaps=is_detritus)
     )
     feature_names = ["blue", "green", "red", "nir", "swir1", "swir2", "ndvi", "ndmi", "elevation", "slope"]
     # Sample at no finer than 300 m, including 30 m modeled references. This
@@ -120,31 +142,51 @@ def _random_forest(reference, roi, meta, model, analysis_year):
     sample_scale = max(300, int(meta["resolution"]))
     lonlat = ee.Image.pixelLonLat()
     block = lonlat.select("longitude").divide(0.05).floor().add(lonlat.select("latitude").divide(0.05).floor().multiply(7)).abs().mod(5).rename("holdout")
-    samples = reference.addBands(training_predictors).addBands(block).sample(region=region, scale=sample_scale, numPixels=1600, seed=42, geometries=False, tileScale=4)
+    sample_count = max(1600, min(20000, int(model.get("metadata_json", {}).get("rf_samples", 1600))))
+    # On island/national bounding boxes most candidate pixels are ocean or
+    # outside the forest reference mask. Sample the selected land geometry and
+    # oversample candidates, while preserving the independent spatial holdout.
+    sample_count, use_land_geometry = _training_sample_plan(is_detritus, area, sample_count)
+    sample_region = roi if use_land_geometry else region
+    samples = reference.addBands(training_predictors).addBands(block).sample(region=sample_region, scale=sample_scale, numPixels=sample_count, seed=42, geometries=False, tileScale=4)
     train = samples.filter(ee.Filter.neq("holdout", 0))
     valid = samples.filter(ee.Filter.eq("holdout", 0))
-    counts = ee.Dictionary({"training": train.size(), "validation": valid.size()}).getInfo()
-    if counts["training"] < 60 or counts["validation"] < 20:
-        raise AnalysisError("Piksel referensi/kovariat valid terlalu sedikit untuk kalibrasi RF dan spatial holdout. Pilih AOI daratan lebih luas atau mode referensi.", 422)
+    cached_metrics = (cached_model_info or {}).get("validation_metrics")
+    if cached_metrics:
+        counts = {"training": int(cached_model_info.get("n_samples", 0)),
+                  "validation": int(cached_model_info.get("validation_samples", 0))}
+    else:
+        counts = ee.Dictionary({"training": train.size(), "validation": valid.size()}).getInfo()
+        if counts["training"] < 60 or counts["validation"] < 20:
+            raise AnalysisError("Piksel referensi/kovariat valid terlalu sedikit untuk kalibrasi RF dan spatial holdout. Pilih AOI daratan lebih luas atau mode referensi.", 422)
     classifier = ee.Classifier.smileRandomForest(numberOfTrees=60, minLeafPopulation=5, bagFraction=0.7, seed=42).setOutputMode("REGRESSION").train(train, "agb", feature_names)
-    predicted = prediction_predictors.classify(classifier, "agb").max(0).updateMask(reference.mask())
-    checked = valid.classify(classifier, "prediction")
-    average = ee.Number(checked.aggregate_mean("agb"))
+    predicted = prediction_predictors.classify(classifier, "agb").max(0)
+    predicted = predicted.updateMask(
+        _detritus_prediction_mask(roi, analysis_year) if is_detritus else reference.mask()
+    )
+    if cached_metrics:
+        metrics = cached_metrics
+    else:
+        checked = valid.classify(classifier, "prediction")
+        average = ee.Number(checked.aggregate_mean("agb"))
 
-    def residuals(feature):
-        difference = ee.Number(feature.get("prediction")).subtract(feature.get("agb"))
-        return feature.set({"squared_error": difference.pow(2), "absolute_error": difference.abs(), "bias": difference,
-                            "squared_deviation": ee.Number(feature.get("agb")).subtract(average).pow(2)})
+        def residuals(feature):
+            difference = ee.Number(feature.get("prediction")).subtract(ee.Number(feature.get("agb")))
+            return feature.set({"squared_error": difference.pow(2), "absolute_error": difference.abs(), "bias": difference,
+                                "squared_deviation": ee.Number(feature.get("agb")).subtract(average).pow(2)})
 
-    checked = checked.map(residuals)
-    mse = ee.Number(checked.aggregate_mean("squared_error"))
-    variance = ee.Number(checked.aggregate_mean("squared_deviation"))
-    metrics = ee.Dictionary({"rmse": mse.sqrt(), "mae": checked.aggregate_mean("absolute_error"), "bias": checked.aggregate_mean("bias"),
-                             "r2": ee.Algorithms.If(variance.gt(0), ee.Number(1).subtract(mse.divide(variance)), None)}).getInfo()
+        checked = checked.map(residuals)
+        mse = ee.Number(checked.aggregate_mean("squared_error"))
+        variance = ee.Number(checked.aggregate_mean("squared_deviation"))
+        metrics = ee.Dictionary({"rmse": mse.sqrt(), "mae": checked.aggregate_mean("absolute_error"), "bias": checked.aggregate_mean("bias"),
+                                 "r2": ee.Algorithms.If(variance.gt(0), ee.Number(1).subtract(mse.divide(variance)), None)}).getInfo()
     return predicted, {"n_samples": counts["training"], "validation_samples": counts["validation"],
                        "validation_metrics": metrics, "validation_type": "spatial_reference_holdout",
                        "sample_scale_m": sample_scale, "feature_names": feature_names,
                        "reference_year": reference_year, "covariate_year": analysis_year,
+                       "training_area_km2": float(area), "training_domain": "selected_aoi_buffer",
+                       "training_sample_scale_m": sample_scale, "training_sample_count": sample_count,
+                       "large_aoi_regional_fit": bool(area > 100000),
                        "validation_note": "Metrik mengukur kesesuaian dengan raster referensi pada blok spasial terpisah; pemetaan tahun lain adalah transfer kovariat, belum divalidasi dengan data lapangan tahun tersebut."}
 
 
@@ -192,7 +234,8 @@ def build_pool_export_image(db, data, roi):
         return soilgrids_stock_image(meta["depth_cm"], ee)
     if method == "ipcc_root_to_shoot":
         return _ipcc_image(meta, model, roi)
-    image, _ = _random_forest(reference, roi, meta, model, int(data["year"]))
+    image, _ = _random_forest(reference, roi, meta, model, int(data["year"]),
+                              allow_large=bool(data.get("simple_mode")))
     return image
 
 
@@ -223,6 +266,19 @@ def analyze_carbon_pool(db, data):
         raise AnalysisError(f"Tahun inferensi harus antara 1984-{current_year}.", 400)
     annual_model = bool(model and method not in {"soil_stock_integration", "ipcc_root_to_shoot"})
     analysis_year = requested_analysis_year if annual_model else source_year
+    scale = max(int(meta["resolution"]), int(data.get("scale") or meta["resolution"]))
+    simple_baseline = bool(data.get("simple_mode") and not model)
+    if data.get("simple_mode"):
+        bounds_area = calculation_roi.bounds(maxError=100).area(maxError=100).getInfo()
+        scale = summary_scale(scale, bounds_area, defaults["max_pixels"])
+    annual_identity = None
+    saved_summary = None
+    if annual_model and not data.get("load_only"):
+        from app.services.carbon_annual_store import estimate_identity, load_summary
+
+        annual_identity = estimate_identity(data, model, analysis_year, source_year, scale)
+        saved_summary = load_summary(db, annual_identity[0])
+    cached_model_info = saved_summary.get("model_info") if saved_summary else None
     if model:
         if method == "saved_reference_ensemble":
             from app.services.carbon_saved_models import saved_model_image
@@ -235,26 +291,26 @@ def analyze_carbon_pool(db, data):
         elif method == "ipcc_root_to_shoot":
             image = _ipcc_image(meta, model, calculation_roi)
         else:
-            image, extras = _random_forest(reference, calculation_roi, meta, model, analysis_year)
-    scale = max(int(meta["resolution"]), int(data.get("scale") or meta["resolution"]))
-    simple_baseline = bool(data.get("simple_mode") and not model)
-    if data.get("simple_mode"):
-        bounds_area = calculation_roi.bounds(maxError=100).area(maxError=100).getInfo()
-        scale = summary_scale(scale, bounds_area, defaults["max_pixels"])
-    vis = {"min": meta.get("vis_min", defaults["carbon_vis_min"]),
-           "max": meta.get("vis_max", defaults["carbon_vis_max"]),
-           "palette": meta.get("vis_palette", defaults["carbon_vis_palette"])}
+            image, extras = _random_forest(reference, calculation_roi, meta, model, analysis_year,
+                                           allow_large=bool(data.get("simple_mode")),
+                                           cached_model_info=cached_model_info)
+    pool_key = {
+        "aboveground_biomass_carbon": "agb",
+        "belowground_biomass_carbon": "bgb",
+        "soil_organic_carbon": "soc",
+        "litter_carbon": "litter",
+        "deadwood_carbon": "deadwood",
+    }.get(meta.get("target_pool"))
+    pool_vis = defaults.get("carbon_pool_visualization", {}).get(pool_key, {})
+    vis = {
+        "min": pool_vis.get("min", meta.get("vis_min", defaults["carbon_vis_min"])),
+        "max": pool_vis.get("max", meta.get("vis_max", defaults["carbon_vis_max"])),
+        "palette": pool_vis.get("palette", meta.get("vis_palette", defaults["carbon_vis_palette"])),
+    }
     stats = None
     area_info = {"calculation_mode": "clipped_aoi" if clipped else "full_tiles", "total_carbon_tons": None,
                  "carbon_dioxide_equivalent_tons": None, "description": meta["description"]}
     coverage = None
-    annual_identity = None
-    saved_summary = None
-    if annual_model and method == "saved_reference_ensemble" and not data.get("load_only"):
-        from app.services.carbon_annual_store import estimate_identity, load_summary
-
-        annual_identity = estimate_identity(data, model, analysis_year, source_year, scale)
-        saved_summary = load_summary(db, annual_identity[0])
     if saved_summary:
         stats = saved_summary["statistics"]
         area_info = saved_summary["area_info"]
@@ -287,7 +343,9 @@ def analyze_carbon_pool(db, data):
         coverage = min(100, raw["valid_area_sum"] / raw["aoi_area"] * 100) if raw["aoi_area"] else None
         area_info.update(calculation_area_ha=raw["aoi_area"], area_ha=raw["aoi_area"], valid_area_ha=raw["valid_area_sum"],
                          total_carbon_tons=total, carbon_dioxide_equivalent_tons=total * defaults["carbon_co2_factor"] if total is not None else None)
-    if data.get("auto_vis") and stats and stats["max"] > stats["min"]:
+    # The per-pool admin stretch controls the served tile and its legend. Keep
+    # AOI-specific auto-stretch only for datasets without a known carbon pool.
+    if data.get("auto_vis") and not pool_vis and stats and stats["max"] > stats["min"]:
         vis.update(min=stats["min"], max=stats["max"])
     display = image.clip(calculation_roi)
     tile = display.getMapId(vis)["tile_fetcher"].url_format
@@ -338,7 +396,13 @@ def analyze_carbon_pool(db, data):
         persisted = bool(saved_summary)
         if not saved_summary:
             persisted = save_summary(db, annual_identity, data, model, analysis_year, source_year,
-                                     {"statistics": stats, "area_info": area_info, "coverage": coverage})
+                                     {"statistics": stats, "area_info": area_info, "coverage": coverage,
+                                      "model_info": {key: extras.get(key) for key in (
+                                          "n_samples", "validation_samples", "validation_metrics", "validation_type",
+                                          "sample_scale_m", "training_area_km2", "training_domain",
+                                          "training_sample_scale_m", "training_sample_count", "large_aoi_regional_fit",
+                                          "reference_year", "covariate_year", "validation_note",
+                                      ) if key in extras}})
         result["model_info"].update(
             annual_summary_source="database" if saved_summary else "computed",
             annual_summary_key=annual_identity[0],

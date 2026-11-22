@@ -108,6 +108,16 @@ def compute_terrain(elevation: np.ndarray, pixel_size_m: float) -> dict[str, np.
     approximation of GEE's ee.Terrain.slope/aspect (which uses Horn's method).
     No richdem/gdaldem dependency added.
     """
+    if not np.isfinite(pixel_size_m) or pixel_size_m <= 0:
+        raise ValueError("Pixel size must be finite and positive")
+    valid = np.isfinite(elevation)
+    # Include the centre as well as gradient neighbours in the validity mask.
+    # np.gradient alone can yield a finite derivative at a missing centre.
+    valid_kernel = valid.copy()
+    valid_kernel[1:, :] &= valid[:-1, :]
+    valid_kernel[:-1, :] &= valid[1:, :]
+    valid_kernel[:, 1:] &= valid[:, :-1]
+    valid_kernel[:, :-1] &= valid[:, 1:]
     dz_dy, dz_dx = np.gradient(elevation, pixel_size_m)
     slope_rad = np.arctan(np.hypot(dz_dx, dz_dy))
     slope_deg = np.degrees(slope_rad)
@@ -115,6 +125,8 @@ def compute_terrain(elevation: np.ndarray, pixel_size_m: float) -> dict[str, np.
     aspect_rad = np.arctan2(-dz_dx, dz_dy)
     aspect_deg = np.degrees(aspect_rad)
     aspect_deg = np.where(aspect_deg < 0, aspect_deg + 360, aspect_deg)
+    slope_deg = np.where(valid_kernel, slope_deg, np.nan)
+    aspect_deg = np.where(valid_kernel, aspect_deg, np.nan)
 
     return {"elevation": elevation, "slope": slope_deg, "aspect": aspect_deg}
 
@@ -127,7 +139,7 @@ def compute_interactions(
 ) -> dict[str, np.ndarray]:
     """NDVI x elevation, NDMI x slope, forest_mask x NDVI, B8 x B11.
 
-    Any missing input (no terrain or no forest_mask) yields an all-zero array
+    Any missing input (no terrain or no forest_mask) yields an all-NaN array
     of the correct shape rather than raising, documented via a debug log.
     """
     shape = bands["B8"].shape
@@ -138,13 +150,13 @@ def compute_interactions(
         elevation = terrain["elevation"]
         slope = terrain["slope"]
     else:
-        logger.debug("compute_interactions: no terrain provided, elevation/slope interactions zeroed")
-        elevation = np.zeros(shape)
-        slope = np.zeros(shape)
+        logger.debug("compute_interactions: no terrain provided, elevation/slope interactions unavailable")
+        elevation = np.full(shape, np.nan)
+        slope = np.full(shape, np.nan)
 
     if forest_mask is None:
-        logger.debug("compute_interactions: no forest_mask provided, forest_mask_x_NDVI zeroed")
-        forest_mask = np.zeros(shape)
+        logger.debug("compute_interactions: no forest_mask provided, forest_mask_x_NDVI unavailable")
+        forest_mask = np.full(shape, np.nan)
 
     return {
         "NDVI_x_elevation": ndvi * elevation,

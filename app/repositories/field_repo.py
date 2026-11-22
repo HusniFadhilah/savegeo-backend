@@ -1,12 +1,9 @@
-"""Read/write repository for the `fields` table (Crop Monitoring). Shared,
-no-owner list - see `app.db.models.field.Field`'s docstring for why there's
-no ownership check here (unlike `disaster_repo`'s publish/ownership gates).
-"""
+"""Owner-scoped reads and writes for Crop Monitoring boundaries."""
 from __future__ import annotations
 
 import datetime as dt
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, defer
 
 from app.db.models.field import Field
 from app.registries.crop_registry import estimate_harvest_days
@@ -21,18 +18,25 @@ def _compute_estimated_harvest_date(commodity: str, planting_date: dt.date | Non
     return planting_date + dt.timedelta(days=duration)
 
 
-def list_fields(db: Session) -> list[Field]:
-    return db.query(Field).order_by(Field.created_at.desc()).all()
+def list_fields(db: Session, owner_key: str, *, offset: int = 0, limit: int = 100) -> list[Field]:
+    if not owner_key:
+        return []
+    return db.query(Field).options(defer(Field.geojson)).filter(Field.owner_key == owner_key).order_by(Field.created_at.desc(), Field.id.desc()).offset(offset).limit(limit).all()
 
 
-def get_field(db: Session, field_id: int) -> Field | None:
-    return db.get(Field, field_id)
+def get_field(db: Session, field_id: int, owner_key: str) -> Field | None:
+    if not owner_key:
+        return None
+    return db.query(Field).filter(Field.id == field_id, Field.owner_key == owner_key).first()
 
 
-def create_field(db: Session, data: dict) -> Field:
+def create_field(db: Session, data: dict, owner_key: str) -> Field:
+    if not owner_key:
+        raise ValueError("Field owner is required")
     commodity = data["commodity"]
     planting_date = data.get("planting_date")
     field = Field(
+        owner_key=owner_key,
         name=data["name"],
         geojson=data["geojson"],
         area_ha=data["area_ha"],

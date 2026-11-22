@@ -2,6 +2,31 @@
 
 ## Local workflow
 
+### Security rollout requirements
+
+The runtime image runs as UID/GID 10001. Before deploying it, back up the
+database and runtime directory, verify the absolute runtime directory on the
+server, and grant that UID read/write access to the mounted `var` directory.
+Check existing model, upload and dMRV evidence files as well as newly created
+files. The worker and API must mount the same runtime directory. Do not change
+production ownership until the target directory and backup have been checked.
+Keep existing host ownership and grant UID 10001 an explicit ACL on `var`, with
+default ACLs on its directories. Test both the deployment account and UID 10001.
+The production API binds to loopback behind Apache. `prepare_runtime_database.py`
+verifies the Docker bridge gateway used by that proxy and records it as trusted;
+Uvicorn proxy-header rewriting stays disabled so forwarding is interpreted once.
+
+The web process loads carbon models from ONNX and JSON only. Keep legacy
+pickle files and original metadata as backup. Convert trusted legacy models
+offline with `python -m scripts.convert_trusted_carbon_model <file.pkl> --sha256
+<independently-verified-hash>` and compare predictions before rollout. New
+uploads accept ONNX, remain inactive and require review before activation.
+Uploaded files must never be passed to the offline pickle converter.
+
+`/api/live` checks process availability; `/api/ready` checks database access
+and returns 503 on failure. Production smoke tests must also check schema
+revision, authorized access and analysis results.
+
 1. Create `.venv` with Python 3.11.
 2. Install `pip install -e ".[dev]"`.
 3. Copy `.env.example` to `.env` and set `DATABASE_URL`, JWT, GEE, and storage settings.
@@ -190,3 +215,61 @@ journalctl -u savegeo-backend.service -n 150 --no-pager
 4. ZIP manifests and entry checksums are checked on verify and download. This is not object-lock/WORM storage and does not replace a retention policy or restore drill. No production restore drill has been completed for this feature.
 5. Evidence packages built from the current field-summary snapshot are intentionally incomplete. Submission is blocked until every required component is provided and reviewed. `approved` means internal reviewer approval only; external verification and issuance require separately documented authorized records.
 6. A rollback below migration `0043_dmrv_evidence_packages` removes submission/review tables; a rollback below `0042_dmrv_monitoring_periods` also removes evidence package metadata. Restore the database and evidence files from the same verified backup rather than downgrading production data in place.
+
+## Reproducible model training (DVC and MLflow)
+
+The optional `mlops` extra installs DVC and MLflow without adding them to the production API runtime. The committed `dvc.yaml` pipeline reads a field/reference CSV whose location and training parameters are set in `params.yaml`; sensitive measurements must be stored in a private DVC remote, not Git. Configure that remote in the operator's local DVC config before pushing data.
+
+```bash
+pip install -e '.[mlops]'
+dvc remote add --local --default savegeo <private-object-storage-uri>
+dvc add data/training/carbon.csv
+dvc push
+dvc repro train_grouped_carbon
+```
+
+The trainer rejects missing/non-finite values, fewer than five independent plot groups, constant targets, and models that fail the configured GroupKFold preflight when `--register` is used. Defaults require R2 >= 0 and candidate RMSE below the mean-baseline RMSE; adjust `training.minimum_r2` and `training.max_baseline_rmse_ratio` only for a documented domain policy. OOF metrics, baseline, dataset and artifact SHA-256 values, feature/target schema, seed, estimator settings, installed distribution versions and Git revision are written to the run manifest. `--mlflow` additionally logs parameters, metrics and artifacts to `MLFLOW_TRACKING_URI`; credentials and tracking URI belong in the deployment secret store. The project does not yet include a complete environment lockfile, so the resolved-version manifest improves auditability but does not by itself guarantee bit-for-bit reproduction across machines.
+
+Without DVC, a candidate can be trained directly with `python -m scripts.train_reproducible_model` and the same CLI arguments. `--register` stores a content-addressed ONNX artifact as an inactive candidate; it never activates or makes the model default. Evaluation and independent review in Admin are still required before activation. DVC execution and MLflow connectivity require the operator's dataset, private remote and tracking service, so they are not claimed as production-verified here.
+
+Reference-raster GEE training follows the same lifecycle: new saved ensembles receive content-derived version names, encrypted spatial out-of-fold evidence and the `evaluated` state. Training no longer switches the serving version. A reviewer still needs to inspect that evidence and activate the exact artifact in Admin.
+
+Earth Engine analysis jobs (carbon, vegetation and land cover/change) pin the current serving-code identity. The pin includes the product version, deployment commit when available, a SHA-256 over the carbon, vegetation, land-cover, dataset-registry and shared GEE serving modules, and the configured land-cover model registry checksum. A queued job is rejected with 409 if the serving deployment or registry changes before execution. Database-backed ONNX and frozen GEE carbon ensembles additionally pin their row, version, artifact checksum and approval digest. The manifest records the serving revision for later report generation. This pins application code and registered model configuration; it does not freeze mutable collections/assets hosted by Earth Engine.
+
+### Field predictions from GEE
+
+`POST /api/admin/carbon-calibration/datasets/{dataset_id}/field-predictions` starts a stored `CarbonCalibrationRun` for one pool/year and a batch of up to 500 observations. It automatically selects the highest-scoring active GEE saved ensemble for that pool, requiring a current encrypted evaluation and independent approval. Pass `offset` to process later batches. The run endpoint is `GET /api/admin/carbon-calibration/runs/{run_id}`. Predictions are keyed by model name/version, year and artifact checksum; reruns reuse matching values and refuse to overwrite different values under the same identity. Admin UI then pairs the stored predictions against field calibration/validation plots and saves the resulting assessment automatically; SOC requires an explicit matching depth, and time-gap/coverage exclusions remain visible. The automatic assessment does not create a calibration candidate; run the manual assessment after all required batches are present when fitting a calibration candidate.
+
+Plot polygons in `carbon_field_plots.geometry_normalized` are used when available. Older observations without a polygon use a circular buffer with area equal to the recorded plot area and center at its coordinates. Run metrics disclose which observations lacked valid pixels and include a checksum of the generated prediction snapshot. This provides automatic prediction pairing for eligible saved GEE ensembles; it does not create field observations, validate unapproved models, or establish representativeness. Jobs currently use the carbon-calibration in-process executor, so operators must monitor/reconcile queued or running rows after a process restart.
+
+### Reports from saved analysis jobs
+
+`POST /api/reports/analysis-jobs/{job_id}/executive-summary` creates a DOCX from the persisted successful result and server provenance. It enforces job ownership and feature access and refuses client-supplied replacement metrics. The carbon workspace exposes this report per completed analysis job; its existing complete PDF export remains available. No report approval/version workflow is implied by this endpoint.
+
+### Pre-deploy recovery bundle
+
+The production deploy step now refuses to continue when PostgreSQL is not running or the pre-deploy custom-format dump fails its non-empty and `pg_restore --list` checks. It atomically writes the dump, archives `var/dmrv/evidence` when present, and records SHA-256 checksums plus the deployed application commit in a manifest. These artifacts are kept under the sibling `private-backups` directory with restrictive permissions. This step does not encrypt artifacts, schedule off-host copies, or prove restoreability; do not treat it as a completed disaster-recovery control until encrypted storage, retention, and an isolated restore drill are configured and recorded.
+
+### Operations not verified here
+
+DVC/MLflow, the GEE field extraction route, report download, production database migrations, live inference, scheduled backup, and restore are not exercised by the code changes described above. A DVC dataset, private remote and MLflow tracking service must be configured by the operator. The pre-deploy bundle checks structural readability and checksums only; no production restore drill is claimed.
+
+### Encrypted off-site backups and restore drills
+
+The scheduled workflows `backup-production.yml` and `restore-drill-production.yml` call `scripts/backup_offsite.sh` daily and restore the latest backup into a disposable PostgreSQL container weekly. They use the existing pinned SSH host, deploy key, and VPN GitHub secrets. The production host must have `age`, AWS CLI, `jq`, Docker Compose, and an AWS role with access to the configured private S3 prefix. Set `SAVEGEO_BACKUP_S3_URI`, `SAVEGEO_BACKUP_AGE_RECIPIENT`, and `SAVEGEO_BACKUP_RETENTION_DAYS` in the server `.env`. Store the matching age identity at `SAVEGEO_BACKUP_AGE_IDENTITY_FILE` with mode `0600`; keep the private identity outside GitHub workflow logs and source control.
+
+Each run streams the database dump and the persistent model files, uploads/evaluation data, dMRV integrity documents, disaster rasters, and land-cover configuration directly through age encryption (override the relative `var/` paths with `SAVEGEO_BACKUP_DATA_PATHS` where the server layout differs), so plaintext archive copies are not written to the host temp directory. It enables S3 versioning, merges a named lifecycle rule without replacing unrelated rules, and expires current/noncurrent objects after the configured retention window. The weekly restore drill checks encrypted object checksums, restores the database into a network-isolated disposable PostgreSQL container, checks the Alembic marker and application table count, and safely extracts evidence/runtime archives into temporary directories. Keep the active `SECRET_ENCRYPTION_KEYS` in the server secret manager and available during recovery; they are deliberately not included in the archive. The workflows are configured but have not been run; off-site credentials, bucket policy, recipient identity, S3 lifecycle permission, and a successful restore are not claimed until an Actions run succeeds.
+
+The deployment also keeps a verified pre-deploy PostgreSQL dump under `../private-backups`. Run `restore-local-backup-drill-production.yml` manually to restore the latest dump into a disposable PostgreSQL container with networking disabled. This verifies that the on-host database backup can be read and restored without writing to production. It does not replace the encrypted off-site backup or its restore drill. The backup scripts read only their allowlisted settings from `.env` as data and never execute that file.
+
+### Durable field-prediction extraction
+
+Field prediction requests now commit to `carbon_calibration_runs` and return immediately. The `field-prediction-worker` Compose service claims rows with `FOR UPDATE SKIP LOCKED`, maintains an expiring lease and heartbeat, retries transient provider failures with bounded backoff, and requeues expired leases after a worker restart. Final prediction rows publish only while the worker still owns the lease. Migration `0060_durable_field_prediction_queue` is required before enabling the new worker. Production deployment and an Earth Engine extraction run remain unverified.
+
+### Portfolio dashboard and analysis preflight
+
+`GET /api/dmrv/dashboard` returns a membership-filtered portfolio summary across projects, analysis jobs, monitoring periods, evidence packages, submissions, and risk records, with an optional date window. `GET /api/dmrv/projects/{id}/dashboard` provides the same summary for one project. The existing portfolio page uses the cross-project endpoint for its counters and recent jobs. `/api/analysis-jobs/preflight` reports local input/workload checks; the analysis queue and project-analysis path block invalid geometry/date/year/cloud/resolution input, and completed jobs retain only quality signals actually reported by their data providers. GEE credentials and catalog availability are checked at execution time and are intentionally reported as deferred during local preflight.
+
+### GEE model review and activation
+
+Configured custom land-cover classifier assets are now registered as immutable `UploadedModel` releases with a config checksum. `POST /api/admin/landcover-models/releases/{id}/evaluate` samples the exact GEE release at independent holdout locations, computes confusion-matrix metrics on the server, retains holdout data encrypted, and records split/source declarations. The existing request-review, independent-review, and activate routes apply to these releases. Custom GEE asset serving fails closed until approval and activation; analysis jobs pin the active release id, version, artifact hash, and approval digest. Built-in upstream reference products remain code/data adapters and do not claim field validation; custom GEE providers need a server-side evaluation adapter before activation is supported.

@@ -11,14 +11,36 @@ logger = logging.getLogger(__name__)
 
 # Bump when predictor compositing or the map mask changes; otherwise annual
 # summaries computed with the older raster coverage would be reused.
-ANNUAL_ALGORITHM_VERSION = "landsat-annual-gap-fill-tree-mask-v2"
+ANNUAL_ALGORITHM_VERSION = "landsat-annual-gap-fill-tree-mask-v3"
+
+
+def _canonical_aoi_identity(aoi):
+    """Hash geometry only so admin AOIs share cache rows across labels and UI sources."""
+    if not isinstance(aoi, dict):
+        return aoi
+    geometry = aoi.get("geojson")
+    if isinstance(geometry, dict):
+        if geometry.get("type") == "Feature":
+            geometry = geometry.get("geometry")
+        elif geometry.get("type") == "FeatureCollection":
+            geometry = {
+                "type": "FeatureCollection",
+                "features": [
+                    {"type": "Feature", "geometry": feature.get("geometry"), "properties": {}}
+                    for feature in geometry.get("features", []) if isinstance(feature, dict)
+                ],
+            }
+        return {"geojson": geometry}
+    if all(key in aoi for key in ("west", "south", "east", "north")):
+        return {"bounds": [float(aoi[key]) for key in ("west", "south", "east", "north")]}
+    return aoi
 
 
 def estimate_identity(data, model, analysis_year, reference_year, scale, today=None):
     today = today or datetime.now(UTC).date()
     # Historical years are complete; the current year must acquire new imagery.
     observed_through = min(date(analysis_year, 12, 31), today)
-    aoi_json = json.dumps(data["aoi"], sort_keys=True, separators=(",", ":"))
+    aoi_json = json.dumps(_canonical_aoi_identity(data["aoi"]), sort_keys=True, separators=(",", ":"), allow_nan=False)
     aoi_checksum = hashlib.sha256(aoi_json.encode()).hexdigest()
     identity = {
         # Distribution/quantiles are part of the stored response since schema 2.
@@ -27,7 +49,11 @@ def estimate_identity(data, model, analysis_year, reference_year, scale, today=N
         "dataset": data["reference_dataset"], "model": model["name"],
         "version": model.get("version"), "metadata": model["metadata_json"],
         "scale": scale, "clipped": bool(data.get("clip_to_aoi", True)),
-        "algorithm": ANNUAL_ALGORITHM_VERSION,
+        "algorithm": ANNUAL_ALGORITHM_VERSION + (
+            "-detritus-land-sampling-v1" if data["reference_dataset"] in {
+                "TROPICAL_LITTER_REFERENCE", "TROPICAL_DEADWOOD_REFERENCE"
+            } else ""
+        ),
     }
     key = hashlib.sha256(json.dumps(identity, sort_keys=True, default=str).encode()).hexdigest()
     return key, aoi_checksum, observed_through

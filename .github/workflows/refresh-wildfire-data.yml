@@ -3,7 +3,9 @@ name: Refresh production wildfire satellite data
 on:
   schedule:
     - cron: "17 2 * * *"
-  workflow_run:
+  # Only trusted main deployment triggers this job; no triggering-run code or
+  # artifact is consumed, and the successful SHA is checked below.
+  workflow_run: # zizmor: ignore[dangerous-triggers]
     workflows: ["Test and deploy SAVEGEO backend"]
     branches: [main]
     types: [completed]
@@ -45,7 +47,7 @@ concurrency:
 
 jobs:
   refresh:
-    if: ${{ github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_sha == github.sha) }}
+    if: ${{ github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_sha == github.sha && !contains(github.event.workflow_run.head_commit.message, '[skip-wildfire-refresh]')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     environment: production
@@ -61,32 +63,36 @@ jobs:
       CAMS_TO: ${{ inputs.cams_to }}
       REFRESH_HOTSPOTS: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_run' || inputs.refresh_hotspots) && 'true' || 'false' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
 
       - name: Set rolling data window for scheduled refresh
         if: github.event_name == 'schedule' || github.event_name == 'workflow_run'
         shell: bash
         run: |
-          today="$(date -u +%F)"
-          echo "HOTSPOT_FROM=$(date -u -d '6 days ago' +%F)" >> "$GITHUB_ENV"
-          echo "HOTSPOT_TO=$today" >> "$GITHUB_ENV"
-          # CAMS/GFAS products arrive with a short publication lag; re-fetch an
-          # overlapping five-day window so late frames replace older versions.
-          echo "CAMS_FROM=$(date -u -d '7 days ago' +%F)" >> "$GITHUB_ENV"
-          echo "CAMS_TO=$(date -u -d '3 days ago' +%F)" >> "$GITHUB_ENV"
+          python3 - <<'PY'
+          import os
+          from datetime import datetime, timezone, timedelta
+          today = datetime.now(timezone.utc).date()
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as output:
+              for key, days in [('HOTSPOT_FROM',6),('HOTSPOT_TO',0),('CAMS_FROM',7),('CAMS_TO',3)]:
+                  output.write(f'{key}={(today-timedelta(days=days)).isoformat()}\n')
+          PY
 
       - name: Validate operation arguments and secrets
         env:
           VPN_CONFIG_B64: ${{ secrets.VPN_CONFIG_B64 }}
           VPN_AUTH_B64: ${{ secrets.VPN_AUTH_B64 }}
           SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
-          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
         run: |
           python3 - <<'PY'
           import os, re
           from datetime import date, datetime, timezone
           required = ['DEPLOY_HOST','DEPLOY_SSH_PORT','DEPLOY_USER','BACKEND_REMOTE_DIR',
-                      'VPN_CONFIG_B64','VPN_AUTH_B64','SSH_KNOWN_HOSTS','SSH_PASSWORD']
+                      'VPN_CONFIG_B64','VPN_AUTH_B64','SSH_KNOWN_HOSTS','DEPLOY_SSH_PRIVATE_KEY']
           if any(not os.environ.get(key) for key in required):
               raise SystemExit('Required production operation secret is missing')
           if os.environ['EVENT_SLUG'] not in {'sumatra-2026','kalimantan-2026','jawa-2026','sulawesi-2026',
@@ -112,7 +118,7 @@ jobs:
       - name: Install VPN and SSH tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y openvpn sshpass netcat-openbsd
+          sudo apt-get install -y openvpn netcat-openbsd
 
       - name: Connect production VPN
         env:
@@ -136,18 +142,20 @@ jobs:
       - name: Configure SSH host verification
         env:
           SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
         run: |
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
           printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
+          umask 077
+          printf '%s\n' "$DEPLOY_SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          ssh-keygen -y -f ~/.ssh/deploy_key > /dev/null
 
       - name: Synchronize and verify production data
-        env:
-          SSHPASS: ${{ secrets.SSH_PASSWORD }}
         run: |
           set -euo pipefail
-          sshpass -e scp -P "$DEPLOY_SSH_PORT" scripts/verify_wildfire_data.py \
+          scp -o BatchMode=yes -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -P "$DEPLOY_SSH_PORT" scripts/verify_wildfire_data.py \
             "$DEPLOY_USER@$DEPLOY_HOST:$BACKEND_REMOTE_DIR/var/verify_wildfire_data_operation.py"
           cat > "$RUNNER_TEMP/refresh-wildfire.sh" <<'REMOTE_SYNC'
           set -euo pipefail
@@ -173,7 +181,7 @@ jobs:
                 --from "$hotspot_from" --to "$hotspot_to" --publish --output "/app/var/wildfire-$slug-verification.json" </dev/null
           done
           REMOTE_SYNC
-          sshpass -e ssh -p "$DEPLOY_SSH_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
+          ssh -o BatchMode=yes -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p "$DEPLOY_SSH_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
             "bash -s -- '$BACKEND_REMOTE_DIR' '$EVENT_SLUG' '$HOTSPOT_FROM' '$HOTSPOT_TO' '$CAMS_FROM' '$CAMS_TO' '$REFRESH_HOTSPOTS'" \
             < "$RUNNER_TEMP/refresh-wildfire.sh"
           mkdir -p operation-report
@@ -182,13 +190,24 @@ jobs:
             slugs="jawa-2026 sulawesi-2026 bali-nusa-tenggara-2026 maluku-2026 papua-2026"
           fi
           for slug in $slugs; do
-            sshpass -e scp -P "$DEPLOY_SSH_PORT" \
+            scp -o BatchMode=yes -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -P "$DEPLOY_SSH_PORT" \
               "$DEPLOY_USER@$DEPLOY_HOST:$BACKEND_REMOTE_DIR/var/wildfire-$slug-verification.json" \
               "operation-report/$slug.json"
           done
 
+      - name: Record production data verification in job summary
+        run: |
+          for report in operation-report/*.json; do
+            test -s "$report"
+            printf '### %s\n\n```\n' "$(basename "$report")" >> "$GITHUB_STEP_SUMMARY"
+            sha256sum "$report" >> "$GITHUB_STEP_SUMMARY"
+            wc -c < "$report" >> "$GITHUB_STEP_SUMMARY"
+            printf '\n```\n' >> "$GITHUB_STEP_SUMMARY"
+          done
+
       - name: Upload production data verification
-        uses: actions/upload-artifact@v4
+        if: vars.SAVEGEO_UPLOAD_ARTIFACTS == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: wildfire-production-${{ inputs.slug }}
           path: operation-report/*.json

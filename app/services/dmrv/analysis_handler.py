@@ -17,6 +17,7 @@ from app.services.dmrv.authz import authorize
 from app.services.dmrv.errors import DmrvError
 from app.services.dmrv.job_handlers import JobContext, JobFailed, RetryableJobError
 from app.services.workspace_analysis import digest
+from app.services.analysis_requirements import requires_earth_engine
 
 
 def validate(payload: dict) -> dict:
@@ -64,7 +65,7 @@ def run(ctx: JobContext) -> dict:
     ctx.stage("initialize_provider")
     # initialize_ee may update credential last-used; use the control session,
     # never the transaction that will publish the immutable result.
-    if not gee_service.initialize_ee(ctx.control):
+    if requires_earth_engine(kind, parameters) and not gee_service.initialize_ee(ctx.control):
         raise RetryableJobError("provider_unavailable", "Earth Engine belum siap. Periksa kredensial layanan.")
     ctx.stage("analyze")
     try:

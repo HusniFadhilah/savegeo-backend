@@ -1,6 +1,8 @@
 """Vegetation index monthly time series - /api/timeseries. Ported from backend/app.py."""
 from __future__ import annotations
 
+from starlette.concurrency import run_in_threadpool
+
 import logging
 
 import ee
@@ -9,7 +11,9 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import require_ee
 from app.core.viewer_features import require_feature
+from app.core.bounded_json import read_typed_json_object
 from app.db.session import get_db
+from app.schemas.analysis_jobs import AnalysisPayload
 from app.services import vegetation_service
 from app.services.gee_common import AnalysisError, public_analysis_error
 
@@ -19,9 +23,9 @@ logger = logging.getLogger(__name__)
 
 @router.post("/timeseries", dependencies=[Depends(require_feature("app.feature.vegetation_indices")), Depends(require_ee)])
 async def analyze_timeseries(request: Request, db: Session = Depends(get_db)):
-    data = await request.json()
+    data = await read_typed_json_object(request, AnalysisPayload)
     try:
-        return vegetation_service.analyze_timeseries(db, data)
+        return await run_in_threadpool(vegetation_service.analyze_timeseries, db, data)
     except AnalysisError as e:
         raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
     except ee.EEException as e:

@@ -33,7 +33,10 @@ jobs:
       OPERATION: ${{ inputs.operation }}
       EVENT_ID: ${{ inputs.event_id }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
       - name: Validate operation arguments
         run: |
           python3 - <<'PY'
@@ -51,7 +54,7 @@ jobs:
       - name: Install VPN and SSH tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y openvpn sshpass netcat-openbsd
+          sudo apt-get install -y openvpn netcat-openbsd
 
       - name: Connect production VPN
         env:
@@ -75,19 +78,21 @@ jobs:
       - name: Configure SSH host verification
         env:
           SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
         run: |
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
           printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
+          umask 077
+          printf '%s\n' "$DEPLOY_SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          ssh-keygen -y -f ~/.ssh/deploy_key > /dev/null
 
       - name: Audit and optionally calculate indicators
-        env:
-          SSHPASS: ${{ secrets.SSH_PASSWORD }}
         run: |
           set -euo pipefail
           for script in report_disaster_completeness enrich_disaster_analyses verify_event_segmentation; do
-            sshpass -e scp -P "$DEPLOY_SSH_PORT" "scripts/$script.py" \
+            scp -o BatchMode=yes -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -P "$DEPLOY_SSH_PORT" "scripts/$script.py" \
               "$DEPLOY_USER@$DEPLOY_HOST:$BACKEND_REMOTE_DIR/var/$script.py"
           done
           cat > "$RUNNER_TEMP/disaster-analysis.sh" <<'REMOTE_ANALYSE'
@@ -111,26 +116,35 @@ jobs:
           docker compose -f docker-compose.prod.yml exec -T api \
             python /app/var/report_disaster_completeness.py --output /app/var/disaster-completeness-after.json </dev/null
           REMOTE_ANALYSE
-          sshpass -e ssh -p "$DEPLOY_SSH_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
+          ssh -o BatchMode=yes -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p "$DEPLOY_SSH_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
             "bash -s -- '$BACKEND_REMOTE_DIR' '$OPERATION' '$EVENT_ID'" < "$RUNNER_TEMP/disaster-analysis.sh"
 
       - name: Download operation reports
         if: always()
-        env:
-          SSHPASS: ${{ secrets.SSH_PASSWORD }}
         run: |
           mkdir -p operation-report
           reports=(disaster-completeness-before disaster-completeness-after)
           if [ "$OPERATION" = "enrich" ]; then reports+=(disaster-enrichment); fi
           if [ "$OPERATION" = "segmentation" ]; then reports+=(disaster-segmentation-verification); fi
           for report in "${reports[@]}"; do
-            sshpass -e scp -P "$DEPLOY_SSH_PORT" \
+            scp -o BatchMode=yes -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -P "$DEPLOY_SSH_PORT" \
               "$DEPLOY_USER@$DEPLOY_HOST:$BACKEND_REMOTE_DIR/var/$report.json" "operation-report/$report.json" || true
           done
 
-      - name: Upload reports
+      - name: Record available reports in job summary
         if: always()
-        uses: actions/upload-artifact@v4
+        run: |
+          for report in operation-report/*.json; do
+            [ -s "$report" ] || continue
+            printf '### %s\n\n```\n' "$(basename "$report")" >> "$GITHUB_STEP_SUMMARY"
+            sha256sum "$report" >> "$GITHUB_STEP_SUMMARY"
+            wc -c < "$report" >> "$GITHUB_STEP_SUMMARY"
+            printf '\n```\n' >> "$GITHUB_STEP_SUMMARY"
+          done
+
+      - name: Upload reports
+        if: always() && vars.SAVEGEO_UPLOAD_ARTIFACTS == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: disaster-analysis-${{ github.run_id }}
           path: operation-report/*.json

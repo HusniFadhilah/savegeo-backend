@@ -12,11 +12,13 @@ from __future__ import annotations
 import json
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeout
+from collections import OrderedDict
+from threading import Lock, BoundedSemaphore
 from pathlib import Path
 
-import requests
-from fastapi import APIRouter, HTTPException
+from app.core.public_http import public_http as requests
+from fastapi import APIRouter, HTTPException, Query
 
 from app.core.config import get_settings
 from app.services.boundary_provider import CachedBoundaryProvider, RegionBoundaryProvider
@@ -32,8 +34,12 @@ ISLAND_LABELS = {
     "Bali_Nusa_Tenggara": "Bali & Nusa Tenggara", "Maluku": "Maluku", "Papua": "Papua",
 }
 
-_CHILD_GEOMETRY_CACHE: dict = {}
+_CHILD_GEOMETRY_CACHE: OrderedDict = OrderedDict()
+_CHILD_CACHE_LOCK = Lock()
 _CACHE_TTL_SECONDS = 3600
+_REGION_DEADLINE_SECONDS = 25.0
+_REGION_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="regions")
+_REGION_SLOTS = BoundedSemaphore(24)
 _VALIDATED_BOUNDARY_PROVIDER = CachedBoundaryProvider(RegionBoundaryProvider(), ttl_seconds=86400)
 
 
@@ -106,7 +112,7 @@ def _classify_province_island(name: str) -> str:
 @router.get("/provinces")
 def get_provinces(island: str | None = None):
     try:
-        r = requests.get(f"{_base_url()}/province", params={"is_for_dropdown": 1}, timeout=20)
+        r = requests.get(f"{_base_url()}/province", params={"is_for_dropdown": 1}, timeout=20, allow_redirects=False)
         r.raise_for_status()
         data = r.json()
         if island:
@@ -127,7 +133,7 @@ def get_cities(province_code: str = ""):
     if not province_code:
         raise HTTPException(status_code=400, detail="province_code is required")
     try:
-        r = requests.get(f"{_base_url()}/city", params={"is_for_dropdown": 1, "parent_code": province_code}, timeout=20)
+        r = requests.get(f"{_base_url()}/city", params={"is_for_dropdown": 1, "parent_code": province_code}, timeout=20, allow_redirects=False)
         r.raise_for_status()
         return r.json()
     except Exception as e:
@@ -171,7 +177,7 @@ def get_districts(city_code: str = ""):
     if not city_code:
         raise HTTPException(status_code=400, detail="city_code is required")
     try:
-        r = requests.get(f"{_base_url()}/district", params={"is_for_dropdown": 1, "parent_code": city_code}, timeout=20)
+        r = requests.get(f"{_base_url()}/district", params={"is_for_dropdown": 1, "parent_code": city_code}, timeout=20, allow_redirects=False)
         r.raise_for_status()
         return r.json()
     except Exception as e:
@@ -184,7 +190,7 @@ def get_villages(district_code: str = ""):
     if not district_code:
         raise HTTPException(status_code=400, detail="district_code is required")
     try:
-        r = requests.get(f"{_base_url()}/village", params={"is_for_dropdown": 1, "parent_code": district_code}, timeout=20)
+        r = requests.get(f"{_base_url()}/village", params={"is_for_dropdown": 1, "parent_code": district_code}, timeout=20, allow_redirects=False)
         r.raise_for_status()
         return r.json()
     except Exception as e:
@@ -193,13 +199,13 @@ def get_villages(district_code: str = ""):
 
 
 @router.get("/geometry")
-def get_region_geometry(endpoint: str = "", code: str = ""):
+def get_region_geometry(endpoint: str = "", code: str = Query(default="", min_length=1, max_length=32, pattern=r"^[0-9.]+$")):
     if not endpoint or not code:
         raise HTTPException(status_code=400, detail="endpoint and code are required")
     if endpoint not in {"province", "city", "district", "village"}:
         raise HTTPException(status_code=400, detail="Invalid region endpoint")
     try:
-        r = requests.get(f"{_base_url()}/{endpoint}", params={"code": code}, timeout=20)
+        r = requests.get(f"{_base_url()}/{endpoint}", params={"code": code}, timeout=20, allow_redirects=False)
         r.raise_for_status()
         data = r.json()
         if data.get("meta", {}).get("code") == 200:
@@ -232,18 +238,31 @@ def _extract_region_dropdown_items(payload):
 
 
 def _get_cached_children_geometries(cache_key):
-    item = _CHILD_GEOMETRY_CACHE.get(cache_key)
-    if not item:
-        return None
-    created_at, payload = item
-    if time.time() - created_at > _CACHE_TTL_SECONDS:
-        _CHILD_GEOMETRY_CACHE.pop(cache_key, None)
-        return None
-    return payload
+    with _CHILD_CACHE_LOCK:
+        item = _CHILD_GEOMETRY_CACHE.get(cache_key)
+        if not item:
+            return None
+        created_at, payload = item
+        if time.time() - created_at > _CACHE_TTL_SECONDS:
+            _CHILD_GEOMETRY_CACHE.pop(cache_key, None)
+            return None
+        _CHILD_GEOMETRY_CACHE.move_to_end(cache_key)
+        return payload
 
 
-def _fetch_region_child_geometry(base_url, child_endpoint, name, code):
-    geom_res = requests.get(f"{base_url}/{child_endpoint}", params={"code": code}, timeout=20)
+def _cache_children_geometries(cache_key, payload):
+    with _CHILD_CACHE_LOCK:
+        _CHILD_GEOMETRY_CACHE[cache_key] = (time.time(), payload)
+        _CHILD_GEOMETRY_CACHE.move_to_end(cache_key)
+        while len(_CHILD_GEOMETRY_CACHE) > 256:
+            _CHILD_GEOMETRY_CACHE.popitem(last=False)
+
+
+def _fetch_region_child_geometry(base_url, child_endpoint, name, code, deadline=None):
+    remaining = (deadline - time.monotonic()) if deadline is not None else 10
+    if remaining <= 0:
+        raise TimeoutError("Region request deadline exceeded")
+    geom_res = requests.get(f"{base_url}/{child_endpoint}", params={"code": code}, timeout=(min(3, remaining), min(10, remaining)), allow_redirects=False)
     geom_res.raise_for_status()
     payload = geom_res.json()
     region = payload.get("data", {}).get("region") if isinstance(payload, dict) else None
@@ -306,10 +325,10 @@ _ENDPOINT_TO_COLUMN = {
 
 @router.get("/children-geometries")
 def get_region_children_geometries(
-    parent_code: str = "",
+    parent_code: str = Query(default="", min_length=1, max_length=32, pattern=r"^[0-9.]+$"),
     child_endpoint: str = "",
     parent_endpoint: str | None = None,
-    limit: int = 10000,
+    limit: int = Query(default=500, ge=1, le=2000),
 ):
     if not parent_code or not child_endpoint:
         raise HTTPException(status_code=400, detail="parent_code and child_endpoint are required")
@@ -319,6 +338,13 @@ def get_region_children_geometries(
     parent_column = _ENDPOINT_TO_COLUMN.get(parent_endpoint or "")
     base_url = _base_url()
     cache_key = (base_url, parent_endpoint or "", parent_code, child_endpoint, limit)
+    deadline = time.monotonic() + _REGION_DEADLINE_SECONDS
+
+    def timeout_budget():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise HTTPException(status_code=504, detail="Region request deadline exceeded")
+        return min(3, remaining), min(10, remaining)
 
     try:
         cached_payload = _get_cached_children_geometries(cache_key)
@@ -332,7 +358,8 @@ def get_region_children_geometries(
             bulk_res = requests.get(
                 f"{base_url}/{child_endpoint}",
                 params={"parent_column": parent_column, "parent_code": parent_code},
-                timeout=60,
+                timeout=timeout_budget(),
+                allow_redirects=False,
             )
             if bulk_res.ok:
                 bulk_features = _normalize_region_feature_collection(bulk_res.json(), child_endpoint, limit)
@@ -351,28 +378,51 @@ def get_region_children_geometries(
                             "source": "bulk_parent_column",
                         },
                     }
-                    _CHILD_GEOMETRY_CACHE[cache_key] = (time.time(), response_payload)
+                    _cache_children_geometries(cache_key, response_payload)
                     return response_payload
 
         dropdown_params = {"is_for_dropdown": 1, "parent_code": parent_code}
         if parent_column:
             dropdown_params["parent_column"] = parent_column
-        dropdown = requests.get(f"{base_url}/{child_endpoint}", params=dropdown_params, timeout=30)
+        dropdown = requests.get(f"{base_url}/{child_endpoint}", params=dropdown_params, timeout=timeout_budget(), allow_redirects=False)
         dropdown.raise_for_status()
 
         child_items = _extract_region_dropdown_items(dropdown.json())
         if limit and limit > 0:
-            child_items = child_items[:limit]
+            child_items = child_items[:min(limit, 500)]
         features = []
         failed = []
 
-        max_workers = min(12, max(1, len(child_items)))
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [
-                executor.submit(_fetch_region_child_geometry, base_url, child_endpoint, name, code)
-                for name, code in child_items
-            ]
-            for future in as_completed(futures):
+        futures = []
+        # Admission is bounded globally per worker, including queued tasks.
+        # More children are fetched in subsequent batches while budget remains.
+        pending_items = iter(child_items)
+        exhausted = False
+        while not exhausted and time.monotonic() < deadline:
+            batch = []
+            while len(batch) < 8:
+                try:
+                    name, code = next(pending_items)
+                except StopIteration:
+                    exhausted = True
+                    break
+                if not _REGION_SLOTS.acquire(blocking=False):
+                    raise HTTPException(status_code=503, detail="Region provider busy", headers={"Retry-After": "5"})
+                try:
+                    task = _REGION_POOL.submit(_fetch_region_child_geometry, base_url, child_endpoint, name, code, deadline)
+                except Exception:
+                    _REGION_SLOTS.release()
+                    raise
+                task.add_done_callback(lambda _task: _REGION_SLOTS.release())
+                batch.append(task)
+                futures.append(task)
+            try:
+                completed = list(as_completed(batch, timeout=max(0.001, deadline - time.monotonic())))
+            except FuturesTimeout:
+                for task in batch:
+                    task.cancel()
+                raise HTTPException(status_code=504, detail="Region request deadline exceeded") from None
+            for future in completed:
                 try:
                     child_features, child_failed = future.result()
                     features.extend(child_features)
@@ -382,6 +432,10 @@ def get_region_children_geometries(
                     logger.warning("Region child geometry request failed: %s", type(child_error).__name__)
                     failed.append({"name": "unknown", "code": "unknown", "reason": "Boundary provider temporarily unavailable"})
 
+        if not exhausted:
+            for task in futures:
+                task.cancel()
+            raise HTTPException(status_code=504, detail="Region request deadline exceeded")
         response_payload = {
             "type": "FeatureCollection",
             "features": features,
@@ -395,7 +449,7 @@ def get_region_children_geometries(
                 "source": "per_child_fallback",
             },
         }
-        _CHILD_GEOMETRY_CACHE[cache_key] = (time.time(), response_payload)
+        _cache_children_geometries(cache_key, response_payload)
         return response_payload
     except HTTPException:
         raise

@@ -11,7 +11,19 @@ from app.services.gee_common import AnalysisError
 
 
 class Query:
+    def filter(self, *_conditions):
+        return self
+
     def filter_by(self, **_kwargs):
+        return self
+
+    def order_by(self, *_columns):
+        return self
+
+    def offset(self, _value):
+        return self
+
+    def limit(self, _value):
         return self
 
     def all(self):
@@ -46,6 +58,8 @@ def test_granite_model_is_hidden_until_all_runtime_inputs_are_configured(tmp_pat
 
 
 def test_granite_model_listing_obeys_dataset_and_gee_filters(monkeypatch):
+    from app.services import model_catalog_service
+
     granite = {
         "name": registry.MODEL_NAME,
         "metadata_json": {
@@ -54,19 +68,19 @@ def test_granite_model_listing_obeys_dataset_and_gee_filters(monkeypatch):
             "compatible_reference_datasets": [registry.TARGET_DATASET],
         },
     }
-    monkeypatch.setattr(model_routes, "granite_biomass_model", lambda: granite)
-    monkeypatch.setattr(model_routes, "builtin_carbon_models", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(model_catalog_service, "granite_biomass_model", lambda: granite)
+    monkeypatch.setattr(model_catalog_service, "builtin_carbon_models", lambda *_args, **_kwargs: [])
 
     listed = model_routes.models_list(
-        model_type="carbon", target_dataset=registry.TARGET_DATASET, gee_deployable=False, db=EmptyDB()
+        model_type="carbon", target_dataset=registry.TARGET_DATASET, gee_deployable=False, db=EmptyDB(), offset=0, limit=100
     )
     assert [item["name"] for item in listed["models"]] == [registry.MODEL_NAME]
     excluded = model_routes.models_list(
-        model_type="carbon", target_dataset="GEDI_L4B_STACK", gee_deployable=False, db=EmptyDB()
+        model_type="carbon", target_dataset="GEDI_L4B_STACK", gee_deployable=False, db=EmptyDB(), offset=0, limit=100
     )
     assert excluded["count"] == 0
     gee_only = model_routes.models_list(
-        model_type="carbon", target_dataset=registry.TARGET_DATASET, gee_deployable=True, db=EmptyDB()
+        model_type="carbon", target_dataset=registry.TARGET_DATASET, gee_deployable=True, db=EmptyDB(), offset=0, limit=100
     )
     assert gee_only["count"] == 0
 

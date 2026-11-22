@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 from app.core.security import get_current_app_viewer
 from app.services.vertical_datum_service import (
@@ -15,6 +15,7 @@ router = APIRouter(tags=["vertical-datum"])
 
 
 class ElevationConversionRequest(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False, extra="forbid")
     ellipsoidal_height_m: float = Field(..., description="h: ellipsoidal height")
     geoid_undulation_m: float = Field(..., description="N: EGM2008 geoid undulation")
     source_vertical_reference: str = Field(min_length=1, max_length=128)

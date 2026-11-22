@@ -7,31 +7,23 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from app.agentic import agentic_ai
 from app.core.chat_ownership import chat_session_owner_key
+from app.core.bounded_json import read_typed_json_object
 from app.core.security import get_current_app_viewer
 from app.core.viewer_features import viewer_feature_codes
 from app.db.session import get_db
 from app.services import agent_service
 from app.services import ai_provider_service
+from app.schemas.agent_request import AgentRequest
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 logger = logging.getLogger(__name__)
-
-
-async def _json_object(request: Request) -> dict:
-    try:
-        payload = await request.json()
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="JSON body must be an object")
-    return payload
 
 
 @router.get("/capabilities")
@@ -63,9 +55,10 @@ async def agent_analyze(
     By default the agent returns a validated plan. Set execute=true to run the
     whitelisted GeoMoka analysis endpoint selected by the planner.
     """
-    payload = await _json_object(request)
+    payload = await read_typed_json_object(request, AgentRequest)
     return await run_in_threadpool(
-        agent_service.run_agent_analyze, db, request, payload, viewer_feature_codes(db, viewer)
+        agent_service.run_agent_analyze, db, request, payload, viewer_feature_codes(db, viewer),
+        chat_session_owner_key(viewer),
     )
 
 
@@ -80,7 +73,7 @@ async def agent_control(
     Body: { message, page_state, image?, attachment?, session_id? }
     Returns: { intent, confidence, needs_confirmation, message, warnings, actions, session_id }
     """
-    payload = await _json_object(request)
+    payload = await read_typed_json_object(request, AgentRequest)
     # The model call blocks for seconds; keep it off the event loop.
     result, status_code, headers = await run_in_threadpool(
         agent_service.run_agent_control,

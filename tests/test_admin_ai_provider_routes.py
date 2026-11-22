@@ -11,6 +11,13 @@ from app.services import ai_provider_service as providers
 class _Request:
     def __init__(self, body):
         self._body = body
+        import json
+
+        self._raw_body = json.dumps(body, allow_nan=False).encode()
+        self.headers = {"content-length": str(len(self._raw_body))}
+
+    async def stream(self):
+        yield self._raw_body
 
     async def json(self):
         return self._body

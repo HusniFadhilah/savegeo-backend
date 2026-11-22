@@ -115,10 +115,52 @@ def test_fit_excludes_independent_validation_and_aggregates_repeat_visits():
     assert result["calibrated_validation"]["rmse"] > 50
 
 
+def test_validation_only_assessment_does_not_create_calibration_candidate():
+    rows = [observation(f"P{i}", i, 2 * i + 3) for i in range(1, 5)]
+    rows += [observation("V1", 5, 99, "validation")]
+    result = assess(
+        rows,
+        FieldAssessmentRequest(
+            pool="agb", prediction_source="model-v1", create_calibration_candidate=False
+        ),
+    )
+
+    assert result["status"] == "computed"
+    assert result["validation_plots"] == 1
+    assert result["artifact"] is None
+    assert any("hanya untuk validasi" in warning for warning in result["warnings"])
+
+
 def test_same_plot_cannot_leak_across_calibration_and_validation():
     with pytest.raises(ValueError, match="Plot yang sama"):
         assess(
             [observation("P1", 1, 3), observation("P1", 2, 5, "validation")],
+            FieldAssessmentRequest(pool="agb", prediction_source="model-v1"),
+        )
+
+
+def test_same_plot_code_at_different_sites_is_independent_and_single_plot_holdout_is_scored():
+    rows = [
+        observation("1", 20, 24, latitude=-6.59435, longitude=107.83795),
+        observation("1", 90, 100, "validation", latitude=-7.05272, longitude=110.43964),
+    ]
+    result = assess(rows, FieldAssessmentRequest(pool="agb", prediction_source="model-v1"))
+    assert result["calibration_plots"] == 1
+    assert result["validation_plots"] == 1
+    check = result["baseline_validation"]
+    assert check["status"] == "computed"
+    assert check["qualification"] == "single_plot_holdout_not_generalizable"
+    assert check["n_plots"] == 1 and check["r2"] is None
+    assert check["mae"] == pytest.approx(10)
+
+
+def test_same_plot_code_with_gps_jitter_within_plot_area_stays_in_one_split():
+    with pytest.raises(ValueError, match="Plot yang sama"):
+        assess(
+            [
+                observation("1", 20, 24, latitude=-7.05272, longitude=110.43964),
+                observation("1", 90, 100, "validation", latitude=-7.05270, longitude=110.43965),
+            ],
             FieldAssessmentRequest(pool="agb", prediction_source="model-v1"),
         )
 

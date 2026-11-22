@@ -16,13 +16,14 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Callable
+from typing import Any
 from urllib.parse import quote, urlparse
 from uuid import UUID
 
 import httpx
 
 from app.core.config import Settings, get_settings
+from app.core.public_http import public_http
 from app.services.gee_common import AnalysisError
 
 logger = logging.getLogger(__name__)
@@ -39,12 +40,59 @@ _TOKEN_LOCK = threading.RLock()
 _TOKEN: tuple[str, str, float] | None = None  # credential fingerprint, token, epoch expiry
 _SCENES: OrderedDict[str, tuple[float, str, str, float | None]] = OrderedDict()
 _SCENE_LOCK = threading.RLock()
+_ONEATLAS_ALLOWED_HOSTS = {
+    "authenticate.foundation.api.oneatlas.airbus.com",
+    "search.foundation.api.oneatlas.airbus.com",
+    _ACCESS_HOST,
+}
 
 
 @dataclass(frozen=True)
 class OneAtlasConfiguration:
     api_key: str
     workspace_id: str
+
+
+def _public_request(
+    method: str,
+    url: str,
+    *,
+    timeout: float,
+    max_bytes: int,
+    params: dict[str, str] | None = None,
+    data: dict[str, str] | None = None,
+    json_body: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+) -> httpx.Response:
+    """Use the pinned public transport and keep this connector on Airbus hosts."""
+    parsed = urlparse(url)
+    request = httpx.Request(method.upper(), url, params=params)
+    if parsed.scheme != "https" or parsed.hostname not in _ONEATLAS_ALLOWED_HOSTS:
+        raise httpx.RequestError("OneAtlas destination is not allowed", request=request)
+    safe_headers = {
+        key: value for key, value in (headers or {}).items()
+        if key.lower() in {"accept", "user-agent", "content-type", "authorization"}
+    }
+    try:
+        upstream = public_http.request(
+            method.upper(),
+            url,
+            params=params,
+            data=data,
+            json_body=json_body,
+            timeout=timeout,
+            max_bytes=max_bytes,
+            headers=safe_headers,
+        )
+    except Exception as exc:  # noqa: BLE001 - provider errors may otherwise expose request details
+        raise httpx.RequestError("Bounded OneAtlas request failed", request=request) from exc
+    response = httpx.Response(
+        status_code=upstream.status_code,
+        headers=dict(upstream.headers),
+        content=upstream.content,
+        request=request,
+    )
+    return response
 
 
 def _configuration(settings: Settings | None = None) -> OneAtlasConfiguration:
@@ -55,7 +103,7 @@ def _configuration(settings: Settings | None = None) -> OneAtlasConfiguration:
     )
 
 
-def _get_token(client: httpx.Client, settings: Settings | None = None) -> str:
+def _get_token(settings: Settings | None = None) -> str:
     global _TOKEN
     config = _configuration(settings)
     if not config.api_key:
@@ -67,11 +115,13 @@ def _get_token(client: httpx.Client, settings: Settings | None = None) -> str:
             return _TOKEN[1]
 
     try:
-        response = client.post(
+        response = _public_request(
+            "POST",
             _AUTH_URL,
             data={"apikey": config.api_key, "grant_type": "api_key", "client_id": "IDP"},
             headers={"Content-Type": "application/x-www-form-urlencoded", "Cache-Control": "no-cache"},
-            follow_redirects=False,
+            timeout=30,
+            max_bytes=256 * 1024,
         )
         if response.status_code in {301, 302, 303, 307, 308}:
             raise AnalysisError("OneAtlas authentication redirect was blocked", 502)
@@ -221,7 +271,8 @@ def _cached_scene(scene_ref: str) -> tuple[str, str, float | None]:
 def _normalize_feature(feature: Any, request=None) -> dict[str, Any] | None:
     if not isinstance(feature, dict) or feature.get("type") != "Feature":
         return None
-    props = feature.get("properties") if isinstance(feature.get("properties"), dict) else {}
+    raw_props = feature.get("properties")
+    props: dict[str, Any] = raw_props if isinstance(raw_props, dict) else {}
     provider_id = props.get("id") or feature.get("id")
     acquired_at = _utc_iso(props.get("acquisitionDate"))
     if not isinstance(provider_id, str) or not provider_id or not acquired_at:
@@ -258,7 +309,7 @@ def _normalize_feature(feature: Any, request=None) -> dict[str, Any] | None:
     }
 
 
-def list_scenes(data: dict[str, Any], request=None, *, settings: Settings | None = None, client_factory: Callable[..., httpx.Client] = httpx.Client) -> dict[str, Any]:
+def list_scenes(data: dict[str, Any], request=None, *, settings: Settings | None = None) -> dict[str, Any]:
     config = _configuration(settings)
     if not config.api_key or not config.workspace_id:
         raise AnalysisError("Airbus OneAtlas belum siap. Isi ONEATLAS_API_KEY dan ONEATLAS_WORKSPACE_ID di backend; preview juga memerlukan hak WMTS/streaming pada akun.", 503)
@@ -279,52 +330,53 @@ def list_scenes(data: dict[str, Any], request=None, *, settings: Settings | None
     truncated = False
     page_count = 0
     try:
-        with client_factory(timeout=timeout, follow_redirects=False) as client:
-            token = _get_token(client, settings)
-            for page in range(1, _MAX_PAGES + 1):
-                body: dict[str, Any] = {
-                    "itemsPerPage": _MAX_PAGE_SIZE,
-                    "startPage": page,
-                    "acquisitionDate": f"[{start},{end}]",
-                    "processingLevel": "SENSOR",
-                    "relation": "intersects",
-                    "geometry": geometry,
-                }
-                if max_cloud is not None:
-                    body["cloudCover"] = f"[0,{max_cloud:g}]"
-                search_params = {"workspaceId": config.workspace_id}
-                if constellation:
-                    search_params["constellation"] = constellation
-                response = client.post(
-                    _SEARCH_URL,
-                    params=search_params,
-                    json=body,
-                    headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json", "Cache-Control": "no-cache"},
-                    follow_redirects=False,
-                )
-                if response.status_code in {301, 302, 303, 307, 308}:
-                    raise AnalysisError("OneAtlas search redirect was blocked", 502)
-                if response.status_code in {401, 403}:
-                    raise AnalysisError("OneAtlas search denied (401/403). Check account workspace, API access, and product entitlement.", 503)
-                if response.status_code == 429:
-                    raise AnalysisError("OneAtlas search is rate limited (429). Retry later.", 429)
-                response.raise_for_status()
-                payload = response.json()
-                features = payload.get("features") if isinstance(payload, dict) else None
-                if not isinstance(features, list):
-                    raise AnalysisError("OneAtlas returned a malformed OpenSearch response (expected features[])", 502)
-                page_count = len(features)
-                for feature in features:
-                    normalized = _normalize_feature(feature, request)
-                    if normalized:
-                        scenes.append(normalized)
-                        if len(scenes) >= _MAX_PAGE_SIZE * _MAX_PAGES:
-                            truncated = True
-                            break
-                if truncated or page_count < _MAX_PAGE_SIZE:
-                    break
-                if page == _MAX_PAGES:
-                    truncated = True
+        token = _get_token(settings)
+        for page in range(1, _MAX_PAGES + 1):
+            body: dict[str, Any] = {
+                "itemsPerPage": _MAX_PAGE_SIZE,
+                "startPage": page,
+                "acquisitionDate": f"[{start},{end}]",
+                "processingLevel": "SENSOR",
+                "relation": "intersects",
+                "geometry": geometry,
+            }
+            if max_cloud is not None:
+                body["cloudCover"] = f"[0,{max_cloud:g}]"
+            search_params = {"workspaceId": config.workspace_id}
+            if constellation:
+                search_params["constellation"] = constellation
+            response = _public_request(
+                "POST",
+                _SEARCH_URL,
+                params=search_params,
+                json_body=body,
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json", "Cache-Control": "no-cache"},
+                timeout=timeout,
+                max_bytes=8 * 1024 * 1024,
+            )
+            if response.status_code in {301, 302, 303, 307, 308}:
+                raise AnalysisError("OneAtlas search redirect was blocked", 502)
+            if response.status_code in {401, 403}:
+                raise AnalysisError("OneAtlas search denied (401/403). Check account workspace, API access, and product entitlement.", 503)
+            if response.status_code == 429:
+                raise AnalysisError("OneAtlas search is rate limited (429). Retry later.", 429)
+            response.raise_for_status()
+            payload = response.json()
+            features = payload.get("features") if isinstance(payload, dict) else None
+            if not isinstance(features, list):
+                raise AnalysisError("OneAtlas returned a malformed OpenSearch response (expected features[])", 502)
+            page_count = len(features)
+            for feature in features:
+                normalized = _normalize_feature(feature, request)
+                if normalized:
+                    scenes.append(normalized)
+                    if len(scenes) >= _MAX_PAGE_SIZE * _MAX_PAGES:
+                        truncated = True
+                        break
+            if truncated or page_count < _MAX_PAGE_SIZE:
+                break
+            if page == _MAX_PAGES:
+                truncated = True
     except AnalysisError:
         raise
     except httpx.HTTPStatusError as exc:
@@ -364,7 +416,7 @@ def get_scene_tile(data: dict[str, Any], request=None, *, settings: Settings | N
     }
 
 
-def render_tile(scene_ref: str, z: int, x: int, y: int, *, settings: Settings | None = None, client_factory: Callable[..., httpx.Client] = httpx.Client) -> bytes | None:
+def render_tile(scene_ref: str, z: int, x: int, y: int, *, settings: Settings | None = None) -> bytes | None:
     config = _configuration(settings)
     if not config.api_key or not config.workspace_id:
         raise AnalysisError("Airbus OneAtlas belum dikonfigurasi. Isi ONEATLAS_API_KEY dan ONEATLAS_WORKSPACE_ID di backend.", 503)
@@ -381,29 +433,25 @@ def render_tile(scene_ref: str, z: int, x: int, y: int, *, settings: Settings | 
         raise AnalysisError("OneAtlas WMTS URL failed validation", 400)
     timeout = max(5, int((settings or get_settings()).commercial_imagery_timeout_seconds or 30))
     try:
-        with client_factory(timeout=timeout, follow_redirects=False) as client:
-            token = _get_token(client, settings)
-            with client.stream("GET", tile_url, headers={"Authorization": f"Bearer {token}", "Cache-Control": "no-cache"}, follow_redirects=False) as response:
-                if response.status_code in {301, 302, 303, 307, 308}:
-                    raise AnalysisError("OneAtlas WMTS redirect was blocked", 502)
-                if response.status_code in {401, 403}:
-                    raise AnalysisError("OneAtlas preview denied (401/403). Check WMTS rights and streaming entitlement for this scene.", 403)
-                if response.status_code == 429:
-                    raise AnalysisError("OneAtlas preview is rate limited (429). Retry later.", 429)
-                if response.status_code == 404:
-                    return None
-                response.raise_for_status()
-                content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
-                if content_type not in {"image/png", "application/octet-stream"}:
-                    raise AnalysisError("OneAtlas WMTS returned a non-image response", 502)
-                size = 0
-                chunks = []
-                for chunk in response.iter_bytes():
-                    size += len(chunk)
-                    if size > _MAX_TILE_BYTES:
-                        raise AnalysisError("OneAtlas WMTS tile exceeded the response size limit", 502)
-                    chunks.append(chunk)
-                return b"".join(chunks)
+        token = _get_token(settings)
+        response = _public_request(
+            "GET",
+            tile_url,
+            headers={"Authorization": f"Bearer {token}", "Cache-Control": "no-cache"},
+            timeout=timeout,
+            max_bytes=_MAX_TILE_BYTES,
+        )
+        if response.status_code in {401, 403}:
+            raise AnalysisError("OneAtlas preview denied (401/403). Check WMTS rights and streaming entitlement for this scene.", 403)
+        if response.status_code == 429:
+            raise AnalysisError("OneAtlas preview is rate limited (429). Retry later.", 429)
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
+        if content_type not in {"image/png", "application/octet-stream"}:
+            raise AnalysisError("OneAtlas WMTS returned a non-image response", 502)
+        return response.content
     except AnalysisError:
         raise
     except httpx.HTTPStatusError as exc:

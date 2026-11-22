@@ -1,228 +1,91 @@
-"""
-Model Registry for managing multiple trained models
-"""
+"""Compatibility facade over the authoritative uploaded_models database table.
 
-import json
-import logging
-from datetime import UTC, datetime
+No runtime read, write or recovery path depends on registry.json. Existing
+registry files can remain as offline historical records without activating code.
+"""
+from __future__ import annotations
 from pathlib import Path
-from typing import Any
 
-logger = logging.getLogger(__name__)
+from app.core.config import get_settings
+from app.db.models.uploaded_model import UploadedModel
+from app.db.session import SessionLocal
+from app.repositories.uploaded_model_repo import get_active_model_path
+
+
+def _active_onnx_rows(db):
+    rows = db.query(UploadedModel).filter_by(
+        model_type="carbon", is_active=True, lifecycle_state="active"
+    ).order_by(UploadedModel.id).limit(10000).all()
+    return [row for row in rows if (row.metadata_json or {}).get("format") == "onnx"]
 
 
 class ModelRegistry:
-    """
-    Manage multiple trained models with versioning
-    """
-
     def __init__(self, models_dir: str | None = None):
-        """Initialize model registry"""
-        if models_dir:
-            self.models_dir = Path(models_dir)
-        else:
-            from app.core.config import get_settings
+        self.models_dir = Path(models_dir) if models_dir else get_settings().model_path
 
-            self.models_dir = get_settings().model_path
-        self.models_dir.mkdir(parents=True, exist_ok=True)
-
-        self.registry_file = self.models_dir / "registry.json"
-        
-        # ✅ FIX: Load registry DULU, BARU migrate
-        self.registry = self._load_registry()
-        self._migrate_registry_paths()  # Sekarang self.registry sudah ada
-
-    def _load_registry(self) -> dict:
-        """Load registry from file"""
-        if self.registry_file.exists():
-            try:
-                with open(self.registry_file, "r") as f:
-                    data = json.load(f)
-                    logger.info(f"✓ Registry loaded: {len(data.get('models', {}))} models")
-                    return data
-            except json.JSONDecodeError:
-                logger.warning("Registry corrupted, reinitializing")
-        
-        logger.info("Creating new registry")
-        return {"models": {}, "default": None}
-
-    def _save_registry(self):
-        """Save registry to file"""
-        with open(self.registry_file, "w") as f:
-            json.dump(self.registry, f, indent=2)
-
-    def _migrate_registry_paths(self):
-        """
-        Migrate old absolute paths to portable relative paths
-        ✅ Now called AFTER self.registry is initialized
-        """
-        changed = False
-        
-        for name, info in self.registry.get("models", {}).items():
-            raw = info.get("path", "")
-            
-            # Extract just the filename
-            stem = Path(raw.replace("\\", "/")).name
-            
-            if raw != stem:
-                info["path"] = stem
-                changed = True
-                logger.info(f"  Migrated path for {name}: {raw} → {stem}")
-        
-        if changed:
-            self._save_registry()
-            logger.info("✓ Registry paths migrated to portable format")
-
-    def register_model(
-        self,
-        model_name: str,
-        model_path: str,
-        metadata: dict[str, Any],
-        set_as_default: bool = False
-    ):
-        """
-        Register a trained model
-        
-        Args:
-            model_name: Unique name for the model
-            model_path: Path to model file
-            metadata: Model metadata
-            set_as_default: Whether to set as default model
-        """
-        # Save only the filename (portable)
-        stem = Path(model_path).name
-        stem = stem.replace("\\", "/").split("/")[-1]
-
-        self.registry["models"][model_name] = {
-            "path": stem,
-            "metadata": metadata,
-            "registered_at": datetime.now(UTC).isoformat()
-        }
-
-        if set_as_default or self.registry["default"] is None:
-            self.registry["default"] = model_name
-            logger.info(f"✓ Set '{model_name}' as default model")
-
-        self._save_registry()
-        logger.info(f"✓ Registered model: {model_name}")
-
-    def list_models(self) -> list[dict]:
-        """List all registered models"""
-        models = []
-        
-        for name, info in self.registry["models"].items():
-            models.append({
-                "name": name,
-                "path": str((self.models_dir / info["path"]).resolve()),
-                "is_default": name == self.registry["default"],
-                "registered_at": info["registered_at"],
-                "algorithm": info["metadata"].get("algorithm"),
-                "rmse": info["metadata"].get("cv_metrics", {}).get("rmse_mean"),
-                "r2": info["metadata"].get("cv_metrics", {}).get("r2_mean"),
-            })
-        
-        return models
+    @property
+    def registry(self):
+        with SessionLocal() as db:
+            rows = _active_onnx_rows(db)
+            return {"models": {row.name: {"path": row.filename, "metadata": row.metadata_json or {},
+                "registered_at": row.uploaded_at.isoformat() if row.uploaded_at else None} for row in rows},
+                "default": next((row.name for row in rows if row.is_default), None)}
 
     def get_model_path(self, model_name: str | None = None) -> str:
-        """
-        Get full path to a model file
-        
-        Args:
-            model_name: Name of model (uses default if None)
-            
-        Returns:
-            Full path to model file
-        """
-        if model_name is None:
-            model_name = self.registry['default']
-            if model_name is None:
-                raise ValueError("No default model set")
-
-        if model_name not in self.registry['models']:
-            available = list(self.registry['models'].keys())
-            raise ValueError(
-                f"Model '{model_name}' not found in registry. "
-                f"Available models: {available}"
-            )
-
-        # Get relative path from registry
-        raw = self.registry['models'][model_name]['path']
-
-        # Normalize separators
-        raw_norm = raw.replace("\\", "/")
-
-        # Extract filename only
-        stem = Path(raw_norm).name
-
-        # Combine with models directory
-        full = (self.models_dir / stem).resolve()
-
-        return str(full)
+        with SessionLocal() as db:
+            path = get_active_model_path(db, "carbon", model_name)
+            if path is None:
+                raise ValueError("An active registered model is required")
+            return path
 
     def get_model_info(self, model_name: str | None = None) -> dict:
-        """
-        Get metadata for a model
-        
-        Args:
-            model_name: Name of model (uses default if None)
-            
-        Returns:
-            Model metadata dictionary
-        """
-        if model_name is None:
-            model_name = self.registry["default"]
-            if model_name is None:
-                raise ValueError("No default model set")
-
-        if model_name not in self.registry["models"]:
-            available = list(self.registry['models'].keys())
-            raise ValueError(
-                f"Model '{model_name}' not found in registry. "
-                f"Available models: {available}"
+        with SessionLocal() as db:
+            rows = _active_onnx_rows(db)
+            row = next((item for item in rows if item.name == model_name), None) if model_name else next(
+                (item for item in rows if item.is_default), None
             )
+            if row is None:
+                raise ValueError("An active registered model is required")
+            return dict(row.metadata_json or {})
 
-        return self.registry["models"][model_name]["metadata"]
+    def list_models(self) -> list[dict]:
+        with SessionLocal() as db:
+            return [row.to_dict_public() for row in _active_onnx_rows(db)]
 
-    def set_default(self, model_name: str):
-        """
-        Set a model as default
-        
-        Args:
-            model_name: Name of model to set as default
-        """
-        if model_name not in self.registry["models"]:
-            raise ValueError(f"Model '{model_name}' not found")
+    def register_model(self, model_name, model_path, metadata, set_as_default=False):
+        import hashlib
+        path = Path(model_path).with_suffix(".onnx").resolve()
+        if not path.is_relative_to(get_settings().model_path.resolve()) or not path.is_file():
+            raise ValueError("A local ONNX export in MODEL_DIR is required")
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        if metadata.get("artifact_sha256") != digest:
+            raise ValueError("Exported model hash does not match metadata")
+        metadata = {**metadata, "format": "onnx", "artifact_sha256": digest}
+        with SessionLocal() as db:
+            row = db.query(UploadedModel).filter_by(name=model_name).first()
+            if row is None:
+                row = UploadedModel(name=model_name, display_name=model_name, model_type="carbon",
+                    filename=path.name, filepath=str(path), is_active=False, lifecycle_state="experimental")
+                db.add(row)
+            row.filename, row.filepath = path.name, str(path)
+            row.metadata_json, row.artifact_sha256 = dict(metadata), digest
+            row.feature_names, row.algorithm = metadata.get("feature_names", []), metadata.get("algorithm")
+            # A new export always requires administrator review, including a
+            # replacement under an existing name. No training-side activation.
+            row.is_active, row.is_default, row.lifecycle_state = False, False, "experimental"
+            row.approved_by = row.approved_at = row.approval_digest = None
+            db.commit()
+        if set_as_default:
+            raise ValueError("Model registered inactive; review and activate it in administration first")
 
-        self.registry["default"] = model_name
-        self._save_registry()
-        logger.info(f"✓ Set '{model_name}' as default model")
-    
-    def delete_model(self, model_name: str):
-        """
-        Delete a model from registry
-        
-        Args:
-            model_name: Name of model to delete
-        """
-        if model_name not in self.registry["models"]:
-            raise ValueError(f"Model '{model_name}' not found")
-        
-        # Get path and delete file
-        try:
-            model_path = Path(self.get_model_path(model_name))
-            if model_path.exists():
-                model_path.unlink()
-                logger.info(f"✓ Deleted model file: {model_path.name}")
-        except Exception as e:  # noqa: BLE001 - best-effort cleanup; registry entry is still removed below regardless
-            logger.warning(f"Could not delete model file: {e}")
-        
-        # Remove from registry
-        del self.registry["models"][model_name]
-        
-        # Clear default if this was the default
-        if self.registry["default"] == model_name:
-            self.registry["default"] = None
-            logger.info("✓ Cleared default model")
-        
-        self._save_registry()
-        logger.info(f"✓ Model removed from registry: {model_name}")
+    def set_default(self, model_name):
+        raise ValueError("Model defaults require the reviewed admin lifecycle endpoint")
+
+    def delete_model(self, model_name):
+        with SessionLocal() as db:
+            row = db.query(UploadedModel).filter_by(name=model_name).first()
+            if row is None:
+                raise ValueError("Model not found")
+            # Retain the artifact and audit history; disable runtime selection.
+            row.is_active, row.is_default, row.lifecycle_state = False, False, "archived"
+            db.commit()

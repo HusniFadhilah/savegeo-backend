@@ -183,3 +183,21 @@ def test_cancel_requested_job_with_a_dead_worker_ends_cancelled(db):
     jobs.request_cancel(db, "j-1", now=at(1))
     jobs.reap_expired(db, now=at(11))
     assert reload(db, "j-1").status == "cancelled"
+
+
+def test_expired_worker_cannot_renew_or_publish_before_reaper_runs(db):
+    make(db, "j-1")
+    jobs.claim_next(db, "worker", lease_seconds=10, now=at(0))
+    assert not jobs.heartbeat(db, "j-1", "worker", now=at(10)).ok
+    assert not jobs.set_stage(db, "j-1", "worker", "publish", now=at(11))
+    assert not jobs.complete(db, "j-1", "worker", {"invalid": "late"}, now=at(11))
+    assert jobs.fail(db, "j-1", "worker", {"code": "late"}, True, now=at(11)) == "lost"
+    assert reload(db, "j-1").result is None
+
+
+def test_cancel_wins_over_provider_retry(db):
+    make(db, "j-1")
+    jobs.claim_next(db, "worker", now=at(0))
+    jobs.request_cancel(db, "j-1", now=at(1))
+    assert jobs.fail(db, "j-1", "worker", {"code": "timeout"}, True, now=at(2)) == "cancelled"
+    assert reload(db, "j-1").status == "cancelled"

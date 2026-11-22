@@ -261,13 +261,31 @@ def build_reference_classifier(model_id: str, config: dict, region=None):
     return classifier, metadata
 
 
-def get_model_image(model_id: str, year: int, aoi, start: str, end: str, threshold: float | None = None, *, with_confidence: bool = False):
+def get_model_image(model_id: str, year: int, aoi, start: str, end: str, threshold: float | None = None, *, with_confidence: bool = False, expected_release_pin: dict | None = None):
     configs = refresh_model_catalog()
     config = configs.get(model_id, {})
     meta = LAND_COVER_DATASET_OPTIONS[model_id]
+    release_identity = None
+    if config.get("classifier_asset") or config.get("annual_asset_template"):
+        if not config.get("enabled", True):
+            raise AnalysisError("Model GEE ini dinonaktifkan oleh administrator.", 409)
+        try:
+            from app.services.gee_model_release_service import active_landcover_config
+            active = active_landcover_config(model_id)
+        except Exception as exc:  # noqa: BLE001 - DB/review failures must fail closed
+            raise AnalysisError("Lifecycle review model GEE tidak dapat diverifikasi.", 503) from exc
+        if active is None:
+            raise AnalysisError("Model GEE ini belum memiliki evaluasi, review independen, dan aktivasi untuk versi konfigurasi yang disetujui.", 409)
+        config, release_identity = active
+        if expected_release_pin is not None and any(expected_release_pin.get(key) != release_identity.get(key)
+                                                    for key in ("id", "version", "artifact_sha256", "approval_digest")):
+            raise AnalysisError("Versi model GEE tutupan lahan berubah sejak analisis dijadwalkan; jalankan ulang analisis.", 409)
+        LAND_COVER_LEGENDS[model_id] = config.get("classes", LAND_COVER_LEGENDS[model_id])
+        LAND_COVER_NATIVE_SCALE[model_id] = int(config.get("native_scale", LAND_COVER_NATIVE_SCALE[model_id]))
     if not meta["available"]:
         raise AnalysisError(meta["availability_reason"], 409, extra={"dataset": model_id, "model_status": "needs_configuration"})
-    if year not in meta["supported_years"]:
+    supported_years = config.get("supported_years") or meta["supported_years"]
+    if year not in supported_years:
         raise AnalysisError(f"{meta['name']}: tahun {year} belum tersedia.", 422)
     if meta["monthly"]:
         tomorrow = (datetime.now(UTC).date() + timedelta(days=1)).isoformat()
@@ -279,15 +297,20 @@ def get_model_image(model_id: str, year: int, aoi, start: str, end: str, thresho
     metadata = {
         "dataset": model_id, "dataset_name": meta["name"], "year": year, "requested_year": year,
         "provider_type": meta["provider_type"], "classification_backend": model_id,
-        "collection_version": meta["collection_version"], "model_version": version,
-        "class_schema": meta["class_schema"], "coverage": meta.get("coverage"),
+        "collection_version": config.get("model_version") or meta["collection_version"], "model_version": version,
+        "class_schema": config.get("class_schema", meta["class_schema"]), "coverage": config.get("coverage", meta.get("coverage")),
         "date_range": {"start": start if meta["monthly"] else f"{year}-01-01", "end": (datetime.fromisoformat(end).date() - timedelta(days=1)).isoformat() if meta["monthly"] else f"{year}-12-31"},
     }
+    if release_identity:
+        metadata["model_release"] = release_identity
     confidence = None
     if config.get("annual_asset_template"):
         asset = config["annual_asset_template"].format(year=year)
         prediction = ee.Image(asset)
         image = prediction.select(config.get("class_band", "landcover")).rename("landcover").toInt16()
+        if config.get("class_encoding", "indices") == "indices":
+            codes = sorted(int(code) for code in LAND_COVER_LEGENDS[model_id])
+            image = image.remap(list(range(len(codes))), codes).rename("landcover").toInt16()
         metadata.update({"source_uri": asset, "quality_note": config.get("accuracy_note", "Validasi lokal independen belum tersedia."), "validation_kind": config.get("validation_kind", "not_provided")})
         if config.get("confidence_band"):
             confidence = prediction.select(config["confidence_band"])

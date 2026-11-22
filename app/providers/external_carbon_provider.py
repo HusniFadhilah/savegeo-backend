@@ -20,12 +20,13 @@ import time
 
 import requests
 
+from app.core.public_http import public_http
+from app.providers.local_raster_provider import validate_remote_raster_url
+
 logger = logging.getLogger(__name__)
 
 # Max AOI sample points used for reference statistics (rate-limit safe)
 _AOI_STATS_N_SAMPLES = 80
-# Max retry attempts per point on transient HTTP errors
-_HTTP_RETRIES = 3
 _SOILGRIDS_CACHE_TTL_SECONDS = 3600
 _SOILGRIDS_CACHE_MAX_ITEMS = 1024
 _SOILGRIDS_CACHE: dict[tuple[float, float], tuple[float, float | None]] = {}
@@ -270,40 +271,33 @@ def _soilgrids_components_point_detailed(
         "depth": [label for label, _ in depths],
         "value": "mean",
     }
-    for attempt in range(_HTTP_RETRIES):
-        try:
-            response = requests.get(service_url, params=params, timeout=30)
-            if response.status_code == 429:
-                time.sleep(2 ** attempt)
-                continue
-            response.raise_for_status()
-            layers = {layer.get("name"): layer for layer in response.json().get("properties", {}).get("layers", [])}
-            soc_map = _soilgrids_depth_map(layers.get("soc"))
-            bd_map = _soilgrids_depth_map(layers.get("bdod"))
-            cfvo_map = _soilgrids_depth_map(layers.get("cfvo"))
-            soc_values = [soc_map.get(label) for label, _ in depths]
-            valid_soc = [(raw, thickness) for raw, (_, thickness) in zip(soc_values, depths) if raw is not None]
-            soc_gkg = (sum(raw * thickness for raw, thickness in valid_soc) / sum(thickness for _, thickness in valid_soc) / 10.0) if valid_soc else None
-            stock = None
-            rock_values = [cfvo_map.get(label) for label, _ in depths]
-            if all(soc_map.get(label) is not None and bd_map.get(label) is not None for label, _ in depths):
-                stock_parts = []
-                for label, thickness in depths:
-                    raw_cfvo = cfvo_map.get(label)
-                    # SoilGrids cfvo is cm3/dm3, so /1000 is the occupied
-                    # coarse-fragment volume fraction (0..1).
-                    correction = 1.0 if raw_cfvo is None else max(0.0, 1.0 - min(float(raw_cfvo) / 1000.0, 0.95))
-                    stock_parts.append((soc_map[label] / 10.0) * (bd_map[label] / 100.0) * thickness / 10.0 * correction)
-                stock = sum(stock_parts)
-            valid_rock = [max(0.0, min(float(raw) / 1000.0, 0.95)) for raw in rock_values if raw is not None]
-            rock_mean = sum(valid_rock) / len(valid_rock) if valid_rock else None
-            return soc_gkg, stock, rock_mean
-        except (requests.RequestException, ValueError, TypeError, KeyError) as exc:
-            if attempt < _HTTP_RETRIES - 1:
-                time.sleep(1.0)
-            else:
-                logger.debug("SoilGrids components (%s,%s) failed: %s", lon, lat, exc)
-    return None, None, None
+    try:
+        response = public_http.get(service_url, params=params, timeout=30)
+        response.raise_for_status()
+        layers = {layer.get("name"): layer for layer in response.json().get("properties", {}).get("layers", [])}
+        soc_map = _soilgrids_depth_map(layers.get("soc"))
+        bd_map = _soilgrids_depth_map(layers.get("bdod"))
+        cfvo_map = _soilgrids_depth_map(layers.get("cfvo"))
+        soc_values = [soc_map.get(label) for label, _ in depths]
+        valid_soc = [(raw, thickness) for raw, (_, thickness) in zip(soc_values, depths) if raw is not None]
+        soc_gkg = (sum(raw * thickness for raw, thickness in valid_soc) / sum(thickness for _, thickness in valid_soc) / 10.0) if valid_soc else None
+        stock = None
+        rock_values = [cfvo_map.get(label) for label, _ in depths]
+        if all(soc_map.get(label) is not None and bd_map.get(label) is not None for label, _ in depths):
+            stock_parts = []
+            for label, thickness in depths:
+                raw_cfvo = cfvo_map.get(label)
+                # SoilGrids cfvo is cm3/dm3, so /1000 is the occupied
+                # coarse-fragment volume fraction (0..1).
+                correction = 1.0 if raw_cfvo is None else max(0.0, 1.0 - min(float(raw_cfvo) / 1000.0, 0.95))
+                stock_parts.append((soc_map[label] / 10.0) * (bd_map[label] / 100.0) * thickness / 10.0 * correction)
+            stock = sum(stock_parts)
+        valid_rock = [max(0.0, min(float(raw) / 1000.0, 0.95)) for raw in rock_values if raw is not None]
+        rock_mean = sum(valid_rock) / len(valid_rock) if valid_rock else None
+        return soc_gkg, stock, rock_mean
+    except (requests.RequestException, ValueError, TypeError, KeyError) as exc:
+        logger.debug("SoilGrids components (%s,%s) failed: %s", lon, lat, type(exc).__name__)
+        return None, None, None
 
 
 def _soilgrids_depth_map(layer: dict | None) -> dict[str, float | None]:
@@ -331,21 +325,14 @@ def _soilgrids_point(
         "depth":    [d for d, _ in depth_weights],
         "value":    "mean",
     }
-    for attempt in range(_HTTP_RETRIES):
-        try:
-            resp = requests.get(service_url, params=params, timeout=30)
-            if resp.status_code == 429:
-                time.sleep(2 ** attempt)
-                continue
-            resp.raise_for_status()
-            data = resp.json()
-            return _parse_soilgrids_response(data, depth_weights, total_depth)
-        except (requests.RequestException, ValueError, KeyError) as exc:
-            if attempt < _HTTP_RETRIES - 1:
-                time.sleep(1.0)
-            else:
-                logger.debug(f"SoilGrids point ({lon:.4f},{lat:.4f}) failed after {_HTTP_RETRIES} tries: {exc}")
-    return None
+    try:
+        resp = public_http.get(service_url, params=params, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        return _parse_soilgrids_response(data, depth_weights, total_depth)
+    except (requests.RequestException, ValueError, KeyError) as exc:
+        logger.debug("SoilGrids point (%s,%s) failed: %s", lon, lat, type(exc).__name__)
+        return None
 
 
 def _parse_soilgrids_response(
@@ -425,7 +412,8 @@ def _sample_cog_rasterio(
 
     nodata_cfg = meta.get("nodata")
     values: list[float | None] = []
-    with rasterio.open(cog_url) as src:
+    from app.providers.local_raster_provider import safe_raster_source
+    with safe_raster_source(cog_url) as local_cog_path, rasterio.open(local_cog_path) as src:
         nodata = src.nodata if nodata_cfg is None else nodata_cfg
         crs = src.crs
         wgs84 = CRS.from_epsg(4326)
@@ -490,8 +478,14 @@ def _sample_cog_tiled(
             lossyear_template.format(lat_tile=lat_str, lon_tile=lon_str)
             if mask_lossyear else None
         )
+        raster_host = None
         try:
-            with rasterio.open(url) as src:
+            raster_host = validate_remote_raster_url(url)
+            from contextlib import ExitStack
+            from app.providers.local_raster_provider import safe_raster_source
+            with ExitStack() as stack:
+                local_cog_path = stack.enter_context(safe_raster_source(url))
+                src = stack.enter_context(rasterio.open(local_cog_path))
                 tnd = src.nodata if nodata_cfg is None else nodata_cfg
                 wgs84 = CRS.from_epsg(4326)
                 try:
@@ -507,9 +501,13 @@ def _sample_cog_tiled(
                 loss_src = None
                 if lossyear_url:
                     try:
-                        loss_src = rasterio.open(lossyear_url)
-                    except Exception as exc:  # noqa: BLE001 - lossyear masking is optional; sampling proceeds without it
-                        logger.debug(f"lossyear tile {lat_str}_{lon_str} unavailable: {exc}")
+                        loss_host = validate_remote_raster_url(lossyear_url)
+                        if loss_host != raster_host:
+                            raise ValueError("Loss-year raster host differs from its trusted COG host")
+                        local_loss_path = stack.enter_context(safe_raster_source(lossyear_url))
+                        loss_src = stack.enter_context(rasterio.open(local_loss_path))
+                    except Exception as exc:  # noqa: BLE001 - masking is optional; do not log a signed URL
+                        logger.debug("lossyear tile %s_%s unavailable (%s)", lat_str, lon_str, type(exc).__name__)
 
                 for idx, lon, lat in tile_pts:
                     try:
@@ -529,16 +527,14 @@ def _sample_cog_tiled(
                                     if lyear > 0:
                                         continue  # deforested pixel — label stale
                             except Exception as exc:  # noqa: BLE001 - lossyear masking is optional; point stays unmasked
-                                logger.debug(f"lossyear sample at point {idx} failed: {exc}")
+                                logger.debug("lossyear sample at point %s failed (%s)", idx, type(exc).__name__)
                         values[idx] = raw
                     except Exception as exc:  # noqa: BLE001 - one bad point shouldn't fail the whole tile; skipped
-                        logger.debug(f"COG tile sample at point {idx} failed: {exc}")
+                        logger.debug("COG tile sample at point %s failed (%s)", idx, type(exc).__name__)
 
-                if loss_src is not None:
-                    loss_src.close()
-
-        except Exception as exc:  # noqa: BLE001 - one bad tile shouldn't fail the whole batch; already logged
-            logger.warning(f"Tiled COG tile {lat_str}_{lon_str} failed: {exc}")
+        except Exception as exc:  # noqa: BLE001 - one bad tile shouldn't fail the whole batch
+            logger.warning("Tiled COG tile %s_%s failed host=%s error_type=%s",
+                           lat_str, lon_str, raster_host or "unknown", type(exc).__name__)
 
     valid = sum(1 for v in values if v is not None)
     logger.info(f"COG tiled sampled {len(points)} points → {valid} valid")

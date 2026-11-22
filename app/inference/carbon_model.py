@@ -6,15 +6,17 @@ XGBoost, LightGBM, CatBoost, AdaBoost, SVR, SGD, KNN, GPR, and MLP.
 """
 
 import json
+import hashlib
+import hmac
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
+from app.inference.safe_model import OnnxRegressor
 
 # --- Core scikit-learn (required) ---
 try:
-    import joblib
     from sklearn.ensemble import (
         AdaBoostRegressor,
         ExtraTreesRegressor,
@@ -182,14 +184,14 @@ class CarbonEstimationModel:
         if len(X) < 50:
             raise ValueError(f"Insufficient training samples: {len(X)} (minimum 50)")
 
-        # Fit scaler and transform ONLY on training data
+        # Each validation fold learns its own preprocessing from training rows.
+        cv_metrics = self._cross_validate(X, y, cv_folds)
+
+        # The final inference scaler is fitted only after cross-validation.
         if scale_features:
             X_scaled = self.scaler.fit_transform(X)
         else:
             X_scaled = X.copy()
-
-        # Cross-validation (on training data only - no data leakage)
-        cv_metrics = self._cross_validate(X_scaled, y, cv_folds)
 
         # Fit final model on the full training set
         self.model.fit(X_scaled, y)
@@ -208,6 +210,7 @@ class CarbonEstimationModel:
             'feature_names':   feature_names,
             'train_metrics':   train_metrics,
             'cv_metrics':      cv_metrics,
+            'cv_method':       'kfold_train_only_scaler_v1',
             'scaled_features': scale_features,
             'trained_at':      datetime.now(UTC).isoformat()
         })
@@ -244,7 +247,7 @@ class CarbonEstimationModel:
         }
 
     def _cross_validate(self, X: np.ndarray, y: np.ndarray, n_folds: int) -> dict:
-        """Perform k-fold cross-validation on the (already-scaled) training data."""
+        """Fit preprocessing on training rows independently in every fold."""
         kfold = KFold(n_splits=n_folds, shuffle=True, random_state=42)
 
         cv_rmse, cv_mae, cv_r2 = [], [], []
@@ -252,6 +255,10 @@ class CarbonEstimationModel:
         for train_idx, val_idx in kfold.split(X):
             X_tr, X_val = X[train_idx], X[val_idx]
             y_tr, y_val = y[train_idx], y[val_idx]
+            if self._scale_features:
+                fold_scaler = StandardScaler()
+                X_tr = fold_scaler.fit_transform(X_tr)
+                X_val = fold_scaler.transform(X_val)
 
             temp_model = self.SUPPORTED_ALGORITHMS[self.algorithm](
                 **self.metadata['training_params']
@@ -296,57 +303,52 @@ class CarbonEstimationModel:
         return self.model.predict(X_scaled)
 
     def save(self, filepath: str):
-        """Save model, scaler, and metadata."""
+        """Export a data-only estimator and JSON preprocessing state."""
+        from app.inference.safe_model import export_estimator
         filepath = Path(filepath)
         filepath.parent.mkdir(parents=True, exist_ok=True)
-
-        model_path = filepath.with_suffix('.pkl')
-        joblib.dump({
-            'model':         self.model,
-            'scaler':        self.scaler,
-            'feature_names': self.feature_names
-        }, model_path)
-
-        metadata_path = filepath.with_suffix('.json')
-        with open(metadata_path, 'w') as f:
-            json.dump(self.metadata, f, indent=2)
-
-        logger.info(f"✓ Model saved to {model_path}")
-        logger.info(f"✓ Metadata saved to {metadata_path}")
+        if not self.feature_names:
+            raise ValueError("Train the model before exporting")
+        export_estimator(self.model, filepath.with_suffix('.onnx'), len(self.feature_names))
+        metadata = self.metadata.copy()
+        metadata['format'] = 'onnx'
+        metadata['artifact_sha256'] = hashlib.sha256(filepath.with_suffix('.onnx').read_bytes()).hexdigest()
+        if hasattr(self.scaler, 'mean_'):
+            metadata['scaler'] = {k: np.asarray(getattr(self.scaler, k)).tolist()
+                                  for k in ('mean_', 'scale_', 'var_')}
+        if hasattr(self.model, 'coef_') and np.asarray(self.model.coef_).ndim == 1:
+            metadata['linear_parameters'] = {'coef': self.model.coef_.tolist(),
+                                              'intercept': float(self.model.intercept_)}
+        filepath.with_suffix('.json').write_text(json.dumps(metadata, indent=2), encoding='utf8')
 
     @classmethod
     def load(cls, filepath: str) -> 'CarbonEstimationModel':
-        """Load a previously saved model."""
+        """Load ONNX + JSON only. Legacy pickle conversion is an offline operation."""
         filepath = Path(filepath)
-
+        model_path = filepath.with_suffix('.onnx')
+        if not model_path.is_file() or model_path.is_symlink():
+            raise ValueError("Model requires a verified ONNX export before it can be used")
         metadata_path = filepath.with_suffix('.json')
-        with open(metadata_path, 'r') as f:
-            metadata = json.load(f)
-
-        instance = cls(
-            algorithm=metadata['algorithm'],
-            **metadata.get('training_params', {})
-        )
-
-        model_path = filepath.with_suffix('.pkl')
-        try:
-            saved_data = joblib.load(model_path)
-        except Exception as exc:
-            raise ValueError(_model_load_error_message(filepath, metadata, exc)) from exc
-
-        instance.model         = saved_data['model']
-        instance.scaler        = saved_data['scaler']
-        instance.feature_names = saved_data['feature_names']
-        instance.metadata      = metadata
-
-        logger.info(f"✓ Model loaded: {metadata['algorithm']}")
-        cv = metadata.get('cv_metrics', {})
-        rmse_mean = cv.get('rmse_mean')
-        r2_mean = cv.get('r2_mean')
-        rmse_str = f"{rmse_mean:.2f}" if isinstance(rmse_mean, (int, float)) else "N/A"
-        r2_str = f"{r2_mean:.4f}" if isinstance(r2_mean, (int, float)) else "N/A"
-        logger.info(f"  CV RMSE: {rmse_str}  R²: {r2_str}")
-
+        if metadata_path.is_symlink():
+            raise ValueError("Model metadata must be a regular file")
+        metadata = json.loads(metadata_path.read_text(encoding='utf8'))
+        raw = model_path.read_bytes()
+        expected = metadata.get('artifact_sha256', '')
+        if not isinstance(expected, str) or not hmac.compare_digest(hashlib.sha256(raw).hexdigest(), expected):
+            raise ValueError("Model integrity verification failed")
+        instance = cls(algorithm=metadata['algorithm'])
+        instance.model = OnnxRegressor(raw, metadata)
+        instance.feature_names = metadata.get('feature_names')
+        instance.metadata = metadata
+        for key, value in metadata.get('scaler', {}).items():
+            if key not in {'mean_', 'scale_', 'var_'}:
+                raise ValueError("Invalid scaler metadata")
+            values = np.asarray(value, dtype=float)
+            if values.ndim != 1 or not np.isfinite(values).all():
+                raise ValueError("Invalid scaler values")
+            setattr(instance.scaler, key, values)
+        if hasattr(instance.scaler, 'mean_'):
+            instance.scaler.n_features_in_ = len(instance.scaler.mean_)
         return instance
 
     def get_info(self) -> dict:

@@ -128,6 +128,13 @@ def upgrade():
                 op.execute(
                     f"DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{role}') THEN REVOKE ALL ON public.{table} FROM {role}; END IF; END $$"
                 )
+            op.execute(
+                f"DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = 'public' "
+                f"AND tablename = '{table}' AND policyname = 'savegeo_runtime_access') THEN "
+                f"EXECUTE 'CREATE POLICY savegeo_runtime_access ON public.{table} FOR ALL TO PUBLIC "
+                "USING (current_user = ''savegeo_runtime'') "
+                "WITH CHECK (current_user = ''savegeo_runtime'')'; END IF; END $$"
+            )
         op.execute(
             "CREATE OR REPLACE FUNCTION public.dmrv_reject_credit_event_mutation() RETURNS trigger LANGUAGE plpgsql AS $$ "
             "BEGIN RAISE EXCEPTION 'dMRV credit events are append-only'; END $$"

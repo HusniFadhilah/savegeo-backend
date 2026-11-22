@@ -18,6 +18,7 @@ from urllib.parse import urlparse
 import requests
 
 from app.core.config import get_settings
+from app.core.public_http import public_http
 
 OFFICIAL_HOST = "firms.modaps.eosdis.nasa.gov"
 FIRMS_SOURCE_CATALOG = {
@@ -213,6 +214,12 @@ def _base_url() -> str:
     return parsed.geturl().rstrip("/")
 
 
+def _request_timeout(settings) -> tuple[int, int]:
+    """Bound connect and response waits while retaining the operator setting."""
+    seconds = min(60, max(1, int(settings.nasa_firms_request_timeout_seconds)))
+    return min(5, seconds), seconds
+
+
 def _fetch_source_uncached(source: str, bbox: tuple[float, float, float, float], day_range: int, requested_date: date | None) -> tuple[list[dict], bool, bool]:
     settings = get_settings()
     if not settings.nasa_firms_map_key:
@@ -229,7 +236,8 @@ def _fetch_source_uncached(source: str, bbox: tuple[float, float, float, float],
     response = None
     for attempt in range(2):
         try:
-            response = requests.get(url, timeout=max(1, settings.nasa_firms_request_timeout_seconds), headers={"User-Agent": "SAVEGEO/1.0"})
+            # The configured timeout is clamped to a finite connect/read pair.
+            response = public_http.get(url, timeout=_request_timeout(settings), headers={"User-Agent": "SAVEGEO/1.0"}, max_bytes=16 * 1024 * 1024)  # nosec B113
             if response.status_code in {429, 500, 502, 503, 504} and attempt == 0:
                 time.sleep(0.2)
                 continue
@@ -475,7 +483,7 @@ def fetch_wms(layer: str, bbox: tuple[float, float, float, float], crs: str, wid
     bbox = validate_bbox(bbox)
     url = f"{_base_url()}/mapserver/wms/fires/{settings.nasa_firms_map_key}/{WMS_LAYERS[layer]}/"
     try:
-        response = requests.get(url, params={"BBOX": ",".join(str(value) for value in bbox), "HEIGHT": height, "WIDTH": width, "REQUEST": "GetMap", "SERVICE": "WMS", "VERSION": "1.1.1", "LAYERS": WMS_LAYERS[layer], "SRS": crs, "FORMAT": image_format, "TRANSPARENT": "TRUE"}, timeout=max(1, settings.nasa_firms_request_timeout_seconds))
+        response = public_http.get(url, params={"BBOX": ",".join(str(value) for value in bbox), "HEIGHT": height, "WIDTH": width, "REQUEST": "GetMap", "SERVICE": "WMS", "VERSION": "1.1.1", "LAYERS": WMS_LAYERS[layer], "SRS": crs, "FORMAT": image_format, "TRANSPARENT": "TRUE"}, timeout=_request_timeout(settings), max_bytes=8 * 1024 * 1024)  # nosec B113
         response.raise_for_status()
     except requests.RequestException:
         raise FirmsRequestError("Layer WMS NASA FIRMS tidak tersedia", 502) from None

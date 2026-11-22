@@ -25,10 +25,12 @@ import logging
 import re
 import uuid
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import stat
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -221,6 +223,18 @@ def _safe_file_stem(filename: str) -> str:
 
 def _select_zip_geotiff(zip_path: Path) -> str:
     with zipfile.ZipFile(zip_path) as zf:
+        members = zf.infolist()
+        if len(members) > 2000 or sum(member.file_size for member in members) > 16 * 1024**3:
+            raise ValueError("ZIP exceeds archive limits")
+        for member in members:
+            # orig_filename retains NULs/backslashes that ZipInfo normalizes
+            # differently on Windows and Linux.
+            name = member.orig_filename
+            path = PurePosixPath(name)
+            if not name or path.is_absolute() or ".." in path.parts or any(char in name for char in ("\\", "\x00", ":")) or stat.S_ISLNK(member.external_attr >> 16):
+                raise ValueError("Unsafe ZIP member path")
+            if member.file_size > max(1, member.compress_size) * 1000:
+                raise ValueError("ZIP compression ratio exceeds limit")
         names = [n for n in zf.namelist() if n.lower().endswith((".tif", ".tiff"))]
     if not names:
         raise ValueError("ZIP tidak berisi file .tif/.tiff")
@@ -530,16 +544,20 @@ async def admin_upload_imagery(
         selected_zip_member = None
         if suffix == ".zip":
             try:
-                source_path = _select_zip_geotiff(raw_path)
+                source_path = await run_in_threadpool(_select_zip_geotiff, raw_path)
                 selected_zip_member = source_path.rsplit("/", 1)[-1]
             except Exception as exc:
-                raise HTTPException(status_code=400, detail=f"Gagal menemukan GeoTIFF utama di ZIP: {exc}") from exc
+                raise HTTPException(status_code=400, detail="ZIP tidak valid atau tidak berisi GeoTIFF yang dapat diproses") from exc
 
-        local_imagery_tile_service.ensure_cog(source_path, str(cog_path))
+        await run_in_threadpool(local_imagery_tile_service.ensure_cog, source_path, str(cog_path))
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Gagal membaca/konversi GeoTIFF: {exc}") from exc
+        cog_path.unlink(missing_ok=True)
+        logger.exception("GeoTIFF conversion failed")
+        raise HTTPException(status_code=400, detail="Berkas GeoTIFF tidak dapat diproses") from exc
+    finally:
+        raw_path.unlink(missing_ok=True)
 
     img = disaster_repo.add_imagery(
         db,

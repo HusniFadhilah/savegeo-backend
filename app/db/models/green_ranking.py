@@ -34,6 +34,9 @@ class GreenRankingSnapshotRow(Base):
     __table_args__ = (
         Index("ix_green_ranking_snapshot_rank", "scope_key", "eligible", "rank"),
         Index("ix_green_ranking_snapshot_green", "scope_key", "eligible", "green_percent"),
+        Index("ix_green_ranking_snapshot_province", "scope_key", "province", "eligible", "rank"),
+        Index("ix_green_ranking_snapshot_city", "scope_key", "city", "eligible", "rank"),
+        Index("ix_green_ranking_snapshot_district", "scope_key", "district", "eligible", "rank"),
     )
 
     scope_key: Mapped[str] = mapped_column(
@@ -41,6 +44,9 @@ class GreenRankingSnapshotRow(Base):
     )
     code: Mapped[str] = mapped_column(String(64), primary_key=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    province: Mapped[str | None] = mapped_column(String(64))
+    city: Mapped[str | None] = mapped_column(String(64))
+    district: Mapped[str | None] = mapped_column(String(64))
     rank: Mapped[int | None] = mapped_column(Integer)
     eligible: Mapped[bool] = mapped_column(Boolean, nullable=False, index=True)
     green_percent: Mapped[float | None] = mapped_column(Float)

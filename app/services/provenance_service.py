@@ -11,7 +11,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.core.temporal import format_rfc3339, parse_calendar_date, parse_rfc3339
-from app.core.version import get_product_version
+from app.core.version import get_product_version, get_public_version_metadata
 from app.db.models.analysis_provenance import AnalysisProvenance
 
 logger = logging.getLogger(__name__)
@@ -106,3 +106,79 @@ def update_analysis_provenance(db: Session, analysis_id: str, **updates: Any) ->
     except Exception:  # noqa: BLE001 - job result must not be lost due to evidence write failure
         db.rollback()
         logger.exception("provenance update failed analysis_id=%s", analysis_id)
+
+
+def _record_analysis_execution(
+    db: Session,
+    analysis_id: str,
+    result: dict[str, Any],
+    pinned_model: dict[str, Any] | None = None,
+    serving_revision: dict[str, Any] | None = None,
+) -> None:
+    """Persist the model identity and quality signals observed in the worker result."""
+    record = db.get(AnalysisProvenance, analysis_id)
+    if record is None:
+        logger.warning("provenance record missing analysis_id=%s", analysis_id)
+        return
+
+    model_info: dict[str, Any] = {}
+    quality: dict[str, Any] = {}
+    confidence: dict[str, Any] = {}
+    if isinstance(result.get("model_info"), dict):
+        model_info = result["model_info"]
+    if isinstance(result.get("data_quality"), dict):
+        quality = result["data_quality"]
+    if isinstance(result.get("confidence"), dict):
+        confidence = result["confidence"]
+    pools = result.get("pools")
+    if isinstance(pools, dict):
+        model_info = {
+            str(pool): value.get("model_info")
+            for pool, value in pools.items()
+            if isinstance(value, dict) and isinstance(value.get("model_info"), dict)
+        }
+        quality = {
+            str(pool): value.get("data_quality")
+            for pool, value in pools.items()
+            if isinstance(value, dict) and isinstance(value.get("data_quality"), dict)
+        }
+    if isinstance(result.get("quality_assessment"), dict):
+        quality = {**quality, "general_preflight": result["quality_assessment"]}
+
+    model_name = model_info.get("model_name") if isinstance(model_info, dict) else None
+    model_version = model_info.get("model_version") if isinstance(model_info, dict) else None
+    if pinned_model:
+        model_name = pinned_model.get("name") or model_name
+        model_version = pinned_model.get("version") or model_version
+    record.model_id = str(pinned_model.get("id")) if pinned_model else (str(model_name) if model_name else record.model_id)
+    record.model_version = str(model_version) if model_version is not None else record.model_version
+    record.quality_flags = _safe_parameters(quality)
+    record.confidence = _safe_parameters(confidence or (model_info.get("cv_metrics") if isinstance(model_info, dict) else {}))
+    record.artifact_checksums = (
+        {"model_sha256": pinned_model["artifact_sha256"]} if pinned_model and pinned_model.get("artifact_sha256") else None
+    )
+    manifest = {
+        "model": _safe_parameters(model_info),
+        "pinned_model": _safe_parameters(pinned_model or {}),
+        "serving_revision": _safe_parameters(serving_revision or {}),
+        "quality": _safe_parameters(quality),
+        "application_version": get_product_version(),
+        "code_revision": get_public_version_metadata().get("commit_sha"),
+        "recorded_at": format_rfc3339(datetime.now(UTC)),
+    }
+    record.provenance = {**(record.provenance or {}), "inference_manifest": manifest}
+    db.commit()
+
+
+def record_analysis_execution(
+    db: Session,
+    analysis_id: str,
+    result: dict[str, Any],
+    pinned_model: dict[str, Any] | None = None,
+    serving_revision: dict[str, Any] | None = None,
+) -> None:
+    try:
+        _record_analysis_execution(db, analysis_id, result, pinned_model, serving_revision)
+    except Exception:  # noqa: BLE001 - optional evidence must not discard a completed map
+        db.rollback()
+        logger.exception("execution manifest update failed analysis_id=%s", analysis_id)

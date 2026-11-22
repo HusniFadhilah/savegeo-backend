@@ -1,0 +1,19 @@
+training:
+  # Put a DVC-managed field/reference CSV here; keep sensitive data out of Git.
+  dataset: data/training/carbon.csv
+  dataset_source: unspecified
+  dataset_license: unspecified
+  target: observed_mg_c_ha
+  target_unit: Mg C/ha
+  group: plot_id
+  features: ndvi,elevation,slope
+  algorithm: random_forest
+  seed: 42
+  trees: 160
+  max_depth: 16
+  minimum_r2: 0.0
+  max_baseline_rmse_ratio: 1.0
+  output_dir: var/training_runs/carbon_candidate
+tracking:
+  # Turn on only when MLFLOW_TRACKING_URI is configured in the operator environment.
+  mlflow_enabled: "false"

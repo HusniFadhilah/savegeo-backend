@@ -3,9 +3,11 @@ import datetime as dt
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
+from sqlalchemy import select
 
 from app.core import security, secret_encryption
 from app.db.models.admin_user import AdminUser
+from app.db.models.audit_log import AuditLog
 from app.db.session import get_db
 from app.services import admin_mfa
 
@@ -28,6 +30,11 @@ class CodeInput(BaseModel):
 
 class ResetInput(CodeInput):
     password: str = Field(min_length=1, max_length=1024)
+
+
+class ResetAccountInput(ResetInput):
+    target_username: str = Field(min_length=1, max_length=64)
+    reason: str = Field(min_length=16, max_length=2000)
 
 
 def _unavailable():
@@ -85,3 +92,20 @@ def recovery_codes(payload: ResetInput, response: Response, admin: AdminUser = D
         _unavailable()
     response.headers["Cache-Control"] = "no-store"
     return {"recovery_codes": codes}
+
+
+@router.post("/reset-account")
+def reset_account(payload: ResetAccountInput, admin: AdminUser = Depends(security.get_current_admin), db: Session = Depends(get_db)):
+    try:
+        admin_mfa.reset_other(db, admin, payload.target_username, payload.password, payload.code, payload.reason)
+    except secret_encryption.SecretEncryptionError:
+        _unavailable()
+    return {"message": "MFA akun direset, seluruh sesi dicabut, dan pemberitahuan keamanan dicatat pada profil penerima."}
+
+
+@router.get("/events")
+def events(admin: AdminUser = Depends(security.get_current_admin), db: Session = Depends(get_db)):
+    rows = db.scalars(select(AuditLog).where(AuditLog.resource_type == "admin_mfa", AuditLog.resource_id == str(admin.id),
+        AuditLog.action.in_(["mfa.reset.operator", "mfa.reset.self", "mfa.recovery.regenerate", "mfa.enroll"]))
+        .order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).limit(20))
+    return [{"id": row.id, "action": row.action, "created_at": row.created_at.isoformat(), "detail": row.detail} for row in rows]

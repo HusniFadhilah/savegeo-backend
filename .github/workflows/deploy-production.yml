@@ -16,6 +16,20 @@ concurrency:
 jobs:
   validate:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: savegeo_ci
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: savegeo_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U savegeo_ci -d savegeo_ci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     outputs:
       metadata_artifact_outcome: ${{ steps.metadata_artifact.outcome }}
     permissions:
@@ -23,10 +37,13 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"
           cache: pip
@@ -35,17 +52,23 @@ jobs:
         env:
           DEBUG: "false"
           SAVEGEO_DEPLOYMENT_ENVIRONMENT: production
+          APP_ENV: development
+          DATABASE_URL: postgresql+psycopg://savegeo_ci:postgres@127.0.0.1:5432/savegeo_ci
+          WORKSPACE_TEST_DATABASE_URL: postgresql+psycopg://savegeo_ci:postgres@127.0.0.1:5432/savegeo_ci
+          DMRV_TEST_DATABASE_URL: postgresql+psycopg://savegeo_ci:postgres@127.0.0.1:5432/savegeo_ci
         run: |
           python scripts/write_build_metadata.py --output build-metadata.json
           python scripts/validate_build_metadata.py build-metadata.json --expected-environment production --require-workflow
+          python scripts/validate_release_manifest.py "release/v$(python -c 'from scripts.write_build_metadata import project_version; print(project_version())').json" --require-current
           python -m pip install --upgrade pip
-          pip install -e ".[dev,cams]"
+          pip install --require-hashes -r requirements-ci.lock
+          pip install --no-deps --no-build-isolation -e .
           ruff check . --ignore E501 --ignore B904 --ignore B905
           mypy app
+          bash -n scripts/load_backup_environment.sh scripts/backup_offsite.sh scripts/restore_drill.sh scripts/restore_local_backup_drill.sh
           bandit -r app -lll
-          # scikit-learn is pinned for existing pickle model compatibility; remove this ignore after retraining.
           for attempt in 1 2 3; do
-            if pip-audit . --ignore-vuln PYSEC-2024-110; then
+            if pip-audit -r requirements-api.lock --no-deps --disable-pip; then
               break
             fi
             if [ "$attempt" -eq 3 ]; then
@@ -55,6 +78,18 @@ jobs:
             echo "::warning::pip-audit could not reach its advisory service; retrying in 10 seconds (attempt $attempt/3)"
             sleep 10
           done
+          for attempt in 1 2 3; do
+            if pip-audit -r requirements-optional.lock --no-deps --disable-pip; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::pip-audit failed for optional model runtime dependencies after $attempt attempts"
+              exit 1
+            fi
+            echo "::warning::pip-audit could not complete the optional runtime audit; retrying in 10 seconds (attempt $attempt/3)"
+            sleep 10
+          done
+          alembic upgrade head
           pytest
       - name: Preserve validated build metadata in job summary
         run: |
@@ -65,8 +100,9 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Upload production build metadata
         id: metadata_artifact
+        if: vars.SAVEGEO_UPLOAD_ARTIFACTS == 'true'
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: savegeo-backend-production-build-metadata
           path: build-metadata.json
@@ -96,19 +132,22 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
 
       - name: Download and validate build metadata
         if: needs.validate.outputs.metadata_artifact_outcome == 'success'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: savegeo-backend-production-build-metadata
           path: build-metadata-artifact
 
-      - name: Recreate metadata from validated source when artifact storage is unavailable
-        if: needs.validate.outputs.metadata_artifact_outcome == 'failure'
+      - name: Recreate metadata from validated source when no artifact is available
+        if: needs.validate.outputs.metadata_artifact_outcome != 'success'
         run: |
-          echo '::warning::Metadata artifact upload failed; recreating provenance from this validated commit and workflow context.'
+          echo 'Creating build metadata from the validated commit and workflow context.'
           python3 scripts/write_build_metadata.py --output build-metadata-artifact/build-metadata.json
 
       - name: Load product version and build time from metadata
@@ -136,13 +175,13 @@ jobs:
           VPN_CONFIG_B64: ${{ secrets.VPN_CONFIG_B64 }}
           VPN_AUTH_B64: ${{ secrets.VPN_AUTH_B64 }}
           SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
-          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
         run: |
           set -euo pipefail
           missing=()
           for name in \
             DEPLOY_HOST DEPLOY_SSH_PORT DEPLOY_USER BACKEND_REMOTE_DIR \
-            BACKEND_HEALTH_URL VPN_CONFIG_B64 VPN_AUTH_B64 SSH_KNOWN_HOSTS SSH_PASSWORD; do
+            BACKEND_HEALTH_URL VPN_CONFIG_B64 VPN_AUTH_B64 SSH_KNOWN_HOSTS DEPLOY_SSH_PRIVATE_KEY; do
             if [[ -z "${!name:-}" ]]; then
               missing+=("$name")
             fi
@@ -167,7 +206,7 @@ jobs:
       - name: Install VPN and deployment tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y openvpn sshpass rsync netcat-openbsd
+          sudo apt-get install -y openvpn rsync netcat-openbsd
 
       - name: Connect VPN
         env:
@@ -191,17 +230,19 @@ jobs:
       - name: Configure SSH host verification
         env:
           SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
         run: |
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
           printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
+          umask 077
+          printf '%s\n' "$DEPLOY_SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          ssh-keygen -y -f ~/.ssh/deploy_key > /dev/null
 
       - name: Synchronize backend source
-        env:
-          SSHPASS: ${{ secrets.SSH_PASSWORD }}
         run: |
-          sshpass -e ssh -p "$DEPLOY_SSH_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
+          ssh -o BatchMode=yes -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p "$DEPLOY_SSH_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
             "mkdir -p '$BACKEND_REMOTE_DIR'"
           rsync -az --delete \
             --exclude '.git/' \
@@ -210,33 +251,104 @@ jobs:
             --exclude '__pycache__/' \
             --exclude '.pytest_cache/' \
             --exclude 'build-metadata-artifact/' \
-            -e "sshpass -e ssh -p $DEPLOY_SSH_PORT" \
+            -e "ssh -o BatchMode=yes -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p $DEPLOY_SSH_PORT" \
             ./ "$DEPLOY_USER@$DEPLOY_HOST:$BACKEND_REMOTE_DIR/"
 
       - name: Deploy containers
-        env:
-          SSHPASS: ${{ secrets.SSH_PASSWORD }}
         run: |
           set -euo pipefail
           cat > "$RUNNER_TEMP/deploy-backend.sh" <<'REMOTE_DEPLOY'
             set -euo pipefail
             cd "$BACKEND_REMOTE_DIR"
             test -s .env
+            umask 077
+            python3 scripts/prepare_runtime_database.py --directory "$BACKEND_REMOTE_DIR"
             mkdir -p var/exports var/uploads var/saved_models var/disaster_rasters var/samgeo var/gee-credentials
             test -e var/deployment-metadata.json || printf '{}\n' > var/deployment-metadata.json
-            if docker compose -f docker-compose.prod.yml ps --status running db | grep -q db; then
-              docker compose -f docker-compose.prod.yml exec -T db \
-                pg_dump -U savegeo -Fc savegeo \
-                > "var/exports/predeploy_$(date +%Y%m%d_%H%M%S).dump"
+            backup_dir="$BACKEND_REMOTE_DIR/../private-backups"
+            mkdir -p "$backup_dir"
+            chmod 700 "$backup_dir"
+            if ! docker compose -f docker-compose.prod.yml ps --status running db | grep -q db; then
+              echo "Database container is not running; refusing deployment without a verified pre-deploy backup." >&2
+              exit 1
             fi
-            docker compose -f docker-compose.prod.yml build api dmrv-worker
+            backup_stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+            backup_prefix="$backup_dir/predeploy_$backup_stamp"
+            dump_tmp="$backup_prefix.dump.partial"
+            docker compose -f docker-compose.prod.yml exec -T db \
+              pg_dump -U savegeo -Fc savegeo > "$dump_tmp"
+            test -s "$dump_tmp"
+            docker compose -f docker-compose.prod.yml exec -T db \
+              pg_restore --list < "$dump_tmp" > /dev/null
+            mv "$dump_tmp" "$backup_prefix.dump"
+            dump_sha256="$(sha256sum "$backup_prefix.dump" | awk '{print $1}')"
+            evidence_sha256="absent"
+            if [ -d var/dmrv/evidence ]; then
+              evidence_tmp="$backup_prefix.dmrv-evidence.tar.gz.partial"
+              # Evidence can be owned by the API runtime UID and mode 0600.
+              # Read it in a disposable, network-isolated, read-only container
+              # with only DAC read/search override; stream the archive back so
+              # the host backup remains owned by the deploy user.
+              docker run --rm --network none --read-only --user 0:0 \
+                --cap-drop ALL --cap-add DAC_READ_SEARCH \
+                --volume "$BACKEND_REMOTE_DIR/var/dmrv:/source/dmrv:ro" \
+                postgres:16-alpine tar -C /source -czf - dmrv/evidence > "$evidence_tmp"
+              test -s "$evidence_tmp"
+              tar -tzf "$evidence_tmp" > /dev/null
+              mv "$evidence_tmp" "$backup_prefix.dmrv-evidence.tar.gz"
+              evidence_sha256="$(sha256sum "$backup_prefix.dmrv-evidence.tar.gz" | awk '{print $1}')"
+            fi
+            manifest_tmp="$backup_prefix.manifest.partial"
+            {
+              printf 'created_at_utc=%s\n' "$backup_stamp"
+              printf 'application_commit=%s\n' "$SAVEGEO_COMMIT_SHA"
+              printf 'database_dump=%s\n' "$(basename "$backup_prefix.dump")"
+              printf 'database_sha256=%s\n' "$dump_sha256"
+              printf 'dmrv_evidence_archive=%s\n' "$([ "$evidence_sha256" = absent ] && printf absent || basename "$backup_prefix.dmrv-evidence.tar.gz")"
+              printf 'dmrv_evidence_sha256=%s\n' "$evidence_sha256"
+              printf 'encryption=not-configured-by-this-deployment-step\n'
+            } > "$manifest_tmp"
+            mv "$manifest_tmp" "$backup_prefix.manifest"
+            export DOCKER_BUILDKIT=1
+            docker compose -f docker-compose.prod.yml build api dmrv-worker analysis-worker field-prediction-worker migrate
+            # Keep exact row-count evidence on the production host with mode
+            # 0600/0700. Only the pass/fail status and opaque checksum reach
+            # the public GitHub Actions log; no production counts are exposed.
+            audit_dir="$BACKEND_REMOTE_DIR/var/migration-audit/$SAVEGEO_WORKFLOW_RUN_ID"
+            mkdir -p "$audit_dir"
+            chmod 700 "$BACKEND_REMOTE_DIR/var/migration-audit" "$audit_dir"
+            # Keep the inventory private on the host and run the short-lived
+            # migration container as the deploy owner so its atomic 0600 files
+            # can be written to this 0700 bind mount without relaxing access.
+            audit_uid="$(id -u)"
+            audit_gid="$(id -g)"
+            docker compose -f docker-compose.prod.yml run --rm --no-deps \
+              --user "$audit_uid:$audit_gid" \
+              --volume "$audit_dir:/app/var/migration-audit" migrate \
+              python -m scripts.db_migration_inventory capture \
+              --output "/app/var/migration-audit/before.json"
+            docker compose -f docker-compose.prod.yml run --rm --no-deps migrate \
+              sh -c "python -m alembic upgrade head && python -m scripts.seed_rbac"
+            docker compose -f docker-compose.prod.yml run --rm --no-deps \
+              --user "$audit_uid:$audit_gid" \
+              --volume "$audit_dir:/app/var/migration-audit" migrate \
+              python -m scripts.db_migration_inventory capture \
+              --output "/app/var/migration-audit/after.json" \
+              --salt-source "/app/var/migration-audit/before.json"
+            docker compose -f docker-compose.prod.yml run --rm --no-deps \
+              --user "$audit_uid:$audit_gid" \
+              --volume "$audit_dir:/app/var/migration-audit" migrate \
+              python -m scripts.db_migration_inventory compare \
+              --before "/app/var/migration-audit/before.json" \
+              --after "/app/var/migration-audit/after.json" \
+              --output "/app/var/migration-audit/comparison.json"
             docker compose -f docker-compose.prod.yml run --rm --no-deps \
               --volume "$BACKEND_REMOTE_DIR/../frontend/dist:/frontend-assets:ro" \
               api python -m scripts.check_auth_secret --frontend-dist /frontend-assets
             docker compose -f docker-compose.prod.yml up -d --no-build
             healthy=0
             for i in $(seq 1 30); do
-              if curl --fail --silent "$BACKEND_HEALTH_URL" >/dev/null; then
+              if curl --fail --silent "${BACKEND_HEALTH_URL%/health}/ready" >/dev/null; then
                 healthy=1
                 break
               fi
@@ -257,6 +369,10 @@ jobs:
             # actually mounted on this server.
             docker compose -f docker-compose.prod.yml exec -T api \
               python -m scripts.import_legacy_models /app/var/saved_models
+            # Keep the audited, report-based UNDIP demo available to production
+            # users. The seed is idempotent and leaves all records as drafts.
+            docker compose -f docker-compose.prod.yml exec -T api \
+              python -m scripts.seed_undip_dmrv_demo --owner admin --apply
             curl --fail --silent "$BACKEND_HEALTH_URL" >/dev/null
             deployment_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
             # Preserve the validated CI build provenance. The SSH host does
@@ -272,11 +388,11 @@ jobs:
           REMOTE_DEPLOY
           # Transfer a file and execute it explicitly. This avoids relying on
           # stdin surviving the SSH authentication and connection setup.
-          sshpass -e scp -P "$DEPLOY_SSH_PORT" "$RUNNER_TEMP/deploy-backend.sh" \
+          scp -o BatchMode=yes -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -P "$DEPLOY_SSH_PORT" "$RUNNER_TEMP/deploy-backend.sh" \
             "$DEPLOY_USER@$DEPLOY_HOST:$BACKEND_REMOTE_DIR/var/deploy-backend.sh"
-          sshpass -e scp -P "$DEPLOY_SSH_PORT" build-metadata-artifact/build-metadata.json \
+          scp -o BatchMode=yes -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -P "$DEPLOY_SSH_PORT" build-metadata-artifact/build-metadata.json \
             "$DEPLOY_USER@$DEPLOY_HOST:$BACKEND_REMOTE_DIR/var/build-metadata.json"
-          sshpass -e ssh -p "$DEPLOY_SSH_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
+          ssh -o BatchMode=yes -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p "$DEPLOY_SSH_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
             "BACKEND_REMOTE_DIR='$BACKEND_REMOTE_DIR' BACKEND_HEALTH_URL='$BACKEND_HEALTH_URL' SAVEGEO_PRODUCT_VERSION='$SAVEGEO_PRODUCT_VERSION' SAVEGEO_BUILD_NUMBER='$SAVEGEO_BUILD_NUMBER' SAVEGEO_RUN_ATTEMPT='$SAVEGEO_RUN_ATTEMPT' SAVEGEO_COMMIT_SHA='$SAVEGEO_COMMIT_SHA' SAVEGEO_REF='$SAVEGEO_REF' SAVEGEO_BUILD_TIME_UTC='$SAVEGEO_BUILD_TIME_UTC' SAVEGEO_WORKFLOW_NAME='$SAVEGEO_WORKFLOW_NAME' SAVEGEO_WORKFLOW_RUN_ID='$SAVEGEO_WORKFLOW_RUN_ID' SAVEGEO_WORKFLOW_RUN_URL='$SAVEGEO_WORKFLOW_RUN_URL' SAVEGEO_DEPLOYMENT_ENVIRONMENT='$SAVEGEO_DEPLOYMENT_ENVIRONMENT' bash '$BACKEND_REMOTE_DIR/var/deploy-backend.sh'"
 
       - name: Record production deployment
@@ -290,8 +406,9 @@ jobs:
 
       - name: Upload production deployment record
         id: deployment_record_artifact
+        if: vars.SAVEGEO_UPLOAD_ARTIFACTS == 'true'
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: savegeo-backend-production-deployment-record
           path: backend-production-deployment-record.json
@@ -307,13 +424,14 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Scan working tree for secrets
+      - name: Scan Git history for secrets
         env:
-          GITLEAKS_IMAGE: ghcr.io/gitleaks/gitleaks:v8.30.1
+          GITLEAKS_IMAGE: ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
         run: |
           set -euo pipefail
           pulled=false
@@ -335,7 +453,7 @@ jobs:
             "$GITLEAKS_IMAGE" detect \
             --source /repo \
             --config /repo/.gitleaks.toml \
-            --no-git \
+            --gitleaks-ignore-path /repo/.gitleaksignore \
             --redact \
             --report-format json \
             --report-path /repo/gitleaks-report.json \
@@ -351,7 +469,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
 
       - name: Prepare runner disk for inference image scan
         run: |

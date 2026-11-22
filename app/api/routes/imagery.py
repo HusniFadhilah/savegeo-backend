@@ -19,6 +19,7 @@ from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import require_ee
 from app.core.security import get_current_app_viewer
+from app.core.bounded_json import read_typed_json_object, validate_typed_json_object
 from app.core.viewer_features import require_feature
 from app.core.config import get_settings
 from app.db.models.user import User
@@ -32,6 +33,7 @@ from app.services import samgeo_service
 from app.services import advanced_imagery_service
 from app.services.copernicus_geosave_service import CopernicusAnalysisError
 from app.services.gee_common import AnalysisError, public_analysis_error
+from app.schemas.imagery_analysis import ImageryAnalysisRequest
 from app.services.aoi_reference import resolve_known_aoi
 
 router = APIRouter(tags=["imagery"], dependencies=[Depends(require_feature("app.feature.satellite_exploration"))])
@@ -50,6 +52,9 @@ async def imagery_samgeo_start(request: Request, viewer=Depends(get_current_app_
             form = await request.form()
             upload = form.get("file")
             data = json.loads(str(form.get("payload") or "{}"))
+            if not isinstance(data, dict):
+                raise AnalysisError("Payload segmentasi harus berupa objek JSON", 422)
+            data = validate_typed_json_object(data, ImageryAnalysisRequest)
             if not isinstance(upload, UploadFile):
                 raise AnalysisError("File GeoTIFF wajib diisi untuk upload segmentasi", 422)
             suffix = Path(upload.filename or "").suffix.casefold()
@@ -70,7 +75,7 @@ async def imagery_samgeo_start(request: Request, viewer=Depends(get_current_app_
             data["_uploaded_local_file"] = True
             data["cleanup_local_file"] = True
         else:
-            data = await request.json()
+            data = await read_typed_json_object(request, ImageryAnalysisRequest)
         owner = f"user:{viewer.id}" if isinstance(viewer, User) else f"admin:{viewer.id}"
         return samgeo_service.start_job(data, owner=owner)
     except AnalysisError as exc:
@@ -113,7 +118,7 @@ def imagery_nasa_gibs_layers():
 @router.post("/imagery/historical/sentinel2-tile", dependencies=[Depends(get_current_app_viewer)])
 async def imagery_historical_sentinel2_tile(request: Request, db: Session = Depends(get_db)):
     """Create one bounded, five-day Copernicus Sentinel-2 L1C map mosaic."""
-    data = await request.json()
+    data = await read_typed_json_object(request, ImageryAnalysisRequest)
     try:
         imagery_provider_repo.refresh_cache(db)
         if "sentinel2_l1c" in imagery_provider_repo.provider_catalog() and not imagery_provider_repo.provider_is_active("sentinel2_l1c"):
@@ -139,7 +144,7 @@ def imagery_advanced_capabilities(viewer=Depends(get_current_app_viewer)):
 @router.post("/imagery/advanced/spectral-profile", dependencies=[Depends(get_current_app_viewer)])
 async def imagery_spectral_profile(request: Request):
     try:
-        return await run_in_threadpool(advanced_imagery_service.spectral_profile, await request.json())
+        return await run_in_threadpool(advanced_imagery_service.spectral_profile, await read_typed_json_object(request, ImageryAnalysisRequest))
     except AnalysisError as exc:
         raise HTTPException(status_code=exc.status_code, detail=public_analysis_error(exc))
 
@@ -147,7 +152,7 @@ async def imagery_spectral_profile(request: Request):
 @router.post("/imagery/advanced/thermal-calibration", dependencies=[Depends(get_current_app_viewer)])
 async def imagery_thermal_calibration(request: Request):
     try:
-        return advanced_imagery_service.thermal_calibration(await request.json())
+        return advanced_imagery_service.thermal_calibration(await read_typed_json_object(request, ImageryAnalysisRequest))
     except AnalysisError as exc:
         raise HTTPException(status_code=exc.status_code, detail=public_analysis_error(exc))
 
@@ -155,7 +160,7 @@ async def imagery_thermal_calibration(request: Request):
 @router.post("/imagery/advanced/insar/validate", dependencies=[Depends(get_current_app_viewer)])
 async def imagery_insar_validate(request: Request):
     try:
-        return advanced_imagery_service.validate_insar_pair(await request.json())
+        return advanced_imagery_service.validate_insar_pair(await read_typed_json_object(request, ImageryAnalysisRequest))
     except AnalysisError as exc:
         raise HTTPException(status_code=exc.status_code, detail=public_analysis_error(exc))
 
@@ -163,7 +168,7 @@ async def imagery_insar_validate(request: Request):
 @router.post("/imagery/raster-toolbox", dependencies=[Depends(get_current_app_viewer)])
 async def imagery_raster_toolbox(request: Request):
     try:
-        return await run_in_threadpool(imagery_service.raster_toolbox, await request.json())
+        return await run_in_threadpool(imagery_service.raster_toolbox, await read_typed_json_object(request, ImageryAnalysisRequest))
     except AnalysisError as e:
         raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
 
@@ -201,7 +206,7 @@ def _requires_ee(data: dict) -> bool:
 
 @router.post("/imagery/scenes", dependencies=[Depends(get_current_app_viewer)])
 async def imagery_scenes(request: Request, db: Session = Depends(get_db)):
-    data = await request.json()
+    data = await read_typed_json_object(request, ImageryAnalysisRequest)
     imagery_provider_repo.refresh_cache(db)
     provider_key = str(data.get("satellite") or "")
     if provider_key in imagery_provider_repo.provider_catalog() and not imagery_provider_repo.provider_is_active(provider_key):
@@ -231,7 +236,7 @@ async def imagery_scenes(request: Request, db: Session = Depends(get_db)):
 
 @router.post("/imagery/scene-tile", dependencies=[Depends(get_current_app_viewer)])
 async def imagery_scene_tile(request: Request, db: Session = Depends(get_db)):
-    data = await request.json()
+    data = await read_typed_json_object(request, ImageryAnalysisRequest)
     imagery_provider_repo.refresh_cache(db)
     provider_key = str(data.get("satellite") or "")
     if provider_key in imagery_provider_repo.provider_catalog() and not imagery_provider_repo.provider_is_active(provider_key):
@@ -257,7 +262,7 @@ async def imagery_scene_tile(request: Request, db: Session = Depends(get_db)):
 
 @router.post("/imagery/dem-tile", dependencies=[Depends(get_current_app_viewer), Depends(require_ee)])
 async def imagery_dem_tile(request: Request):
-    data = await request.json()
+    data = await read_typed_json_object(request, ImageryAnalysisRequest)
     try:
         return imagery_service.get_dem_tile(data)
     except AnalysisError as e:

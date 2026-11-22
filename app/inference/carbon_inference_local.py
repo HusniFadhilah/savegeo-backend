@@ -34,7 +34,7 @@ class LocalCarbonInferenceEngine:
     """
 
     def __init__(self, model_name: str | None = None, model_path: str | None = None):
-        self.registry = ModelRegistry()
+        self.registry = ModelRegistry() if model_path is None else None
         if model_name is None:
             model_name = self.registry.registry.get("default")
             if model_name is None:

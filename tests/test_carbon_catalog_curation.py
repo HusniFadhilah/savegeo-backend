@@ -58,6 +58,18 @@ class Query:
     def filter_by(self, **_kwargs):
         return self
 
+    def filter(self, *_conditions):
+        return self
+
+    def order_by(self, *_columns):
+        return self
+
+    def offset(self, _value):
+        return self
+
+    def limit(self, _value):
+        return self
+
     def all(self):
         return self.rows
 
@@ -75,11 +87,11 @@ def test_existing_stack_model_is_listed_under_gedi_without_double_counting():
                 "compatible_reference_datasets": ["GEDI_L4B_STACK", "GEDI"],
                 "feature_stack": "full_s2_s1_dem_dw"}
     model = SimpleNamespace(name="full_stack_model", metadata_json=metadata,
-                            to_dict_public=lambda: {"name": "full_stack_model", "metadata_json": metadata})
+                            to_dict_public=lambda **_kwargs: {"name": "full_stack_model", "metadata_json": metadata})
     db = DB([model])
     assert carbon_service.active_carbon_model_compatibility(db)["GEDI"] == ["full_stack_model"]
-    assert models_list(target_dataset="GEDI", db=db)["count"] == 1
-    assert models_list(target_dataset="GEDI_L4B_STACK", db=db)["count"] == 1
+    assert models_list(target_dataset="GEDI", db=db, offset=0, limit=100)["count"] == 1
+    assert models_list(target_dataset="GEDI_L4B_STACK", db=db, offset=0, limit=100)["count"] == 1
     model_compatibility.validate_model_dataset_compatibility(metadata, "GEDI")
     assert metadata["target_dataset_key"] == "GEDI_L4B_STACK"
     assert metadata["feature_stack"] == "full_s2_s1_dem_dw"

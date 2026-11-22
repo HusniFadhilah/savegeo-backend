@@ -68,14 +68,15 @@ def is_viewer_admin(principal: AdminUser | User) -> bool:
     return isinstance(principal, User) or bool(
         isinstance(principal, AdminUser)
         and principal.role
-        and principal.role.name
-        and principal.role.name.strip().casefold() == VIEWER_ROLE_NAME
+        and principal.role.is_viewer
     )
 
 
 def viewer_feature_codes(db: Session, principal: AdminUser | User) -> set[str]:
     """Resolve feature permissions from the current database role on each request."""
     if isinstance(principal, AdminUser):
+        if not principal.is_superuser and principal.role is None:
+            return set()
         if not is_viewer_admin(principal):
             # Feature gates are additive for Viewers. Keep existing access for
             # Full Access Admin, limited Admin, and Geospatial Expert accounts.
@@ -84,7 +85,7 @@ def viewer_feature_codes(db: Session, principal: AdminUser | User) -> set[str]:
     else:
         # Public application users have no role column. Treat them as Viewer
         # and resolve the shared Viewer policy; missing role means deny all.
-        role = db.query(Role).filter(Role.name.ilike(VIEWER_ROLE_NAME)).first()
+        role = db.query(Role).filter(Role.is_viewer.is_(True)).order_by(Role.id).first()
     if role is None:
         return set()
     return {permission.code for permission in role.permissions if permission.code in VIEWER_FEATURE_CODES}

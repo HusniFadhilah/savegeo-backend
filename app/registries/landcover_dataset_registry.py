@@ -10,6 +10,7 @@ import logging
 from datetime import UTC, datetime
 
 import requests
+from app.core.public_http import public_http
 
 logger = logging.getLogger(__name__)
 
@@ -944,7 +945,7 @@ def mapbiomas_indonesia_geotiff_uri(year: int) -> tuple[str, dict]:
             f"{candidate['path']}/coverage/indonesia_coverage_{candidate['year']}.tif"
         )
         try:
-            response = requests.head(https_url, timeout=8)
+            response = public_http.head(https_url, timeout=8, allow_redirects=False, max_bytes=1024)
             if response.status_code < 400:
                 gs_uri = https_url.replace("https://storage.googleapis.com/", "gs://", 1)
                 return gs_uri, candidate

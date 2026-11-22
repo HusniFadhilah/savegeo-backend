@@ -1,5 +1,6 @@
 import io
 import unittest
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -17,15 +18,17 @@ class StacTests(unittest.TestCase):
     def test_stac_json_redirect_revalidates_destination(self):
         requests_seen = []
 
-        def handler(request):
-            requests_seen.append(str(request.url))
-            return httpx.Response(302, headers={"Location": "http://127.0.0.1/private"})
+        def safe_request(method, url, **_kwargs):
+            requests_seen.append(url)
+            request = httpx.Request(method, url)
+            return httpx.Response(302, headers={"Location": "http://127.0.0.1/private"}, request=request)
 
         def validate(url, _label="URL"):
             if "127.0.0.1" in url:
                 raise AnalysisError("Private redirect blocked", 400)
 
-        with httpx.Client(transport=httpx.MockTransport(handler)) as client, \
+        with httpx.Client() as client, \
+             patch.object(service, "_public_httpx_request", side_effect=safe_request), \
              patch.object(service, "_validate_public_http_url", side_effect=validate):
             with self.assertRaises(AnalysisError):
                 service._fetch_json(client, "https://catalog.example/item")
@@ -77,16 +80,19 @@ class StacTests(unittest.TestCase):
                     "links": [{"rel": "self", "href": f"https://catalog.example/items/{name}"}],
                     "assets": {"visual": {"href": f"https://assets.example/{name}.tif", "type": "image/tiff"}}}
 
-        def handler(request):
+        def safe_request(method, url, *, params=None, json_body=None, **_kwargs):
+            request = httpx.Request(method, url, params=params, json=json_body)
             calls.append(request)
-            if request.method == "POST":
-                return httpx.Response(405)
+            if method == "POST":
+                return httpx.Response(405, request=request)
             if request.url.path == "/page2":
-                return httpx.Response(200, json={"features": [feature("clear", 5)], "links": []})
+                return httpx.Response(200, json={"features": [feature("clear", 5)], "links": []}, request=request)
             return httpx.Response(200, json={"features": [feature("cloudy", 95)],
-                "links": [{"rel": "next", "href": "https://catalog.example/page2"}]})
+                "links": [{"rel": "next", "href": "https://catalog.example/page2"}]}, request=request)
 
-        with httpx.Client(transport=httpx.MockTransport(handler)) as client, patch.object(service, "_validate_public_http_url"):
+        with httpx.Client() as client, \
+             patch.object(service, "_public_httpx_request", side_effect=safe_request), \
+             patch.object(service, "_validate_public_http_url"):
             scenes, truncated = service._stac_api_search(client, "https://catalog.example/search",
                 {"max_cloud_cover": 20, "stac_collections": "sentinel-2-l2a"},
                 service.get_imagery_provider_meta("stac_catalog"), [0, 0, 1, 1], "2024-01-01/2024-01-02", None)
@@ -110,7 +116,9 @@ class StacTests(unittest.TestCase):
         pixels.mask[:, 0, 0] = True
         source = ImageData(pixels)
         with patch.object(service, "_readable_stac_asset_href", return_value="https://assets.example/a.tif"), \
-             patch.object(service, "_validate_public_http_url"), patch.object(service, "Reader") as reader:
+             patch.object(service, "_validate_public_http_url"), \
+             patch("app.providers.local_raster_provider.safe_raster_source", return_value=nullcontext("source.tif")), \
+             patch.object(service, "Reader") as reader:
             reader.return_value.__enter__.return_value.tile.return_value = source
             png = service._render_cog_tile("https://catalog.example/item", 0, 0, 0, "visual", None, "0,2000")
         result = np.array(Image.open(io.BytesIO(png)).convert("RGBA"))
@@ -121,7 +129,7 @@ class StacTests(unittest.TestCase):
     def test_sas_is_refreshed_after_stable_asset_lookup(self):
         with patch.object(service, "_stac_asset_href", return_value="https://a.blob.core.windows.net/a.tif"), \
              patch.object(service, "_validate_public_http_url"), \
-             patch("planetary_computer.sign", side_effect=["signed1", "signed2"]):
+             patch("app.core.stac_http.sign_planetary_computer_href", side_effect=["signed1", "signed2"]):
             url = "https://planetarycomputer.microsoft.com/api/stac/v1/items/a"
             self.assertEqual(service.get_stac_asset_download_url(url, "visual"), "signed1")
             self.assertEqual(service.get_stac_asset_download_url(url, "visual"), "signed2")

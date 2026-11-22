@@ -7,7 +7,7 @@ import re
 from dataclasses import asdict, dataclass
 
 import requests
-from google.auth.exceptions import GoogleAuthError
+from google.auth.exceptions import GoogleAuthError, TransportError
 from google.auth.transport.requests import AuthorizedSession
 from google.oauth2 import service_account
 
@@ -31,7 +31,10 @@ def probe(raw: bytes) -> ProbeResult:
     project, email = None, None
     try:
         data = json.loads(raw)
-        project = get_settings().gee_project_id or data.get("project_id")
+        # A credential's own Cloud project is the safest default. A global
+        # override can point at a different project and make a valid key fail
+        # authentication or EE initialization on production.
+        project = data.get("project_id") or get_settings().gee_project_id
         email = data.get("client_email")
         if (data.get("type") != "service_account" or not isinstance(project, str)
                 or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9-]{3,127}", project)
@@ -41,13 +44,21 @@ def probe(raw: bytes) -> ProbeResult:
             data, scopes=["https://www.googleapis.com/auth/earthengine"])
         with AuthorizedSession(credentials, refresh_timeout=15) as session:
             response = session.post(f"https://earthengine.googleapis.com/v1/projects/{project}/value:compute",
-                                    json={"expression": {"constantValue": 1}}, timeout=(10, 20))
+                                    json={"expression": {
+                                        "values": {"probe_constant": {"constantValue": 1}},
+                                        "result": "probe_constant",
+                                    }}, timeout=(10, 20))
         if response.status_code == 200 and response.json().get("result") == 1:
             return ProbeResult(True, "ok", checked, project, email)
         code = {401: "authentication_failed", 403: "permission_denied", 429: "rate_limited"}.get(response.status_code, "provider_error")
         return ProbeResult(False, code, checked, project, email)
     except (ValueError, TypeError, AttributeError, KeyError):
         return ProbeResult(False, "invalid_key", checked, project, email)
+    except TransportError:
+        # TransportError is also a GoogleAuthError, but it means the token
+        # endpoint could not be reached. Do not misreport a network outage as
+        # an invalid or revoked service-account key.
+        return ProbeResult(False, "connection_failed", checked, project, email)
     except GoogleAuthError:
         return ProbeResult(False, "authentication_failed", checked, project, email)
     except requests.RequestException:

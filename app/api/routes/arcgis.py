@@ -11,15 +11,18 @@ import json
 import logging
 import math
 
-import requests
+from app.core.public_http import public_http as requests
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
+from sqlalchemy.orm import Session
 
 from app.core.security import get_current_app_viewer
-from app.providers.arcgis_client import _is_allowed_domain, get_arcgis_client
+from app.db.session import get_db
+from app.providers.arcgis_client import _is_allowed_domain
 from app.registries.carbon_dataset_registry import get_arcgis_carbon_meta, is_arcgis_carbon_dataset
 from app.registries.landcover_dataset_registry import LAND_COVER_DATASET_OPTIONS, LAND_COVER_LEGENDS
 from app.services.arcgis_helpers import _get_clip_poly, _year_ms_range
+from app.services.arcgis_service import configure_arcgis_from_db
 
 # The proxy spends the server-side ArcGIS credential, so it is limited to
 # signed-in application users. Leaflet tile requests are same-origin and carry
@@ -42,12 +45,15 @@ def arcgis_tile_proxy(
     clip_east: float | None = None,
     clip_north: float | None = None,
     clip_key: str | None = None,
+    db: Session = Depends(get_db),
 ):
     """
     Proxy ArcGIS ImageServer as XYZ tiles via exportImage.
     Non-cached ImageServer services use exportImage with bbox derived from tile coords.
     Auth token added server-side and never exposed to client.
     """
+    if not 0 <= z <= 22 or not 0 <= x < (1 << z) or not 0 <= y < (1 << z):
+        raise HTTPException(status_code=400, detail="Invalid tile coordinates")
     _is_carbon_tile = is_arcgis_carbon_dataset(dataset_key)
 
     if _is_carbon_tile:
@@ -62,7 +68,7 @@ def arcgis_tile_proxy(
     if not service_url or not _is_allowed_domain(service_url):
         raise HTTPException(status_code=403, detail="Service URL not allowed")
 
-    client = get_arcgis_client()
+    client = configure_arcgis_from_db(db)
     if not client.is_enabled():
         raise HTTPException(status_code=503, detail="ArcGIS integration not enabled")
 
@@ -172,15 +178,18 @@ def arcgis_tile_proxy(
 
     try:
         # POST avoids URL length limits when renderingRule contains a complex polygon
-        resp = requests.post(f"{service_url}/exportImage", data=params, timeout=20)
-        if resp.status_code == 200 and resp.headers.get("Content-Type", "").startswith("image"):
+        resp = requests.post(f"{service_url}/exportImage", data=params, timeout=20, allow_redirects=False)
+        if 300 <= resp.status_code < 400:
+            raise HTTPException(status_code=502, detail="ArcGIS redirects are not allowed")
+        if resp.status_code == 200 and resp.headers.get("Content-Type", "").startswith("image/"):
             return Response(
                 content=resp.content,
                 media_type=resp.headers.get("Content-Type", "image/png"),
                 headers={"Cache-Control": "public, max-age=3600"},
             )
-        # Forward non-image responses as transparent tile to avoid Leaflet errors
-        return Response(content=b"", status_code=200, media_type="image/png")
+        raise HTTPException(status_code=502, detail="ArcGIS did not return an image")
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
-        logger.error(f"ArcGIS tile proxy error [{dataset_key} z={z} y={y} x={x}]: {exc}")
-        return Response(content=b"", status_code=200, media_type="image/png")
+        logger.warning("ArcGIS tile proxy failed (%s)", type(exc).__name__)
+        raise HTTPException(status_code=502, detail="ArcGIS temporarily unavailable") from exc

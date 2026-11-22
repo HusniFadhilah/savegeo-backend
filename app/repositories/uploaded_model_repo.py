@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import hmac
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -8,7 +10,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.db.models.uploaded_model import UploadedModel
 
-ALLOWED_MODEL_EXTS = {".pkl", ".joblib", ".h5", ".pt", ".pth", ".onnx", ".bin"}
+ALLOWED_MODEL_EXTS = {".onnx"}
 
 
 def infer_model_type_from_name(filename: str) -> str:
@@ -33,31 +35,68 @@ def _safe_json_load_file(path: Path) -> dict:
         return {}
 
 
+def _verified_database_artifact(model: UploadedModel, path: Path) -> bool:
+    expected = model.artifact_sha256
+    if not isinstance(expected, str) or len(expected) != 64 or path.stat().st_size > 128 * 1024 * 1024:
+        return False
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return hmac.compare_digest(digest.hexdigest(), expected)
+
+
+def _has_current_review(db: Session, model: UploadedModel) -> bool:
+    if model.approved_by is None or not model.approval_digest or not model.artifact_sha256:
+        return False
+    from app.db.models.uploaded_model import UploadedModelEvaluation
+    from app.services import model_evaluation_storage
+    from app.services.model_lifecycle import has_current_approval
+
+    evaluation = db.query(UploadedModelEvaluation).filter_by(model_id=model.id).order_by(
+        UploadedModelEvaluation.created_at.desc(), UploadedModelEvaluation.id.desc()).first()
+    return bool(
+        evaluation
+        and evaluation.artifact_sha256 == model.artifact_sha256
+        and model_evaluation_storage.exists(evaluation.dataset_storage_path)
+        and has_current_approval(db, model, evaluation)
+    )
+
+
 def get_active_model_path(db: Session, model_type: str, model_name: str | None = None) -> str | None:
     """Resolve which model file to load for inference.
 
-    Mirrors legacy `admin_routes.get_active_model_path`: prefer the DB-registered
-    active/default `UploadedModel` row; fall back to a bare file lookup in MODEL_DIR
-    for models that predate the DB registry.
+    Only DB-registered active artifacts may be executed. A bare filename must
+    not bypass the upload review and activation process.
     """
     settings = get_settings()
     root = settings.model_path.resolve()
 
     def safe_model_file(path: Path) -> str | None:
+        if path.suffix.lower() in {".pkl", ".joblib"}:
+            path = path.with_suffix(".onnx")
+        if path.is_symlink():
+            return None
         resolved = path.resolve()
         if resolved.is_relative_to(root) and resolved.is_file() and resolved.suffix.lower() in ALLOWED_MODEL_EXTS:
             return str(resolved)
         return None
 
     if model_name:
-        m = db.query(UploadedModel).filter_by(name=model_name, is_active=True).first()
+        m = db.query(UploadedModel).filter_by(
+            name=model_name, model_type=model_type, is_active=True, lifecycle_state="active"
+        ).first()
     else:
-        m = db.query(UploadedModel).filter_by(model_type=model_type, is_default=True, is_active=True).first()
+        m = db.query(UploadedModel).filter_by(
+            model_type=model_type, is_default=True, is_active=True, lifecycle_state="active"
+        ).first()
 
     if m:
+        if not _has_current_review(db, m):
+            return None
         registered_path = Path(m.filepath)
         safe_path = safe_model_file(registered_path)
-        if safe_path:
+        if safe_path and _verified_database_artifact(m, Path(safe_path)):
             return safe_path
 
         # Database rows created on Windows or by the legacy app can contain
@@ -66,17 +105,8 @@ def get_active_model_path(db: Session, model_type: str, model_name: str | None =
         # resolve it from the mounted production model directory as a fallback.
         portable_path = settings.model_path / m.filename
         safe_path = safe_model_file(portable_path)
-        if safe_path:
+        if safe_path and _verified_database_artifact(m, Path(safe_path)):
             return safe_path
-
-    if model_name:
-        if any(character in model_name for character in ("/", "\\", ":")) or model_name in {".", ".."}:
-            return None
-        for ext in ALLOWED_MODEL_EXTS:
-            candidate = settings.model_path / f"{model_name}{ext}"
-            safe_path = safe_model_file(candidate)
-            if safe_path:
-                return safe_path
 
     return None
 
@@ -98,9 +128,12 @@ def import_legacy_models(db: Session, saved_models_dir: str) -> dict:
     for model_file in saved_dir.iterdir():
         if model_file.suffix.lower() not in ALLOWED_MODEL_EXTS:
             continue
+        if model_file.is_symlink() or not model_file.resolve().is_relative_to(saved_dir.resolve()):
+            skipped += 1
+            continue
         try:
             model_name = model_file.stem
-            metadata = _safe_json_load_file(model_file.with_suffix(".json"))
+            metadata = {**_safe_json_load_file(model_file.with_suffix(".json")), "format": "onnx"}
             if metadata.get("training_source") == "arcgis_living_atlas":
                 skipped += 1
                 continue
@@ -114,6 +147,9 @@ def import_legacy_models(db: Session, saved_models_dir: str) -> dict:
                 "trained_at": metadata.get("trained_at"),
                 "scaled_features": metadata.get("scaled_features"),
             }
+            digest = hashlib.sha256(model_file.read_bytes()).hexdigest()
+            if metadata.get("artifact_sha256") != digest:
+                raise ValueError("Model export integrity does not match its metadata")
             file_size_kb = round(model_file.stat().st_size / 1024, 2)
 
             existing = db.query(UploadedModel).filter_by(name=model_name).first()
@@ -122,6 +158,11 @@ def import_legacy_models(db: Session, saved_models_dir: str) -> dict:
                 # retraining/export job without changing the model name. Keep
                 # the DB registry in lock-step with the sidecar metadata while
                 # preserving administrator-controlled active/default flags.
+                if existing.artifact_sha256 and existing.artifact_sha256 != digest:
+                    existing.is_active, existing.is_default = False, False
+                    existing.lifecycle_state = "experimental"
+                    existing.approved_by = existing.approved_at = existing.approval_digest = None
+                existing.artifact_sha256 = digest
                 existing.display_name = existing.display_name or model_name
                 existing.algorithm = metadata.get("algorithm") or existing.algorithm
                 existing.filename = model_file.name
@@ -144,13 +185,15 @@ def import_legacy_models(db: Session, saved_models_dir: str) -> dict:
                     filepath=str(model_file.resolve()),
                     file_size_kb=file_size_kb,
                     is_default=False,
-                    is_active=True,
+                    is_active=False,
                     is_legacy=True,
+                    lifecycle_state="experimental",
                     description=f"Imported from legacy saved_models: {model_file.name}",
                     version=metadata.get("version"),
                     metrics=metrics,
                     feature_names=metadata.get("feature_names", []),
                     metadata_json=metadata or None,
+                    artifact_sha256=digest,
                     uploaded_by=None,
                 )
             )

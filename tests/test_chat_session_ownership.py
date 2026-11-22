@@ -182,6 +182,7 @@ def test_agent_http_route_requires_auth_and_passes_owner_scope(monkeypatch):
     with factory() as db:
         viewer_role = Role(
             name="viewer",
+            is_viewer=True,
             feature_permissions_configured=True,
             permissions=[Permission(code=code) for code in DEFAULT_VIEWER_FEATURE_CODES],
         )

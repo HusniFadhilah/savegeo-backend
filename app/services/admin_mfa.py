@@ -186,3 +186,36 @@ def regenerate_recovery(db: Session, admin: AdminUser, password: str, value: str
     _audit(db, admin.id, "mfa.recovery.regenerate")
     db.commit()
     return codes
+
+
+def reset_other(db: Session, actor: AdminUser, target_username: str, password: str, value: str, reason: str,
+                now: dt.datetime | None = None) -> None:
+    moment = _now(now)
+    if not security.admin_has_permission(actor, "secret.write"):
+        raise HTTPException(403, "Operator credential access is required")
+    target = db.scalar(select(AdminUser).where(AdminUser.username == target_username))
+    if target is None:
+        raise HTTPException(404, "Admin account not found")
+    if target.id == actor.id:
+        raise HTTPException(409, "Gunakan reset MFA sendiri untuk akun Anda.")
+    # Deterministic account lock order prevents two operators resetting one
+    # another from deadlocking. Factor changes happen after these account locks.
+    list(db.scalars(select(AdminUser).where(AdminUser.id.in_([actor.id, target.id])).order_by(AdminUser.id).with_for_update()))
+    actor, factor = _locked(db, actor.id)
+    db.refresh(actor, ["role_id"])
+    db.expire(actor, ["role"])
+    if not security.admin_has_permission(actor, "secret.write"):
+        raise HTTPException(403, "Operator credential access is required")
+    if not security.verify_password(password, actor.password_hash):
+        _bad_code(db, factor, moment)
+    _verify_factor(db, factor, value, moment)
+    target_factor = db.scalar(select(AdminMfa).where(AdminMfa.admin_id == target.id).with_for_update())
+    if target_factor:
+        target_factor.secret_ciphertext, target_factor.recovery_hashes = None, []
+        target_factor.enrolled_at, target_factor.last_counter = None, -1
+        target_factor.failures, target_factor.locked_until = 0, None
+    target.mfa_enabled = False
+    target.session_version = (target.session_version or 0) + 1
+    db.add(AuditLog(admin_user_id=actor.id, action="mfa.reset.operator", resource_type="admin_mfa", resource_id=str(target.id),
+                    detail={"reason": reason, "actor_username": actor.username}))
+    db.commit()

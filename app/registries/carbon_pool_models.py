@@ -22,7 +22,7 @@ def _model(name, display_name, algorithm, datasets, description, **metadata):
 
 BUILTIN_CARBON_POOL_MODELS = {}
 for _key, _meta in CARBON_DATASET_REGISTRY.items():
-    if not _meta.get("pool_analysis"):
+    if not _meta.get("pool_analysis") and _key != "SPAWN":
         continue
     _name = "pool_rf_" + _key.lower()
     BUILTIN_CARBON_POOL_MODELS[_name] = _model(
@@ -59,14 +59,15 @@ for _zone, _low, _high in [("rainforest", 0.207, 0.212), ("moist", 0.323, 0.246)
     )
 
 
-def builtin_carbon_models(target_dataset=None, db=None):
+def builtin_carbon_models(target_dataset=None, db=None, *, include_fallback=False):
     from app.services.carbon_saved_models import saved_reference_models
 
     saved = saved_reference_models(target_dataset, db=db) if db is not None else []
     saved_keys = {key for model in saved for key in model["metadata_json"]["compatible_reference_datasets"]}
     return saved + [deepcopy(model) for model in BUILTIN_CARBON_POOL_MODELS.values()
                     if (target_dataset is None or target_dataset in model["metadata_json"]["compatible_reference_datasets"])
-                    and not (model["name"].startswith("pool_rf_") and model["metadata_json"]["target_dataset_key"] in saved_keys)]
+                    and (include_fallback or not (model["name"].startswith("pool_rf_")
+                         and model["metadata_json"]["target_dataset_key"] in saved_keys))]
 
 
 def get_builtin_carbon_model(name, db=None):

@@ -16,12 +16,12 @@ CSV = """latitude,longitude,bright_ti4,bright_ti5,scan,track,acq_date,acq_time,s
 """
 
 
-def settings(map_key: str = "test-map-key"):
+def settings(map_key: str = "test-map-key", timeout: int = 20):
     return SimpleNamespace(
         nasa_firms_map_key=map_key,
         nasa_firms_base_url="https://firms.modaps.eosdis.nasa.gov",
         nasa_firms_cache_ttl_seconds=900,
-        nasa_firms_request_timeout_seconds=20,
+        nasa_firms_request_timeout_seconds=timeout,
         nasa_firms_max_day_range=7,
     )
 
@@ -67,7 +67,7 @@ def test_get_fires_uses_cache_and_never_returns_map_key(monkeypatch):
         calls.append((url, kwargs))
         return Response()
 
-    monkeypatch.setattr(firms_service.requests, "get", fake_get)
+    monkeypatch.setattr(firms_service.public_http, "get", fake_get)
     query = {
         "source": "VIIRS_NOAA20_NRT",
         "day_range": 1,
@@ -81,6 +81,7 @@ def test_get_fires_uses_cache_and_never_returns_map_key(monkeypatch):
     cached = firms_service.get_fires(**query)
 
     assert len(calls) == 1
+    assert calls[0][1]["timeout"] == (5, 20)
     assert payload["metadata"]["count"] == 1
     assert cached["metadata"]["cached"] is True
     assert "test-map-key" not in json.dumps(payload)
@@ -104,7 +105,7 @@ def test_get_fires_splits_ranges_longer_than_nasa_limit(monkeypatch):
         calls.append((url, kwargs))
         return Response()
 
-    monkeypatch.setattr(firms_service.requests, "get", fake_get)
+    monkeypatch.setattr(firms_service.public_http, "get", fake_get)
     result = firms_service.get_fires(
         source="VIIRS_NOAA20_NRT",
         day_range=7,
@@ -133,7 +134,7 @@ def test_get_fires_for_period_filters_sensor_and_confidence(monkeypatch):
         def raise_for_status(self):
             return None
 
-    monkeypatch.setattr(firms_service.requests, "get", lambda url, **kwargs: Response())
+    monkeypatch.setattr(firms_service.public_http, "get", lambda url, **kwargs: Response())
     result = firms_service.get_fires_for_period(
         source="VIIRS_NOAA20_NRT",
         from_date="2026-09-15",
@@ -160,7 +161,7 @@ def test_upstream_request_error_traceback_never_contains_map_key(monkeypatch, re
     def raise_with_url(url, **kwargs):
         raise exception_type(f"connection failed: {url}")
 
-    monkeypatch.setattr(firms_service.requests, "get", raise_with_url)
+    monkeypatch.setattr(firms_service.public_http, "get", raise_with_url)
     with pytest.raises(firms_service.FirmsRequestError) as captured:
         if request_kind == "area":
             firms_service._fetch_source_uncached(
@@ -173,3 +174,8 @@ def test_upstream_request_error_traceback_never_contains_map_key(monkeypatch, re
     assert key not in str(captured.value)
     assert key not in rendered
     assert captured.value.__suppress_context__ is True
+
+
+def test_firms_timeout_is_clamped_to_finite_connect_and_read_budgets():
+    assert firms_service._request_timeout(settings(timeout=-5)) == (1, 1)
+    assert firms_service._request_timeout(settings(timeout=200)) == (5, 60)

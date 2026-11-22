@@ -1,0 +1,23 @@
+{
+  "manifest_version": 1,
+  "product_version": "1.1.0",
+  "status": "candidate",
+  "validation_status": "not_verified",
+  "frontend": {
+    "version": "1.1.0", "build_number": null, "run_attempt": null, "commit_sha": null,
+    "workflow_name": "Build and deploy SAVEGEO frontend", "workflow_run_id": null,
+    "workflow_run_url": null, "environment": "unknown", "built_at_utc": null,
+    "deployed_at_utc": null, "observed_local_commit_sha": null
+  },
+  "backend": {
+    "version": "1.1.0", "build_number": null, "run_attempt": null, "commit_sha": null,
+    "workflow_name": "Test and deploy SAVEGEO backend", "workflow_run_id": null,
+    "workflow_run_url": null, "environment": "unknown", "built_at_utc": null,
+    "deployed_at_utc": null, "observed_local_commit_sha": null
+  },
+  "compatibility": {
+    "status": "not_verified",
+    "criteria": "Matching version numbers identify the intended release; compatibility and deployment require successful integration checks and both production deployment records."
+  },
+  "notes": ["First coordinated version after the 1.0.0 baseline; earlier intermediate releases are not inferred."]
+}

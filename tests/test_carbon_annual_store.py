@@ -35,6 +35,13 @@ def test_changed_model_or_scale_cannot_reuse_old_summary():
     assert estimate_identity(data, model, 2026, 2010, 2000)[0] != estimate_identity(data, model, 2026, 2010, 3000)[0]
 
 
+def test_identical_admin_geometry_shares_cache_across_labels():
+    geometry = {"type": "Polygon", "coordinates": [[[95, -6], [96, -6], [96, -5], [95, -6]]]}
+    aoi_a = {"geojson": {"type": "Feature", "properties": {"name": "Sumatra"}, "geometry": geometry}}
+    aoi_b = {"geojson": {"type": "Feature", "properties": {"name": "Aceh"}, "geometry": geometry}}
+    assert identity(aoi=aoi_a)[0] == identity(aoi=aoi_b)[0]
+
+
 def test_summary_survives_map_expiry_without_storing_temporary_urls():
     db = MagicMock()
     db.get.return_value = None

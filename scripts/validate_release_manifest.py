@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import tomllib
 from datetime import datetime
 from pathlib import Path
 
@@ -49,8 +50,15 @@ def validate_manifest(path: Path) -> dict[str, object]:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("path", type=Path)
+    parser.add_argument("--require-current", action="store_true")
     args = parser.parse_args()
     manifest = validate_manifest(args.path)
+    if args.require_current:
+        root = Path(__file__).resolve().parents[1]
+        with (root / "pyproject.toml").open("rb") as handle:
+            version = tomllib.load(handle)["project"]["version"]
+        if manifest["product_version"] != version or any(manifest[name]["version"] != version for name in ("frontend", "backend")):
+            raise ValueError("Current release manifest must match the backend and planned component versions")
     print(f"Validated SAVEGEO manifest: v{manifest['product_version']} ({manifest['validation_status']})")
 
 

@@ -77,8 +77,8 @@ def env(request):
         db.add_all([User(id=1, username="alice", email="alice@example.test", password_hash="x"),
                     User(id=2, username="bob", email="bob@example.test", password_hash="x"),
                     User(id=3, username="carol", email="carol@example.test", password_hash="x"),
-                    AdminUser(id=1, username="root-admin", email="root@example.test", password_hash="x"),
-                    AdminUser(id=2, username="reviewer", email="reviewer@example.test", password_hash="x")])
+                    AdminUser(id=1, is_superuser=True, username="root-admin", email="root@example.test", password_hash="x"),
+                    AdminUser(id=2, is_superuser=True, username="reviewer", email="reviewer@example.test", password_hash="x")])
         db.commit()
     app = FastAPI()
     register_dmrv_error_handler(app)

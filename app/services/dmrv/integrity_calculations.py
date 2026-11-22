@@ -17,7 +17,8 @@ from app.schemas.dmrv_integrity import AccountingInput, ValidationInput
 def stock_change(data: AccountingInput, area_ha: float) -> dict:
     with localcontext() as context:
         context.prec = 34
-        dec = lambda x: Decimal(str(x))
+        def dec(value):
+            return Decimal(str(value))
         area = dec(area_ha)
         lines = []
         gross = Decimal(0)

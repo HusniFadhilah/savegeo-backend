@@ -114,7 +114,7 @@ syn = FIX / "bu_dessy_sample_synthetic_2022.csv"
 r = field_user.post(f"{BASE}/dmrv/projects/{pid}/field-data/imports", files=files(syn), data=form, headers={"Idempotency-Key": "imp-2022-" + RUN})
 check("synthetic 2022 revisit adds a visit", r.status_code == 201 and r.json()["visits_created"] == 1)
 visits = owner_a.get(f"{BASE}/dmrv/projects/{pid}/field-data/plots/1/visits").json()
-check("two visits, year precision, assumed basis", [v["visit_date"] for v in visits] == ["2022-01-01", "2024-01-01"] and visits[1]["density"]["area_basis"] == "assumed")
+check("two visits, year precision, survey area takes measured basis", [v["visit_date"] for v in visits] == ["2022-01-01", "2024-01-01"] and visits[1]["density"]["area_basis"] == "measured")
 carbon = visits[1]["density"]["carbon_mg_c_per_ha"]
 check("2024 carbon density plausible (Mg C/ha)", carbon and 100 < carbon < 400, str(carbon))
 check("analyst-less owner reads accounting? n/a; stranger cannot list plots", stranger.get(f"{BASE}/dmrv/projects/{pid}/field-data/plots").status_code == 404)

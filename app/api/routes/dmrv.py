@@ -8,7 +8,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, File, Form, Header, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -18,6 +18,10 @@ from app.db.models.admin_user import AdminUser
 from app.db.models.dmrv_job import DmrvJob, DmrvSnapshot
 from app.db.models.dmrv_evidence import DmrvEvidencePackage
 from app.db.models.dmrv_submission import DmrvSubmission
+from app.db.models.dmrv_project import DmrvProject
+from app.db.models.dmrv_monitoring import DmrvMonitoringPeriod
+from app.db.models.dmrv_integrity import DmrvIntegrityRecord, DmrvRiskPolicy
+from app.db.models.workspace_analysis import WorkspaceAnalysisRun
 from app.db.models.user import User
 from app.db.session import get_db
 from app.schemas.dmrv import (
@@ -49,7 +53,7 @@ from app.services.dmrv import field_data, monitoring, projects
 from app.services.dmrv import evidence as dmrv_evidence
 from app.services.dmrv import submissions as dmrv_submissions
 from app.services.dmrv.accounting import calculate_arr_illustrative_fixture
-from app.services.dmrv.authz import Principal, authorize
+from app.services.dmrv.authz import Principal, ROLE_ACTIONS, authorize
 from app.services.dmrv import jobs as dmrv_jobs
 from app.services.dmrv.audit import record_audit
 from app.services.dmrv.errors import DmrvError
@@ -658,6 +662,266 @@ def create_project(
 @router.get("/projects", response_model=list[ProjectOut])
 def list_projects(viewer: User | AdminUser = Depends(get_current_app_viewer), db: Session = Depends(get_db)):
     return projects.list_projects(db, _principal(viewer))
+
+
+@router.get("/projects/{project_id}/dashboard")
+def project_dashboard(
+    project_id: str,
+    period_from: dt.date | None = Query(default=None),
+    period_to: dt.date | None = Query(default=None),
+    recent_limit: int = Query(default=20, ge=1, le=100),
+    viewer: User | AdminUser = Depends(get_current_app_viewer),
+    db: Session = Depends(get_db),
+):
+    """One membership-scoped summary for project, periods, jobs, reports and risks."""
+    principal = _principal(viewer)
+    project_role = authorize(db, project_id, principal, "project.read")
+    role_actions = ROLE_ACTIONS.get(project_role, frozenset())
+    can_read_evidence = "evidence.read" in role_actions
+    can_read_accounting = "accounting.read" in role_actions
+    if period_from and period_to and period_to < period_from:
+        raise DmrvError(422, "invalid_period_filter", "period_to harus sama atau setelah period_from.")
+    project = db.get(DmrvProject, project_id)
+    if project is None:
+        raise DmrvError(404, "not_found", "Proyek tidak ditemukan.")
+
+    def datetime_filters(column):
+        filters = []
+        if period_from:
+            filters.append(column >= dt.datetime.combine(period_from, dt.time.min, tzinfo=dt.UTC))
+        if period_to:
+            filters.append(column < dt.datetime.combine(period_to + dt.timedelta(days=1), dt.time.min, tzinfo=dt.UTC))
+        return filters
+
+    period_query = select(DmrvMonitoringPeriod).where(DmrvMonitoringPeriod.project_id == project_id)
+    if period_from:
+        period_query = period_query.where(DmrvMonitoringPeriod.end_date >= period_from)
+    if period_to:
+        period_query = period_query.where(DmrvMonitoringPeriod.start_date <= period_to)
+    matching_periods = db.execute(period_query.order_by(DmrvMonitoringPeriod.start_date.desc())).scalars().all()
+    from app.core.viewer_features import JOB_TYPE_FEATURES, viewer_feature_codes
+    allowed_analysis_kinds = ["analysis." + kind for kind, code in JOB_TYPE_FEATURES.items()
+                              if code in viewer_feature_codes(db, viewer)]
+    job_filters = [DmrvJob.project_id == project_id, *datetime_filters(DmrvJob.created_at),
+                   or_(~DmrvJob.kind.like("analysis.%"), DmrvJob.kind.in_(allowed_analysis_kinds))]
+    job_status_rows = db.execute(select(DmrvJob.status, func.count()).where(*job_filters)
+                                 .group_by(DmrvJob.status)).all()
+    job_type_rows = db.execute(select(DmrvJob.kind, func.count()).where(*job_filters)
+                               .group_by(DmrvJob.kind)).all()
+    jobs_visible = db.execute(select(DmrvJob).where(*job_filters)
+        .order_by(DmrvJob.created_at.desc()).limit(recent_limit)).scalars().all()
+    evidence_total = evidence_ready = 0
+    submissions_total = risk_total = snapshot_total = 0
+    submission_status_counts: dict[str, int] = {}
+    evidence, submissions, risks = [], [], []
+    if can_read_evidence:
+        evidence_filters = [DmrvEvidencePackage.project_id == project_id, *datetime_filters(DmrvEvidencePackage.created_at)]
+        evidence_total = db.execute(select(func.count()).select_from(DmrvEvidencePackage).where(*evidence_filters)).scalar_one()
+        evidence_ready = db.execute(select(func.count()).select_from(DmrvEvidencePackage)
+            .where(*evidence_filters, DmrvEvidencePackage.readiness == "ready")).scalar_one()
+        evidence = db.execute(select(DmrvEvidencePackage).where(*evidence_filters)
+            .order_by(DmrvEvidencePackage.created_at.desc()).limit(recent_limit)).scalars().all()
+        submission_filters = [DmrvSubmission.project_id == project_id, *datetime_filters(DmrvSubmission.created_at)]
+        submission_rows = db.execute(select(DmrvSubmission.status, func.count()).where(*submission_filters)
+                                     .group_by(DmrvSubmission.status)).all()
+        submission_status_counts = {status: int(count) for status, count in submission_rows}
+        submissions_total = sum(submission_status_counts.values())
+        submissions = db.execute(select(DmrvSubmission).where(*submission_filters)
+            .order_by(DmrvSubmission.created_at.desc()).limit(recent_limit)).scalars().all()
+    if can_read_accounting:
+        risk_filters = [DmrvIntegrityRecord.project_id == project_id, DmrvIntegrityRecord.category == "risk",
+                        *datetime_filters(DmrvIntegrityRecord.updated_at)]
+        risk_total = db.execute(select(func.count()).select_from(DmrvIntegrityRecord).where(*risk_filters)).scalar_one()
+        risks = db.execute(select(DmrvIntegrityRecord).where(*risk_filters)
+            .order_by(DmrvIntegrityRecord.updated_at.desc()).limit(recent_limit)).scalars().all()
+    risk_policy = db.get(DmrvRiskPolicy, project_id) if can_read_accounting else None
+    snapshot_filters = [DmrvSnapshot.project_id == project_id, *datetime_filters(DmrvSnapshot.created_at)]
+    snapshot_total = db.execute(select(func.count()).select_from(DmrvSnapshot).where(*snapshot_filters)).scalar_one()
+    snapshots = db.execute(select(DmrvSnapshot).where(*snapshot_filters)
+        .order_by(DmrvSnapshot.created_at.desc()).limit(recent_limit)).scalars().all()
+    visible_period_ids = {row.id for row in matching_periods}
+    jobs_by_period: dict[str, dict[str, int]] = {}
+    if visible_period_ids:
+        period_job_rows = db.execute(select(WorkspaceAnalysisRun.period_id, DmrvJob.status, func.count())
+            .join(DmrvJob, DmrvJob.id == WorkspaceAnalysisRun.job_id)
+            .where(*job_filters, WorkspaceAnalysisRun.period_id.in_(visible_period_ids))
+            .group_by(WorkspaceAnalysisRun.period_id, DmrvJob.status)).all()
+        for period_id, status, count in period_job_rows:
+            jobs_by_period.setdefault(period_id, {})[status] = int(count)
+    job_counts = {status: int(count) for status, count in job_status_rows}
+    job_types = {kind: int(count) for kind, count in job_type_rows}
+    return {
+        "generated_at": dt.datetime.now(dt.UTC).isoformat(),
+        "filter": {"period_from": period_from.isoformat() if period_from else None,
+                   "period_to": period_to.isoformat() if period_to else None},
+        "project": {"id": project.id, "name": project.name, "organization_id": project.organization_id,
+                    "activity_type": project.activity_type, "jurisdiction": project.jurisdiction,
+                    "status": project.status, "methodology_id": project.methodology_id,
+                    "revision": project.revision, "updated_at": project.updated_at.isoformat() if project.updated_at else None},
+        "summary": {"period_count": len(matching_periods), "job_count": sum(job_counts.values()),
+                    "report_count": int(evidence_total), "submission_count": int(submissions_total),
+                    "risk_count": int(risk_total), "snapshot_count": int(snapshot_total),
+                    "jobs_by_status": job_counts, "jobs_by_type": job_types,
+                    "reports_ready": int(evidence_ready),
+                    "submissions_by_status": submission_status_counts},
+        "periods": [{"id": row.id, "name": row.name, "start_date": row.start_date.isoformat(),
+                     "end_date": row.end_date.isoformat(), "status": row.status, "revision": row.revision,
+                     "job_counts": jobs_by_period.get(row.id, {})} for row in matching_periods],
+        "recent_jobs": [{"id": row.id, "kind": row.kind, "status": row.status,
+                         "created_at": row.created_at.isoformat(), "finished_at": row.finished_at.isoformat() if row.finished_at else None,
+                         "progress": row.progress or {}, "error": row.error}
+                        for row in jobs_visible],
+        "reports": {"evidence_packages": [{"id": row.id, "snapshot_id": row.snapshot_id,
+                         "readiness": row.readiness, "missing_components": row.missing_components,
+                         "created_at": row.created_at.isoformat()} for row in evidence[:recent_limit]],
+                    "submissions": [{"id": row.id, "version": row.version, "status": row.status,
+                                     "created_at": row.created_at.isoformat(), "submitted_at": row.submitted_at.isoformat() if row.submitted_at else None,
+                                     "decided_at": row.decided_at.isoformat() if row.decided_at else None}
+                                    for row in submissions[:recent_limit]]},
+        "risks": {"policy": {"enabled": risk_policy.enabled, "interval_days": risk_policy.interval_days,
+                              "lookback_days": risk_policy.lookback_days, "next_run_at": risk_policy.next_run_at.isoformat() if risk_policy.next_run_at else None}
+                              if risk_policy else None,
+                  "records": [{"id": row.id, "key": row.record_key, "title": row.title, "status": row.status,
+                               "revision": row.revision, "result": row.result, "updated_at": row.updated_at.isoformat()}
+                              for row in risks]},
+        "latest_snapshots": [{"id": row.id, "kind": row.kind, "hash": row.snapshot_hash,
+                              "created_at": row.created_at.isoformat()} for row in snapshots],
+    }
+
+
+@router.get("/dashboard")
+def portfolio_dashboard(
+    organization_id: str | None = Query(default=None, min_length=1, max_length=36),
+    period_from: dt.date | None = Query(default=None),
+    period_to: dt.date | None = Query(default=None),
+    recent_limit: int = Query(default=30, ge=1, le=100),
+    viewer: User | AdminUser = Depends(get_current_app_viewer),
+    db: Session = Depends(get_db),
+):
+    """Portfolio dashboard across only projects visible to this principal."""
+    if period_from and period_to and period_to < period_from:
+        raise DmrvError(422, "invalid_period_filter", "period_to harus sama atau setelah period_from.")
+    visible_projects = projects.list_projects(db, _principal(viewer))
+    if organization_id:
+        from app.services.organizations import require_member
+        require_member(db, organization_id, _principal(viewer))
+        visible_projects = [p for p in visible_projects if p.organization_id == organization_id]
+    ids = [p.id for p in visible_projects]
+    if not ids:
+        return {"generated_at": dt.datetime.now(dt.UTC).isoformat(), "filter": {"organization_id": organization_id,
+                "period_from": period_from.isoformat() if period_from else None,
+                "period_to": period_to.isoformat() if period_to else None},
+                "summary": {"project_count": 0, "job_count": 0, "report_count": 0, "submission_count": 0,
+                            "risk_count": 0, "period_count": 0, "reports_ready": 0, "jobs_by_status": {}},
+                "projects": [], "recent_jobs": [], "recent_periods": [], "recent_reports": [],
+                "recent_submissions": [], "recent_risks": []}
+    job_filters = [DmrvJob.project_id.in_(ids)]
+    if period_from:
+        job_filters.append(DmrvJob.created_at >= dt.datetime.combine(period_from, dt.time.min, tzinfo=dt.UTC))
+    if period_to:
+        job_filters.append(DmrvJob.created_at < dt.datetime.combine(period_to + dt.timedelta(days=1), dt.time.min, tzinfo=dt.UTC))
+    from app.core.viewer_features import JOB_TYPE_FEATURES, viewer_feature_codes
+    allowed_analysis_kinds = ["analysis." + kind for kind, code in JOB_TYPE_FEATURES.items()
+                              if code in viewer_feature_codes(db, viewer)]
+    job_filters.append(or_(~DmrvJob.kind.like("analysis.%"), DmrvJob.kind.in_(allowed_analysis_kinds)))
+    job_counts_rows = db.execute(select(DmrvJob.project_id, DmrvJob.status, func.count())
+                                 .where(*job_filters).group_by(DmrvJob.project_id, DmrvJob.status)).all()
+    visible_jobs = db.execute(select(DmrvJob).where(*job_filters).order_by(DmrvJob.created_at.desc()).limit(2000)).scalars().all()
+    visible_jobs = [j for j in visible_jobs if _analysis_visible(db, viewer, j.kind)]
+    status_by_project: dict[str, dict[str, int]] = {}
+    for pid, status, count in job_counts_rows:
+        status_by_project.setdefault(pid, {})[status] = int(count)
+    period_rows = db.execute(select(DmrvMonitoringPeriod).where(DmrvMonitoringPeriod.project_id.in_(ids))
+        .order_by(DmrvMonitoringPeriod.start_date.desc())).scalars().all()
+    if period_from:
+        period_rows = [p for p in period_rows if p.end_date >= period_from]
+    if period_to:
+        period_rows = [p for p in period_rows if p.start_date <= period_to]
+    project_roles = {project.id: project.my_role for project in visible_projects}
+    evidence_project_ids = [pid for pid, role in project_roles.items()
+                            if "evidence.read" in ROLE_ACTIONS.get(role or "", frozenset())]
+    accounting_project_ids = [pid for pid, role in project_roles.items()
+                              if "accounting.read" in ROLE_ACTIONS.get(role or "", frozenset())]
+    def date_filters(column):
+        filters = []
+        if period_from:
+            filters.append(column >= dt.datetime.combine(period_from, dt.time.min, tzinfo=dt.UTC))
+        if period_to:
+            filters.append(column < dt.datetime.combine(period_to + dt.timedelta(days=1), dt.time.min, tzinfo=dt.UTC))
+        return filters
+
+    evidence_counts = {}
+    submission_counts = {}
+    report_ready_count = 0
+    evidence_rows = []
+    submission_rows = []
+    if evidence_project_ids:
+        evidence_base = [DmrvEvidencePackage.project_id.in_(evidence_project_ids),
+                         *date_filters(DmrvEvidencePackage.created_at)]
+        evidence_count_rows = db.execute(select(DmrvEvidencePackage.project_id, func.count())
+            .where(*evidence_base).group_by(DmrvEvidencePackage.project_id)).all()
+        evidence_counts = {pid: int(count) for pid, count in evidence_count_rows}
+        report_ready_count = db.execute(select(func.count()).select_from(DmrvEvidencePackage)
+            .where(*evidence_base, DmrvEvidencePackage.readiness == "ready")).scalar_one()
+        evidence_rows = db.execute(select(DmrvEvidencePackage).where(*evidence_base)
+            .order_by(DmrvEvidencePackage.created_at.desc()).limit(recent_limit)).scalars().all()
+        submission_base = [DmrvSubmission.project_id.in_(evidence_project_ids),
+                           *date_filters(DmrvSubmission.created_at)]
+        submission_count_rows = db.execute(select(DmrvSubmission.project_id, func.count())
+            .where(*submission_base).group_by(DmrvSubmission.project_id)).all()
+        submission_counts = {pid: int(count) for pid, count in submission_count_rows}
+        submission_rows = db.execute(select(DmrvSubmission).where(*submission_base)
+            .order_by(DmrvSubmission.created_at.desc()).limit(recent_limit)).scalars().all()
+
+    risk_counts = {}
+    risk_rows = []
+    if accounting_project_ids:
+        risk_base = [DmrvIntegrityRecord.project_id.in_(accounting_project_ids),
+                     DmrvIntegrityRecord.category == "risk", *date_filters(DmrvIntegrityRecord.updated_at)]
+        risk_count_rows = db.execute(select(DmrvIntegrityRecord.project_id, func.count())
+            .where(*risk_base).group_by(DmrvIntegrityRecord.project_id)).all()
+        risk_counts = {pid: int(count) for pid, count in risk_count_rows}
+        risk_rows = db.execute(select(DmrvIntegrityRecord).where(*risk_base)
+            .order_by(DmrvIntegrityRecord.updated_at.desc()).limit(recent_limit)).scalars().all()
+    projects_out = []
+    for project in visible_projects:
+        per_project_jobs = status_by_project.get(project.id, {})
+        projects_out.append({"id": project.id, "name": project.name, "organization_id": project.organization_id,
+            "status": project.status, "activity_type": project.activity_type,
+            "monitoring_period_count": sum(p.project_id == project.id for p in period_rows),
+            "job_counts": per_project_jobs, "job_count": sum(per_project_jobs.values()),
+            "report_count": evidence_counts.get(project.id, 0),
+            "submission_count": submission_counts.get(project.id, 0),
+            "risk_count": risk_counts.get(project.id, 0)})
+    global_status: dict[str, int] = {}
+    for counts in status_by_project.values():
+        for status, count in counts.items():
+            global_status[status] = global_status.get(status, 0) + count
+    return {"generated_at": dt.datetime.now(dt.UTC).isoformat(),
+        "filter": {"organization_id": organization_id, "period_from": period_from.isoformat() if period_from else None,
+                   "period_to": period_to.isoformat() if period_to else None},
+        "summary": {"project_count": len(visible_projects), "job_count": sum(global_status.values()),
+                    "report_count": sum(evidence_counts.values()), "submission_count": sum(submission_counts.values()),
+                    "risk_count": sum(risk_counts.values()), "period_count": len(period_rows), "jobs_by_status": global_status,
+                    "reports_ready": int(report_ready_count)},
+        "projects": projects_out,
+        "recent_jobs": [{"id": row.id, "project_id": row.project_id, "kind": row.kind, "status": row.status,
+                         "created_at": row.created_at.isoformat(), "finished_at": row.finished_at.isoformat() if row.finished_at else None,
+                         "progress": row.progress or {}, "error": row.error}
+                        for row in visible_jobs[:recent_limit]],
+        "recent_periods": [{"id": row.id, "project_id": row.project_id, "name": row.name,
+                             "start_date": row.start_date.isoformat(), "end_date": row.end_date.isoformat(),
+                             "status": row.status}
+                            for row in period_rows[:recent_limit]],
+        "recent_reports": [{"id": row.id, "project_id": row.project_id, "snapshot_id": row.snapshot_id,
+                             "readiness": row.readiness, "created_at": row.created_at.isoformat()}
+                            for row in evidence_rows],
+        "recent_submissions": [{"id": row.id, "project_id": row.project_id, "version": row.version,
+                                 "status": row.status, "created_at": row.created_at.isoformat()}
+                                for row in submission_rows],
+        "recent_risks": [{"id": row.id, "project_id": row.project_id, "title": row.title,
+                           "status": row.status, "result": row.result, "updated_at": row.updated_at.isoformat()}
+                          for row in sorted(risk_rows, key=lambda item: item.updated_at, reverse=True)[:recent_limit]]}
 
 
 @router.get("/projects/{project_id}", response_model=ProjectOut)

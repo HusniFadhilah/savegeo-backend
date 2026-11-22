@@ -75,8 +75,18 @@ def check(ip: str) -> tuple:
     rpm    = limits["rpm"]
     daily  = limits["daily"]
     now    = time.time()
+    from app.core.config import get_settings
+    if get_settings().app_env in {"production", "staging"}:
+        from app.core.shared_rate_limit import consume
+        wait = max(consume(f"ai:minute:{ip}", rpm, 60), consume(f"ai:day:{ip}", daily, 86400))
+        return (False, "Batas permintaan AI tercapai. Coba lagi nanti.", wait) if wait else (True, "", 0)
 
     with _lock:
+        if ip not in _store and len(_store) >= 50_000:
+            for stale in [key for key, value in _store.items() if not value['day'] or now - value['day'][-1] >= 86400]:
+                del _store[stale]
+            if len(_store) >= 50_000:
+                return False, "Layanan AI sibuk. Coba lagi nanti.", 60
         b = _store[ip]
         b["min"] = [t for t in b["min"] if now - t < 60]
         b["day"] = [t for t in b["day"] if now - t < 86400]

@@ -1,6 +1,8 @@
 """Land cover analysis endpoints - /api/analyze/landcover*. Ported from backend/app.py."""
 from __future__ import annotations
 
+from starlette.concurrency import run_in_threadpool
+
 import logging
 
 import ee
@@ -8,8 +10,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from app.api.deps import require_ee
 from app.core.security import get_current_app_viewer
+from app.core.bounded_json import read_typed_json_object
 from app.core.viewer_features import require_feature
 from app.services import landcover_fusion_service, landcover_service
+from app.schemas.analysis_jobs import AnalysisPayload
 from app.services.gee_common import AnalysisError, public_analysis_error
 from app.services.aoi_reference import resolve_known_aoi
 
@@ -34,7 +38,7 @@ async def direct_landcover_reference_layer(
         needs_ee = bool(meta.get("analysis_dataset")) or not (meta.get("provider_type", "").startswith("arcgis") and not meta.get("gee_id"))
         if needs_ee and not getattr(request.app.state, "ee_initialized", False):
             raise HTTPException(status_code=503, detail="Google Earth Engine belum diinisialisasi untuk dataset ini.")
-        return landcover_service.get_direct_landcover_reference_layer(
+        return await run_in_threadpool(landcover_service.get_direct_landcover_reference_layer,
             dataset, year, start_month, end_month, start_date, end_date
         )
     except AnalysisError as exc:
@@ -51,9 +55,9 @@ async def direct_landcover_reference_layer(
 
 @router.post("/analyze/landcover", dependencies=[Depends(require_feature("app.feature.land_cover")), Depends(require_ee)])
 async def analyze_landcover(request: Request):
-    data = await request.json()
+    data = await read_typed_json_object(request, AnalysisPayload)
     try:
-        return landcover_service.analyze_landcover(data)
+        return await run_in_threadpool(landcover_service.analyze_landcover, data)
     except AnalysisError as e:
         raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
     except ee.EEException:
@@ -71,9 +75,9 @@ async def analyze_landcover(request: Request):
 
 @router.post("/analyze/landcover-transition", dependencies=[Depends(require_feature("app.feature.land_cover_change")), Depends(require_ee)])
 async def analyze_landcover_transition(request: Request):
-    data = await request.json()
+    data = await read_typed_json_object(request, AnalysisPayload)
     try:
-        return landcover_service.analyze_landcover_transition(data)
+        return await run_in_threadpool(landcover_service.analyze_landcover_transition, data)
     except AnalysisError as e:
         raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
     except ee.EEException:
@@ -91,9 +95,9 @@ async def analyze_landcover_transition(request: Request):
 
 @router.post("/analyze/landcover-change-map", dependencies=[Depends(require_feature("app.feature.land_cover_change")), Depends(require_ee)])
 async def analyze_landcover_change_map(request: Request):
-    data = await request.json()
+    data = await read_typed_json_object(request, AnalysisPayload)
     try:
-        return landcover_service.analyze_landcover_change_map(data)
+        return await run_in_threadpool(landcover_service.analyze_landcover_change_map, data)
     except AnalysisError as e:
         raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
     except ee.EEException:
@@ -111,9 +115,9 @@ async def analyze_landcover_change_map(request: Request):
 
 @router.post("/analyze/landcover-identify", dependencies=[Depends(require_feature("app.feature.land_cover")), Depends(require_ee)])
 async def identify_landcover(request: Request):
-    data = await request.json()
+    data = await read_typed_json_object(request, AnalysisPayload)
     try:
-        return landcover_service.identify_landcover_point(resolve_known_aoi(data))
+        return await run_in_threadpool(landcover_service.identify_landcover_point, resolve_known_aoi(data))
     except AnalysisError as e:
         raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
     except ee.EEException:
@@ -129,9 +133,9 @@ async def identify_landcover(request: Request):
 async def analyze_landcover_hotspots(request: Request):
     """Ranked, vectorized pixel-change polygons (P0 hotspot detection) - see
     landcover_service.analyze_landcover_hotspots for the full contract."""
-    data = await request.json()
+    data = await read_typed_json_object(request, AnalysisPayload)
     try:
-        return landcover_service.analyze_landcover_hotspots(data)
+        return await run_in_threadpool(landcover_service.analyze_landcover_hotspots, data)
     except AnalysisError as e:
         raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
     except ee.EEException:
@@ -147,9 +151,9 @@ async def analyze_landcover_hotspots(request: Request):
 async def analyze_landcover_fusion(request: Request):
     """Quality-gated optical/SAR fusion classification and change - see
     landcover_fusion_service for Q_o/Q_s, routing and the change score D."""
-    data = await request.json()
+    data = await read_typed_json_object(request, AnalysisPayload)
     try:
-        return landcover_fusion_service.analyze_landcover_fusion(data)
+        return await run_in_threadpool(landcover_fusion_service.analyze_landcover_fusion, data)
     except AnalysisError as e:
         raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
     except ee.EEException:

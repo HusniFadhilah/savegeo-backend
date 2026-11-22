@@ -20,6 +20,7 @@ from collections import defaultdict, deque
 from fastapi import HTTPException, Request, status
 
 from app.core.config import get_settings
+from app.core.client_ip import get_client_ip
 
 _MAX_TRACKED_KEYS = 50_000
 
@@ -54,6 +55,8 @@ class SlidingWindowCounter:
             if len(self._events) >= _MAX_TRACKED_KEYS:
                 for stale in [k for k, v in self._events.items() if not v or now - v[-1] >= window]:
                     del self._events[stale]
+                if key not in self._events and len(self._events) >= _MAX_TRACKED_KEYS:
+                    raise _too_many(60, "Layanan autentikasi sibuk. Coba lagi nanti.")
             self._prune(key, now, window).append(now)
 
     def reset(self, key: str) -> None:
@@ -70,7 +73,7 @@ _reset_requests = SlidingWindowCounter()
 
 
 def _client(request: Request) -> str:
-    return request.client.host if request.client else "unknown"
+    return get_client_ip(request)
 
 
 def _too_many(retry_after: int, detail: str) -> HTTPException:
@@ -90,6 +93,13 @@ def ensure_login_allowed(request: Request, scope: str, identifier: str) -> None:
     settings = get_settings()
     window = settings.auth_throttle_window_seconds
     ip_key, account_key = _keys(request, scope, identifier)
+    if settings.app_env in {"production", "staging"}:
+        from app.core.shared_rate_limit import consume
+        wait = max(consume("login:" + ip_key, settings.login_failures_per_ip, window),
+                   consume(f"login:{scope}:acct:{identifier.strip().casefold()}", settings.login_failures_per_account, window))
+        if wait:
+            raise _too_many(wait, "Terlalu banyak percobaan login. Coba lagi nanti.")
+        return
     wait = max(
         _login_failures.retry_after(account_key, settings.login_failures_per_account, window),
         _login_failures.retry_after(ip_key, settings.login_failures_per_ip, window),
@@ -99,6 +109,8 @@ def ensure_login_allowed(request: Request, scope: str, identifier: str) -> None:
 
 
 def record_login_failure(request: Request, scope: str, identifier: str) -> None:
+    if get_settings().app_env in {"production", "staging"}:
+        return  # Hosted mode atomically counts all attempts before authentication.
     window = get_settings().auth_throttle_window_seconds
     for key in _keys(request, scope, identifier):
         _login_failures.record(key, window)
@@ -113,6 +125,13 @@ def ensure_password_reset_request_allowed(request: Request, scope: str, identifi
     settings = get_settings()
     window = settings.auth_throttle_window_seconds
     ip_key, account_key = _keys(request, scope, identifier)
+    if settings.app_env in {"production", "staging"}:
+        from app.core.shared_rate_limit import consume
+        wait = max(consume("reset:" + ip_key, settings.password_reset_requests_per_ip, window),
+                   consume(f"reset:{scope}:acct:{identifier.strip().casefold()}", settings.password_reset_requests_per_account, window))
+        if wait:
+            raise _too_many(wait, "Terlalu banyak permintaan reset password. Coba lagi nanti.")
+        return
     wait = max(
         _reset_requests.retry_after(account_key, settings.password_reset_requests_per_account, window),
         _reset_requests.retry_after(ip_key, settings.password_reset_requests_per_ip, window),

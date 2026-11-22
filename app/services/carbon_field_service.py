@@ -7,7 +7,6 @@ import hashlib
 import io
 import json
 import math
-from collections import defaultdict
 
 import numpy as np
 from pydantic import ValidationError
@@ -86,6 +85,8 @@ def normalize(record: FieldObservationInput) -> dict:
             raw.pop(key)
     identity = [
         record.plot_id,
+        round(record.latitude, 5),
+        round(record.longitude, 5),
         str(record.survey_date),
         record.pool,
         record.depth_top_cm,
@@ -191,8 +192,8 @@ def field_inventory(observations: list[dict]) -> dict:
         rows = [row for row in observations if row["pool"] == pool]
         pools[pool] = {
             "records": len(rows),
-            "calibration_plots": len({row["raw"]["plot_id"] for row in rows if row["role"] == "calibration"}),
-            "validation_plots": len({row["raw"]["plot_id"] for row in rows if row["role"] == "validation"}),
+            "calibration_plots": len(_group([_plot_reference(row) for row in rows if row["role"] == "calibration"])),
+            "validation_plots": len(_group([_plot_reference(row) for row in rows if row["role"] == "validation"])),
             "without_prediction": sum(not row["predictions"] for row in rows),
             "sources": sorted({prediction["source"] for row in rows for prediction in row["predictions"]}),
         }
@@ -200,17 +201,69 @@ def field_inventory(observations: list[dict]) -> dict:
 
 
 def _group(rows):
-    groups = defaultdict(list)
+    groups: list[list[dict]] = []
     for row in rows:
-        groups[row["plot_id"]].append(row)
+        group = next((group for group in groups if _same_physical_plot(group[0], row)), None)
+        if group is None:
+            groups.append([row])
+        else:
+            group.append(row)
     return [
         {
-            "plot_id": key,
+            "plot_id": _plot_label(values[0]),
             "observed": float(np.mean([r["observed"] for r in values])),
             "predicted": float(np.mean([r["predicted"] for r in values])),
         }
-        for key, values in groups.items()
+        for values in groups
     ]
+
+
+_PLOT_MATCH_RADIUS_M = 30.0
+
+
+def _distance_m(left: dict, right: dict) -> float:
+    lat1, lat2 = math.radians(left["latitude"]), math.radians(right["latitude"])
+    dlat = lat2 - lat1
+    dlon = math.radians(right["longitude"] - left["longitude"])
+    haversine = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+    return 6_371_000 * 2 * math.asin(min(1.0, math.sqrt(haversine)))
+
+
+def _same_physical_plot(left: dict, right: dict) -> bool:
+    return left["plot_id"] == right["plot_id"] and _distance_m(left, right) <= _PLOT_MATCH_RADIUS_M
+
+
+def _plot_label(row: dict) -> str:
+    return f"{row['plot_id']}@{row['latitude']:.5f},{row['longitude']:.5f}"
+
+
+def _plot_reference(observation: dict) -> dict:
+    raw = observation["raw"]
+    return {
+        "plot_id": raw["plot_id"],
+        "latitude": raw["latitude"],
+        "longitude": raw["longitude"],
+        "observed": observation.get("observed_mg_c_ha", 0),
+        "predicted": 0,
+    }
+
+
+def _evaluate_validation(rows: list[dict]) -> dict:
+    """Report a matched one-plot holdout without implying population accuracy."""
+    if len(rows) != 1:
+        return evaluate_predictions(rows)
+    row = rows[0]
+    residual = float(row["predicted"] - row["observed"])
+    return {
+        "status": "computed",
+        "n_plots": 1,
+        "bias": residual,
+        "rmse": abs(residual),
+        "mae": abs(residual),
+        "r2": None,
+        "qualification": "single_plot_holdout_not_generalizable",
+        "rows": [{**row, "residual": residual, "absolute_error": abs(residual)}],
+    }
 
 
 def assess(observations: list[dict], request: FieldAssessmentRequest) -> dict:
@@ -243,12 +296,14 @@ def assess(observations: list[dict], request: FieldAssessmentRequest) -> dict:
             paired[observation["role"]].append(
                 {
                     "plot_id": raw["plot_id"],
+                    "latitude": raw["latitude"],
+                    "longitude": raw["longitude"],
                     "observed": observation["observed_mg_c_ha"],
                     "predicted": prediction["value_mg_c_ha"],
                 }
             )
     train, validation = _group(paired["calibration"]), _group(paired["validation"])
-    if {r["plot_id"] for r in train} & {r["plot_id"] for r in validation}:
+    if any(_same_physical_plot(calibration, held_out) for calibration in paired["calibration"] for held_out in paired["validation"]):
         raise ValueError(
             "Plot yang sama tidak boleh berada pada kalibrasi dan validasi, termasuk antar kunjungan."
         )
@@ -265,7 +320,7 @@ def assess(observations: list[dict], request: FieldAssessmentRequest) -> dict:
         "excluded": exclusions,
         "reference_types": sorted(reference_types),
         "baseline_calibration": evaluate_predictions(train),
-        "baseline_validation": evaluate_predictions(validation),
+        "baseline_validation": _evaluate_validation(validation),
         "cross_validation": lopo_linear_calibration(train, clip_min=0.0),
         "method_note": "Kunjungan berulang dirata-ratakan per plot sebelum fit dan validasi; plot diberi bobot sama. Validasi terpisah tidak dipakai untuk fit. Hasil tetap lokal dan eksperimental.",
         "warnings": [
@@ -280,7 +335,7 @@ def assess(observations: list[dict], request: FieldAssessmentRequest) -> dict:
         result["warnings"].append(
             "Piksel titik diizinkan eksplisit; dukungan spasialnya berbeda dari rerata plot."
         )
-    if len(train) >= 3 and np.ptp([r["predicted"] for r in train]) > 0:
+    if request.create_calibration_candidate and len(train) >= 3 and np.ptp([r["predicted"] for r in train]) > 0:
         slope, intercept = np.polyfit([r["predicted"] for r in train], [r["observed"] for r in train], 1)
         result["artifact"] = {
             "schema_version": "carbon-calibration-model/v1",
@@ -293,13 +348,18 @@ def assess(observations: list[dict], request: FieldAssessmentRequest) -> dict:
             "clip_min": 0.0,
             "depth_cm": [request.depth_top_cm, request.depth_bottom_cm] if request.pool == "soc" else None,
         }
-        result["calibrated_validation"] = evaluate_predictions(
+        result["calibrated_validation"] = _evaluate_validation(
             [{**r, "predicted": max(0.0, float(intercept + slope * r["predicted"]))} for r in validation]
         )
     else:
         result["artifact"] = None
-        result["warnings"].append(
-            "Kalibrasi linear memerlukan minimal tiga plot kalibrasi dan variasi nilai prediktor."
-        )
+        if request.create_calibration_candidate:
+            result["warnings"].append(
+                "Kalibrasi linear memerlukan minimal tiga plot kalibrasi dan variasi nilai prediktor."
+            )
+        else:
+            result["warnings"].append(
+                "Run otomatis ini hanya untuk validasi; kandidat kalibrasi tidak dibuat. Jalankan evaluasi manual setelah cakupan batch lengkap bila memerlukan kandidat."
+            )
     result["status"] = "computed" if train or validation else "not_computed"
     return result

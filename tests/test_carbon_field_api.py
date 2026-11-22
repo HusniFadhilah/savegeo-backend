@@ -69,7 +69,11 @@ def client(tmp_path, monkeypatch):
         if not token:
             raise HTTPException(401)
         return SimpleNamespace(
-            id=1, username="test-admin", role_id=None if token == "admin" else 1, role=None
+            id=1,
+            username="test-admin",
+            role_id=None if token == "admin" else 1,
+            role=None,
+            is_superuser=token == "admin",
         )
 
     app.dependency_overrides[get_db] = session
@@ -217,3 +221,44 @@ def test_overflowing_normalization_is_a_validation_error_not_a_server_error(clie
     assert response.status_code == 422
     with factory() as db:
         assert db.query(CarbonFieldObservation).count() == 0
+
+
+def test_observation_search_treats_sql_wildcards_as_literal_and_returns_filtered_counts(client):
+    http, _factory = client
+    headers = {"X-Test": "admin"}
+    response = http.post(
+        BASE + "/observations",
+        json={"records": [row("plot_1"), row("plotX1"), row("plot%2")]},
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+
+    # The underscore in the JSON key "plot_id" must not make every record
+    # match a search for a literal underscore in a plot identifier.
+    underscore = http.get(BASE + "/observations?q=plot_", headers=headers).json()
+    assert [item["raw"]["plot_id"] for item in underscore["rows"]] == ["plot_1"]
+    assert underscore["total"] == underscore["records_filtered"] == 1
+    assert underscore["records_total"] == 3
+
+    percent = http.get(BASE + "/observations?q=%25", headers=headers).json()
+    assert [item["raw"]["plot_id"] for item in percent["rows"]] == ["plot%2"]
+
+
+@pytest.mark.parametrize("query", ["q=" + "x" * 121, "page=201"])
+def test_observation_search_and_page_bounds_are_validated(client, query):
+    http, _factory = client
+    response = http.get(BASE + "/observations?" + query, headers={"X-Test": "admin"})
+    assert response.status_code == 422
+
+
+def test_dataset_observation_limit_rejects_new_rows_but_allows_replays(client, monkeypatch):
+    http, _factory = client
+    monkeypatch.setattr(carbon_field, "MAX_FIELD_OBSERVATIONS_PER_DATASET", 1)
+    headers = {"X-Test": "admin"}
+    original = row("P1")
+    created = http.post(BASE + "/observations", json={"records": [original]}, headers=headers)
+    assert created.status_code == 200, created.text
+    replay = http.post(BASE + "/observations", json={"records": [original]}, headers=headers)
+    assert replay.status_code == 200, replay.text
+    overflow = http.post(BASE + "/observations", json={"records": [row("P2")]}, headers=headers)
+    assert overflow.status_code == 413

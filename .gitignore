@@ -44,6 +44,21 @@ Thumbs.db
 .claude/
 .tmp-disaster*
 .tmp-flood*
+.tmp/
+.tmp-*.log
 
 # Local Postman collections/environments may contain machine-specific values.
 postman/
+
+# Internal notes, reports, and agent prompts live in ../docs/backend/.
+*.[mM][dD]
+!/README.md
+!/OPERATIONS.md
+!/CAMS_FIRE_EMISSIONS.md
+!/CHLORIS.md
+!/IBM_GRANITE_BIOMASS.md
+!/SAMGEO.md
+!/deploy/README.md
+!/tests/e2e_dmrv/README.md
+!/tests/fixtures/dmrv/README.md
+!/app/static/geo/BOUNDARY_ATTRIBUTION.md

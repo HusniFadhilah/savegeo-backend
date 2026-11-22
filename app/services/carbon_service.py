@@ -19,6 +19,8 @@ import ee
 import requests
 from sqlalchemy.orm import Session
 
+from app.core.public_http import public_http
+
 from app.db.models.uploaded_model import UploadedModel
 from app.inference.carbon_inference import CarbonInferenceEngine
 from app.inference.carbon_inference_local import LocalCarbonInferenceEngine
@@ -240,7 +242,7 @@ def get_direct_carbon_reference_layer(
 def active_carbon_model_compatibility(db: Session) -> dict[str, list[str]]:
     """Return active carbon model names grouped by compatible reference dataset key."""
     grouped: dict[str, list[str]] = {}
-    models = db.query(UploadedModel).filter_by(model_type="carbon", is_active=True).all()
+    models = db.query(UploadedModel).filter_by(model_type="carbon", is_active=True, lifecycle_state="active").all()
     for model in models:
         meta = model.metadata_json or {}
         meta = model_compatibility.backfill_legacy_metadata(meta, model.name)
@@ -437,10 +439,10 @@ def check_external_dataset_health(key: str, refresh: bool = False) -> dict:
 
     started = time.perf_counter()
     try:
-        response = requests.head(url, timeout=5, allow_redirects=True)
+        response = public_http.head(url, timeout=5)
         if response.status_code in {405, 501}:
             response.close()
-            response = requests.get(url, headers={"Range": "bytes=0-1023"}, timeout=5, stream=True)
+            response = public_http.get(url, headers={"Range": "bytes=0-1023"}, timeout=5, max_bytes=1024)
         try:
             ok = 200 <= response.status_code < 400
             result = {
@@ -454,7 +456,7 @@ def check_external_dataset_health(key: str, refresh: bool = False) -> dict:
             }
         finally:
             response.close()
-    except requests.RequestException:
+    except (requests.RequestException, ValueError):
         result = {
             "key": key,
             "check_scope": "reachability_only",
@@ -968,6 +970,7 @@ def calculate_carbon_summary_for_year(
         # No raster to tile for sampled/server-side-only models (point predictions only).
 
     total_carbon = mean_carbon * area_ha
+    quality = inference_engine.inference_quality
     return {
         "year": int(year),
         "mean_density": round(mean_carbon, 2),
@@ -983,9 +986,9 @@ def calculate_carbon_summary_for_year(
         # change. `images_used` reset per-call in both inference paths (see
         # CarbonInferenceEngine) so this is this year's own count, not a
         # cross-year cumulative total.
-        "images_used": inference_engine.last_s2_image_count,
-        "valid_pixel_pct": inference_engine.last_valid_pixel_pct,
-        "gap_filled": inference_engine.last_gap_filled,
+        "images_used": quality.images_used,
+        "valid_pixel_pct": quality.valid_pixel_pct,
+        "gap_filled": quality.gap_filled,
     }
 
 
@@ -998,14 +1001,20 @@ def analyze_carbon(db: Session, data: dict) -> dict:
         from app.services.carbon_extensions import analyze_extension
 
         return analyze_extension(data)
-    if data.get("reference_dataset") in {"TROPICAL_LITTER_REFERENCE", "TROPICAL_DEADWOOD_REFERENCE"} and not data.get("reference_only") and not data.get("load_only"):
+    if data.get("reference_dataset") in {"TROPICAL_LITTER_REFERENCE", "TROPICAL_DEADWOOD_REFERENCE"} and not data.get("model_name") and not data.get("reference_only") and not data.get("load_only"):
         from app.services.detritus_training import ensure_model
 
         if not data.get("aoi"):
             raise AnalysisError("AOI diperlukan untuk estimasi serasah/kayu mati.", 422)
         pool = "litter" if "LITTER" in data["reference_dataset"] else "deadwood"
         model = ensure_model(db, pool)
-        data = {**data, "model_name": model["name"]}
+        if model.get("lifecycle_state") == "active":
+            data = {**data, "model_name": model["name"]}
+        else:
+            # A trained proxy model remains quarantined until independent
+            # review. Return the selected reference baseline instead of trying
+            # to load its JSON ensemble through the generic ONNX path.
+            data = {**data, "model_name": None, "reference_only": True}
     if data.get("simple_mode") and data.get("reference_only") and data.get("reference_dataset") in {"SPAWN", "ORNL_BGB", "SOILGRIDS_OCS_0_30CM"}:
         from app.services.carbon_pool_service import analyze_carbon_pool
 
@@ -1019,7 +1028,7 @@ def analyze_carbon(db: Session, data: dict) -> dict:
     pool_meta = CARBON_DATASET_REGISTRY.get(data.get("reference_dataset"), {})
     builtin = get_builtin_carbon_model(data.get("model_name"), db=db)
     if (builtin and not data.get("reference_only") and not data.get("load_only")) or (pool_meta.get("pool_analysis") and (data.get("reference_only") or data.get("load_only") or not data.get("model_name"))):
-        if not pool_meta.get("pool_analysis") and not (builtin and builtin["metadata_json"].get("method") == "saved_reference_ensemble"):
+        if not pool_meta.get("pool_analysis") and not (builtin and (builtin["metadata_json"].get("method") == "saved_reference_ensemble" or (data.get("reference_dataset") == "SPAWN" and builtin["metadata_json"].get("training_mode") == "reference_raster"))):
             raise AnalysisError("Model BGB/SOC tidak kompatibel dengan dataset yang dipilih.", 422)
         from app.services.carbon_pool_service import analyze_carbon_pool
 
@@ -1377,7 +1386,7 @@ def analyze_carbon(db: Session, data: dict) -> dict:
 
     # Validate model-dataset compatibility before any expensive GEE work.
     _db_model = db.query(UploadedModel).filter_by(
-        name=inference_engine.model_name, is_active=True
+        name=inference_engine.model_name, is_active=True, lifecycle_state="active"
     ).first()
     if _db_model and _db_model.metadata_json:
         _compat_meta = (
@@ -1729,6 +1738,7 @@ def analyze_carbon(db: Session, data: dict) -> dict:
     statistics_available = any(
         stats_out.get(key) is not None for key in ("mean", "std_dev", "min", "max")
     )
+    quality = inference_engine.inference_quality
 
     return {
         "carbon_estimated": {
@@ -1785,7 +1795,7 @@ def analyze_carbon(db: Session, data: dict) -> dict:
             "analysis_year_mode": "annual_covariate_inference",
             "reference_dataset": reference_dataset,
             "scale": carbon_scale,
-            "images_used": inference_engine.last_s2_image_count,
+            "images_used": quality.images_used,
             "statistics_available": statistics_available,
             "co2_conversion_factor": co2_factor,
             "gee_deployable": is_gee_deployable,
@@ -1798,9 +1808,9 @@ def analyze_carbon(db: Session, data: dict) -> dict:
         # CI would falsely assume spatially independent pixels, which isn't
         # true for imagery (neighboring pixels are strongly correlated).
         "data_quality": {
-            "valid_pixel_pct": inference_engine.last_valid_pixel_pct,
-            "gap_filled": inference_engine.last_gap_filled,
-            "images_used": inference_engine.last_s2_image_count,
+            "valid_pixel_pct": quality.valid_pixel_pct,
+            "gap_filled": quality.gap_filled,
+            "images_used": quality.images_used,
             "coefficient_of_variation_pct": _cv_pct,
             "model_r2": (model_info.get("cv_metrics") or {}).get("r2_mean"),
             "model_rmse": (model_info.get("cv_metrics") or {}).get("rmse_mean"),

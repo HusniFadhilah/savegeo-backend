@@ -112,16 +112,15 @@ def ensure_cog(src_path: str, dst_path: str, overview_resampling: str = "average
     if os.path.exists(dst_path):
         return
     os.makedirs(os.path.dirname(dst_path), exist_ok=True)
-    with rasterio.open(src_path) as src:
-        rasterio.shutil.copy(
-            src,
-            dst_path,
-            driver="COG",
-            compress="DEFLATE",
-            blocksize=512,
-            overview_resampling=overview_resampling,
-            bigtiff="IF_SAFER",
-        )
+    from app.core.isolated_process import run_isolated
+    temporary = dst_path + ".partial.tif"
+    try:
+        run_isolated("cog", {"source": str(Path(src_path).resolve()) if not src_path.startswith("/vsi") else src_path,
+            "destination": str(Path(temporary).resolve()), "resampling": overview_resampling}, timeout=180)
+        os.replace(temporary, dst_path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
     logger.info(f"ensure_cog: wrote COG {dst_path}")
 
 
