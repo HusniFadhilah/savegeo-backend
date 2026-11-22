@@ -1,94 +1,72 @@
-# IDCTA implementation verification
+# dMRV/IDCTA implementation and release verification
 
-Verified on 14 November 2026 against the integrated workspace, analysis and MFA changes.
+Status checked on 22 November 2026 against GitHub `main` and the production
+deployment workflow.
 
-## Implemented scope
+## Branch and release status
 
-1. Evidence readiness checklist with independent review and revision history.
-2. Membership-scoped project portfolio, search, pagination and CSV export.
-3. Opt-in scheduled satellite risk scans, field risk reports and follow-up.
-4. Five-pool stock-change scenario accounting with pinned methodology and boundary.
-5. Internal registry reconciliation, serial conflict and unique overlap screening.
-6. CSV field validation, buffered spatial holdout calibration and block bootstrap.
-7. Safeguard evidence and grievance lifecycle.
+- GitHub `main` is at commit `75d96041dba3cd1d3bcf12a0ece99750e6dd18b6`
+  (`fix(dmrv): avoid reserved SQLAlchemy registry attribute`). The local
+  `main` checkout matches that commit and has no uncommitted changes.
+- The local `dmrv-idcta-integrity` and `dmrv-idcta-advanced` branch tips are
+  ancestors of `main`; their changes are included.
+- GitHub `feat/dmrv-field-data` and `feat/dmrv-jobs` are behind `main` and have
+  no commits absent from it. The one commit unique to
+  `fix/dmrv-runtime-rls-20261121` has the same migration as
+  `0063_dmrv_runtime_rls.py` in `main`. The one commit unique to
+  `fix/prod-dmrv-demo-assets-20261121` has the same two demo-data `COPY`
+  instructions already present in the production `Dockerfile`.
+- The [CI and production deployment run](https://github.com/HusniFadhilah/savegeo-backend/actions/runs/44997038724)
+  completed successfully for the same `main` commit. The full backend suite
+  reported **1,254 passed and 11 skipped**. Lint, type checks, dependency
+  audit, Gitleaks, and Trivy also passed.
+- Production migration advanced from `0064_merge_0063_heads` to
+  `0065_merge_all_schema_heads`. The migration-preservation check passed.
+  Deployment checked readiness and health, verified the live container
+  revision against the expected commit, and recorded the deployment.
 
-Additional support includes proof uploads, SHA-256 manifests, review ZIP exports,
-owner settings and membership revocation. No sidebar entry was added.
+## Implemented IDCTA workflows
 
-## Results
+1. Evidence readiness checklist, safeguards, independent review, and revision
+   history.
+2. Membership-scoped portfolio, search, pagination, and CSV export.
+3. Scheduled/manual satellite risk scans, field reports, follow-up, and
+   reviewer prioritization.
+4. Five-pool stock-change scenario accounting with methodology/boundary
+   context, uncertainty deduction, and buffer inputs.
+5. Internal registry/serial records, conflict checks, and geometry-overlap
+   screening.
+6. CSV field-data validation, spatial holdout calibration, and block
+   bootstrap intervals.
+7. Safeguard evidence and grievance review/closure.
 
-| Check | Result |
-|---|---|
-| dMRV, organizations, workspace analysis, MFA and calibration review tests | 251 passed; 4 intentionally skipped SQLite-only concurrency cases |
-| PostgreSQL integrity migration | Upgrade, 4 RLS tables, backend write and downgrade passed |
-| Full migration chain in an isolated schema | Empty to head; downgrade to 0045; upgrade to 0051 passed |
-| Frontend dMRV, organizations, MFA and profile tests | 61 passed in 16 files |
-| TypeScript | `tsc --noEmit` passed |
-| ESLint for IDCTA and its route/page integrations | Passed |
-| Ruff critical/unused checks for new backend code | Passed |
-| Vite production build | Passed; existing large bundle warnings remain |
-| Actual Earth Engine provider smoke | Passed previously; results in `work/idcta/LIVE_RISK_SMOKE.json` |
-| Installed local API and SPA | Health OK; unauthenticated portfolio 401; SPA routes 200 |
-| Actual HTTP to local PostgreSQL | Authenticated portfolio/workspace 200; draft save/read and ZIP manifest verification passed |
-| Local database migration | 0045 to 0051 applied after backup; existing row counts preserved; 4 RLS tables confirmed |
+Additional project-workspace features include a version-matched VM0047 v1.1
+review checklist, snapshot-linked satellite provenance and aerosol QA fields,
+an append-only reported-credit event ledger, risk-priority triage, and an
+offline mobile field-capture queue with GPS/plot checks.
 
-The actual HTTP workflow used a disposable user and project, without bypassing MFA
-on an existing account. Its data was removed after the check. The frontend's new
-modules also transformed successfully through the live Vite server. One local API,
-frontend and dMRV worker were started. Logs and process IDs are in `work/idcta`.
+## Scope and known limits
 
-The PostgreSQL tests used uniquely named temporary schemas, not application tables.
-Each schema was removed after the run. The suite checks that organization or project
-membership revocation blocks portfolio, workspace and export access; an author cannot
-review their own evidence; stale writes fail; corrupt history blocks export; and
-satellite failures remain retryable without fabricated zero-risk evidence.
+- These workflows organize evidence and review; they do not establish
+  methodology eligibility, validation, verification, certification, or credit
+  issuance.
+- The VM0047 checklist is a concise review aid, not an exhaustive or
+  authoritative methodology engine.
+- Satellite quality/aerosol metadata is entered by project users. SaveGeo does
+  not independently verify it against providers, correct imagery for aerosol,
+  or calculate an automatic aerosol-error adjustment.
+- Credit events and balances are internally reported. There is no external
+  registry feed, registry synchronization, or credit-issuance connector.
+- Accounting and risk priority are screening aids based on documented inputs;
+  they do not automatically determine carbon losses, reversal, buffer changes,
+  or credit claims.
+- Spatial-validation metrics describe the uploaded observation/prediction
+  pairs. Calibration does not automatically replace a production model.
+- Offline field observations remain in the originating browser's local queue
+  until synchronized. Keep the project page available and do not clear browser
+  storage while captures are pending.
 
-## Limits and remaining release checks
-
-- Native/browser automation was unavailable in this session. Real browser visual QA
-  and interactive login were not completed. Component tests are not a substitute.
-- Registry data is entered with source evidence. No external registry synchronization
-  or credit issuance connector is implemented or implied.
-- Accounting is a configurable screening calculation, not a certified methodology
-  engine. Internal acceptance does not establish credit eligibility or issue credits.
-- Spatial validation metrics apply to the uploaded pairs and their provenance;
-  calibration does not automatically replace production models.
-- Existing unrelated edits in the original `main` working trees are preserved.
-  The 37 installed source/guide files, database migration and local runtime checks
-  are recorded in separate receipts under `work/idcta`. The committed feature
-  branch `dmrv-idcta-integrity` was copied back to both original local repositories.
-  No push to internet remotes or production deployment was performed. The original
-  `main` working trees contain concurrent edits and have not been merged or cleaned.
-
-See `DMRV_IDCTA_GUIDE.md` for instructions, formulas and an illustrative case study.
-
-## Supplemental advanced review features — 21 November 2026
-
-On branch `dmrv-idcta-advanced`, the workspace now includes:
-
-- A version-matched VM0047 v1.1 evidence checklist with approach-specific items.
-- Snapshot-linked, user-declared satellite source/quality metadata, including
-  aerosol QA, cloud cover, observation gaps, dates, season, resolution, and
-  processing version.
-- An append-only internal ledger for reported issuance, transfer, use, retirement,
-  and cancellation events, with evidence, replay protection, and reported-balance
-  checks.
-- Reviewer triage using open satellite/field risk reports, spatial-validation
-  bootstrap intervals, field plot/GPS QA, and uncertainty-input completeness.
-- An IndexedDB mobile field capture queue with geotagged timestamp, optional photo,
-  project-boundary and registered-plot checks, and retry-safe synchronization.
-
-Current validation for this supplement: TypeScript, ESLint on changed frontend
-files, Python syntax parsing, Ruff, service-worker syntax, whitespace checks, and
-Vite production build passed. The Vite build reported existing large-bundle and
-ineffective dynamic-import warnings. Automated test suites were not run. Migration
-`0052_dmrv_advanced_review_tools` is prepared but has not been applied to an
-application database; no authenticated HTTP/browser workflow, external registry
-sync, merge to `main`, or remote push was performed for this supplement.
-
-The methodology pack is a limited review aid, not an exhaustive VM0047 checker.
-The satellite metadata is user-entered and not independently checked against
-providers. Credit events and balances remain internally reported, with no official
-registry feed or issuance. Offline observations are kept per account/project in
-the browser; open the project field tab while online before going offline, and
-keep that page available while recording.
+The successful pipeline verifies automated backend tests, migrations, security
+checks, and production health for this commit. It is not a substitute for a
+human review of project evidence or a visual/browser acceptance test of every
+frontend flow.
