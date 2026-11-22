@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy import select
 
 from app.db.base import Base
+from app.db.models.dmrv_advanced import DmrvCreditEvent, DmrvFieldCapture
 from app.db.models.dmrv_integrity import (
     DmrvIntegrityDocument,
     DmrvIntegrityRecord,
@@ -27,6 +28,8 @@ EXTRA = [
     DmrvIntegrityRevision.__table__,
     DmrvIntegrityDocument.__table__,
     DmrvRiskPolicy.__table__,
+    DmrvCreditEvent.__table__,
+    DmrvFieldCapture.__table__,
 ]
 
 

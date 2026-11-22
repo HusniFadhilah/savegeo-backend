@@ -300,6 +300,3 @@ def capture_field_observation(
             path.unlink(missing_ok=True)
         raise
     return capture_out(row)
-
-
-\n

@@ -92,5 +92,3 @@ def validate_checklist(db: Session, project_id: str, approach: str, items: list[
         should_be_not_applicable = bool(conditional_approach and conditional_approach != approach)
         if (item["status"] == "not_applicable") != should_be_not_applicable:
             raise DmrvError(422, "methodology_applicability_mismatch", "Tandai butir bersyarat sesuai pendekatan proyek.")
-
-\n
