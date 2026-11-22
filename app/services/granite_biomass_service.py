@@ -357,6 +357,11 @@ def analyze_granite_biomass(db: Session, data: dict[str, Any]) -> dict[str, Any]
         raise AnalysisError("Model IBM Granite dibatasi untuk AOI hingga 250 km² per analisis.", 413)
 
     year, start_month, end_month, start_date, end_date = _analysis_period(data)
+    paths = granite_biomass_paths()
+    if paths is None:
+        # Fail before making Earth Engine collection/export requests. A partial
+        # optional runtime must not spend provider quota before failing locally.
+        raise AnalysisError("Model IBM Granite belum diaktifkan atau runtime/checkpoint belum lengkap di server.", 503)
     started = time.perf_counter()
     import ee
 
@@ -379,9 +384,6 @@ def analyze_granite_biomass(db: Session, data: dict[str, Any]) -> dict[str, Any]
         if int(valid.sum()) > MAX_RASTER_PIXELS:
             raise AnalysisError("AOI menghasilkan terlalu banyak piksel untuk inferensi IBM Granite.", 413)
 
-        paths = granite_biomass_paths()
-        if paths is None:
-            raise AnalysisError("Model IBM Granite belum diaktifkan atau runtime/checkpoint belum lengkap di server.", 503)
         checkpoint, config, expected_sha256 = _ensure_model_assets(paths)
         if _sha256(checkpoint).lower() != expected_sha256.lower():
             raise AnalysisError("Checkpoint IBM Granite tidak lolos verifikasi SHA-256.", 503)

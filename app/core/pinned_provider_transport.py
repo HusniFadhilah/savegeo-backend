@@ -5,6 +5,8 @@ from urllib.parse import urlsplit
 
 import httpx
 import httpx2
+import requests
+from requests.adapters import BaseAdapter
 
 from app.core.public_http import public_http
 
@@ -18,6 +20,76 @@ _SDK_HEADERS = {
     "x-stainless-lang", "x-stainless-package-version", "x-stainless-os", "x-stainless-arch",
     "x-stainless-runtime", "x-stainless-runtime-version",
 }
+
+
+class _RejectUnpinnedGoogleAdapter(BaseAdapter):
+    def send(self, request, **kwargs):
+        del kwargs
+        raise requests.RequestException("Unpinned Google authentication request blocked")
+
+    def close(self) -> None:
+        return None
+
+
+class _PinnedGoogleRequestsAdapter(BaseAdapter):
+    """Requests adapter for Google auth flows, backed by the pinned transport."""
+
+    def __init__(self, hostname: str) -> None:
+        if hostname not in BoundedEarthEngineTransport.ALLOWED_HOSTS:
+            raise ValueError("Google provider host is not allowed")
+        self.hostname = hostname
+
+    def send(self, request, stream=False, timeout=None, verify=True, cert=None, proxies=None):
+        del stream
+        parsed = urlsplit(request.url)
+        host = (parsed.hostname or "").encode("idna").decode("ascii").lower().rstrip(".")
+        if (
+            parsed.scheme != "https"
+            or host != self.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.port not in {None, 443}
+            or parsed.fragment
+            or not verify
+            or cert is not None
+            or proxies
+        ):
+            raise requests.RequestException("Google authentication request destination is not allowed")
+        headers = {
+            name.lower(): value for name, value in request.headers.items()
+            if name.lower() in _SDK_HEADERS
+        }
+        try:
+            upstream = public_http.request(
+                request.method,
+                request.url,
+                raw_body=request.body or None,
+                headers=headers,
+                timeout=timeout or 30,
+                max_bytes=BoundedEarthEngineTransport.MAX_RESPONSE_BYTES,
+                max_request_bytes=BoundedEarthEngineTransport.MAX_REQUEST_BYTES,
+            )
+        except Exception as exc:  # noqa: BLE001 - auth failures must not expose signed data
+            raise requests.RequestException("Pinned Google HTTPS request failed") from exc
+        upstream.request = request
+        upstream.connection = self
+        return upstream
+
+    def close(self) -> None:
+        return None
+
+
+def pinned_google_authorized_session(credentials, *, refresh_timeout: float = 15):
+    """Create an AuthorizedSession that cannot fall back to requests networking."""
+    from google.auth.transport.requests import AuthorizedSession
+
+    session = AuthorizedSession(credentials, refresh_timeout=refresh_timeout)
+    session.trust_env = False
+    session.mount("https://", _RejectUnpinnedGoogleAdapter())
+    session.mount("http://", _RejectUnpinnedGoogleAdapter())
+    for hostname in BoundedEarthEngineTransport.ALLOWED_HOSTS:
+        session.mount(f"https://{hostname}/", _PinnedGoogleRequestsAdapter(hostname))
+    return session
 
 
 class BoundedPublicHTTPTransport(httpx.BaseTransport):
@@ -146,6 +218,7 @@ class BoundedEarthEngineTransport:
         "earthengine.googleapis.com",
         "earthengine-highvolume.googleapis.com",
         "oauth2.googleapis.com",
+        "accounts.google.com",
         "www.googleapis.com",
     })
     MAX_RESPONSE_BYTES = 64 * 1024 * 1024

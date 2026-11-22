@@ -19,6 +19,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import GroupKFold
 
 from app.core.config import get_settings
+from app.core.public_http import public_http
 from app.db.models.uploaded_model import UploadedModel, UploadedModelEvaluation
 from app.db.session import SessionLocal
 from app.registries.carbon_dataset_registry import CARBON_DATASET_REGISTRY, CARBON_ARCGIS_REGISTRY, get_dataset_meta, load_carbon_reference_ee
@@ -77,15 +78,18 @@ def external_labels(frame, key, year):
     from rasterio.transform import rowcol
 
     if key in CARBON_ARCGIS_REGISTRY:
-        import requests
-
         values = np.full(len(frame), np.nan)
         url = CARBON_ARCGIS_REGISTRY[key]["arcgis_service_url"] + "/getSamples"
         for start in range(0, len(frame), 200):
             points = frame.iloc[start:start + 200][["longitude", "latitude"]].to_numpy().tolist()
-            response = requests.post(url, data={"f": "json", "geometryType": "esriGeometryMultipoint",
-                                                "geometry": json.dumps({"points": points, "spatialReference": {"wkid": 4326}}),
-                                                "returnFirstValueOnly": "true"}, timeout=60)
+            response = public_http.post(
+                url,
+                data={"f": "json", "geometryType": "esriGeometryMultipoint",
+                      "geometry": json.dumps({"points": points, "spatialReference": {"wkid": 4326}}),
+                      "returnFirstValueOnly": "true"},
+                timeout=60,
+                max_bytes=4 * 1024 * 1024,
+            )
             response.raise_for_status()
             result = response.json()
             if result.get("error"):

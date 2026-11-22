@@ -16,9 +16,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import ee
-import requests
 from PIL import Image
 
+from app.core.public_http import public_http
 from app.db.session import SessionLocal
 from app.registries.disaster_model_registry import get_model
 from app.repositories import disaster_repo as repo
@@ -76,7 +76,11 @@ def tile_check(url, aoi_row):
     x = int((lon+180)/360*2**zoom)
     y = int((1-math.asinh(math.tan(math.radians(lat)))/math.pi)/2*2**zoom)
     for dx, dy in ((0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)):
-        response = requests.get(url.replace("{z}", str(zoom)).replace("{x}", str(x+dx)).replace("{y}", str(y+dy)), timeout=60)
+        response = public_http.get(
+            url.replace("{z}", str(zoom)).replace("{x}", str(x+dx)).replace("{y}", str(y+dy)),
+            timeout=60,
+            max_bytes=2 * 1024 * 1024,
+        )
         if response.status_code != 200:
             continue
         image = Image.open(io.BytesIO(response.content)).convert("RGBA")

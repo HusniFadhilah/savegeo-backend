@@ -212,6 +212,12 @@ DEFAULT_CONFIGS: list[tuple[str, str, str, str, str, str, bool]] = [
     ("ai.rate_limit_max_file_mb", os.getenv("AI_RATE_LIMIT_MAX_FILE_MB", "5"), "int", "ai",
      "Maks Ukuran File (MB)", "Ukuran maksimum file/foto yang bisa diupload ke chatbot", True),
 
+    ("ai.daily_budget_usd", os.getenv("AI_DAILY_BUDGET_USD", "0"), "float", "ai",
+     "Plafon Biaya AI Harian (USD)", "Plafon global harian. Nilai 0 menonaktifkan pembatas biaya; aktifkan setelah harga tiap provider/model diisi.", False),
+
+    ("ai.model_pricing_json", os.getenv("AI_MODEL_PRICING_JSON", "{}"), "json", "ai",
+     "Harga Model AI (JSON)", 'Harga USD per satu juta token, berdasarkan provider:model. Contoh: {"openai:gpt-4o":{"input_per_million_usd":2.5,"output_per_million_usd":10}}. Harga perlu diperbarui sesuai tarif akun/provider.', False),
+
     # -- Crop Monitoring risk score weights (must sum to 1.0; admin-editable,
     # never hardcoded in crop_monitoring_service - see _risk_score()) --
     ("crop_risk.weight_vegetation", "0.30", "float", "crop_monitoring",

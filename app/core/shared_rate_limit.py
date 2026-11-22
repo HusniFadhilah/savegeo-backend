@@ -14,8 +14,8 @@ _cleanup_lock = Lock()
 _cleanup_at = 0.0
 
 
-def consume(key: str, limit: int, window_seconds: int, *, connection_engine=None) -> int:
-    """Consume one request atomically, returning Retry-After on exhaustion.
+def consume(key: str, limit: int, window_seconds: int, *, units: int = 1, connection_engine=None) -> int:
+    """Consume quota units atomically, returning Retry-After on exhaustion.
 
     Key material is hashed before storage. PostgreSQL enforces the quota with
     an atomic conditional upsert, including simultaneous callers on two workers.
@@ -23,8 +23,12 @@ def consume(key: str, limit: int, window_seconds: int, *, connection_engine=None
     """
     if limit <= 0:
         return 0
+    if type(units) is not int or units <= 0:
+        raise HTTPException(status_code=503, detail="Invalid quota units")
     if window_seconds < 1:
         raise HTTPException(status_code=503, detail="Invalid quota window")
+    if units > limit:
+        return window_seconds
     if connection_engine is None:
         from app.db.session import engine
         connection_engine = engine
@@ -36,12 +40,12 @@ def consume(key: str, limit: int, window_seconds: int, *, connection_engine=None
         with connection_engine.begin() as db:
             allowed = db.execute(text("""
                 INSERT INTO request_rate_buckets (bucket_key, window_start, hits, expires_at)
-                VALUES (:key, :start, 1, :expires)
+                VALUES (:key, :start, :units, :expires)
                 ON CONFLICT (bucket_key, window_start) DO UPDATE
-                SET hits = request_rate_buckets.hits + 1
-                WHERE request_rate_buckets.hits < :limit
+                SET hits = request_rate_buckets.hits + :units
+                WHERE request_rate_buckets.hits + :units <= :limit
                 RETURNING hits
-            """), {"key": digest, "start": start, "expires": expires, "limit": limit}).scalar()
+            """), {"key": digest, "start": start, "units": units, "expires": expires, "limit": limit}).scalar()
             global _cleanup_at
             if time.monotonic() - _cleanup_at >= 60 and _cleanup_lock.acquire(blocking=False):
                 try:

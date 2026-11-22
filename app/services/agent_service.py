@@ -199,6 +199,8 @@ def _is_connectivity_error(exc: BaseException) -> bool:
 
 def _run_with_fallback(compute, cfg: dict, primary: tuple[str, str]) -> tuple[dict, dict]:
     """Run ``compute`` with ``primary``; on an outage use the admin fallback if it is healthy."""
+    from app.agentic.cost_budget import AICostBudgetError
+
     fallback = providers.fallback_selection(cfg, primary)
     cached = providers.peek_cached_health(primary[0], cfg, primary[1])
     primary_error: BaseException | None = None
@@ -210,9 +212,10 @@ def _run_with_fallback(compute, cfg: dict, primary: tuple[str, str]) -> tuple[di
             with agentic_ai.ai_selection(*primary):
                 return compute(), {"provider": primary[0], "model": primary[1], "fallback_used": False}
         except Exception as exc:  # noqa: BLE001 - classified below
-            if not (fallback and providers.is_availability_error(exc)):
+            budget_fallback = isinstance(exc, AICostBudgetError) and exc.status_code == 429
+            if not (fallback and (providers.is_availability_error(exc) or budget_fallback)):
                 raise _AiCallError(primary, exc) from exc
-            if _is_connectivity_error(exc):
+            if not budget_fallback and _is_connectivity_error(exc):
                 providers.mark_unavailable(primary[0], cfg, primary[1], "unreachable")
             primary_error = exc
 
@@ -224,7 +227,8 @@ def _run_with_fallback(compute, cfg: dict, primary: tuple[str, str]) -> tuple[di
             raise _AiCallError(fallback, exc) from exc
         return result, {
             "provider": fallback[0], "model": fallback[1], "fallback_used": True,
-            "fallback_from": primary[0], "fallback_reason": "provider_unavailable",
+            "fallback_from": primary[0],
+            "fallback_reason": "primary_model_over_budget" if isinstance(primary_error, AICostBudgetError) else "provider_unavailable",
         }
     raise _AiCallError(primary, primary_error)
 
@@ -405,6 +409,23 @@ def run_agent_control(
     except _AiCallError as err:
         cause = err.cause
         logger.error("agent_control error (%s): %s", err.provider, _redact_secrets(str(cause), ai_cfg))
+        from app.agentic.cost_budget import AICostBudgetError
+
+        if isinstance(cause, AICostBudgetError):
+            return (
+                {
+                    "intent": "rate_limited" if cause.status_code == 429 else "error",
+                    "confidence": 0.0,
+                    "needs_confirmation": False,
+                    "message": str(cause),
+                    "warnings": [],
+                    "actions": [],
+                    "retryable": cause.status_code == 429,
+                    "ai": {"provider": err.provider, "model": err.model, "fallback_used": False},
+                },
+                cause.status_code,
+                {"Retry-After": str(cause.retry_after)},
+            )
         user_msg, retryable = _user_error_message(err.provider, cause)
         return (
             {

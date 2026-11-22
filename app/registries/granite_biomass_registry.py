@@ -6,8 +6,6 @@ TerraTorch inference path.
 """
 from __future__ import annotations
 
-import importlib.util
-import json
 import os
 import re
 import subprocess
@@ -28,21 +26,23 @@ CHECKPOINT_SHA256_RE = re.compile(r"^[a-fA-F0-9]{64}$")
 
 @lru_cache(maxsize=4)
 def _runtime_has_granite(python: str) -> bool:
-    if python == sys.executable:
-        try:
-            return importlib.util.find_spec("torch") is not None and importlib.util.find_spec("terratorch") is not None
-        except (ImportError, ValueError):
-            return False
     try:
+        # find_spec() only proves that top-level directories exist. TerraTorch
+        # imports TorchGeo, Lightning and several optional modules at inference
+        # time, so a partial/stale venv can otherwise appear ready and fail only
+        # after Earth Engine has already exported the HLS raster.
         result = subprocess.run(
-            [python, "-c", "import importlib.util,json; print(json.dumps({m:bool(importlib.util.find_spec(m)) for m in ('torch','terratorch')}))"],
+            [
+                python,
+                "-c",
+                "import numpy, torch; from terratorch.cli_tools import LightningInferenceModel; print('ready')",
+            ],
             capture_output=True,
             check=True,
             text=True,
-            timeout=15,
+            timeout=60,
         )
-        modules = json.loads(result.stdout)
-        return bool(modules.get("torch") and modules.get("terratorch"))
+        return result.stdout.strip().endswith("ready")
     except (OSError, subprocess.SubprocessError, ValueError, TypeError):
         return False
 

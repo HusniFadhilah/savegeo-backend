@@ -18,14 +18,16 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
-from sqlalchemy import func, text
+from sqlalchemy import false, func, or_, text
 
 from app.core.security import get_current_app_viewer, require_permission
 from app.core.viewer_features import (
     FEATURE_ACCESS_DENIED_DETAIL,
+    GEOSPATIAL_MODULE_FEATURES,
     ensure_feature_access,
     feature_code_for_module,
     require_any_feature,
+    viewer_feature_codes,
 )
 from app.db.models.admin_user import AdminUser
 from app.db.models.user import User
@@ -50,15 +52,6 @@ def _ensure_dataset_feature_access(
     ensure_feature_access(principal, code, db)
     return code
 
-
-def _dataset_feature_allowed(principal: AdminUser | User, module: str | None, db: Session) -> bool:
-    try:
-        _ensure_dataset_feature_access(principal, module, db)
-        return True
-    except HTTPException as exc:
-        if exc.status_code == 403:
-            return False
-        raise
 
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _URL = re.compile(r"^https?://", re.IGNORECASE)
@@ -144,28 +137,46 @@ class QueryRequest(BaseModel):
 @router.get("/datasets")
 def list_cloud_datasets(
     module: str | None = Query(default=None, max_length=64),
-    format: str | None = Query(default=None),
+    format: Literal["cog", "geoparquet", "pmtiles"] | None = Query(default=None),
     search: str | None = Query(default=None, max_length=120),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=100, ge=1, le=1000),
     viewer: AdminUser | User = Depends(get_current_app_viewer),
     db: Session = Depends(get_db),
 ):
-    rows = db.query(GeospatialDataset).order_by(GeospatialDataset.id).all()
-    values = [row.document for row in rows]
     if module is not None:
         _ensure_dataset_feature_access(viewer, module, db)
-        values = [item for item in values if item.get("module") == module]
+        query = db.query(GeospatialDataset).filter(
+            GeospatialDataset.document["module"].as_string() == module
+        )
     else:
-        values = [item for item in values if _dataset_feature_allowed(viewer, item.get("module"), db)]
-    if format:
-        values = [item for item in values if item.get("format") == format]
-    if search:
-        term = search.lower()
-        values = [
-            item
-            for item in values
-            if term in item.get("name", "").lower() or term in item.get("id", "").lower()
+        enabled_codes = viewer_feature_codes(db, viewer)
+        allowed_modules = [
+            name for name, feature_code in GEOSPATIAL_MODULE_FEATURES.items()
+            if feature_code in enabled_codes
         ]
-    return {"datasets": values, "count": len(values)}
+        query = db.query(GeospatialDataset)
+        if allowed_modules:
+            query = query.filter(
+                func.lower(GeospatialDataset.document["module"].as_string()).in_(allowed_modules)
+            )
+        else:
+            query = query.filter(false())
+    term = search.lower() if search else None
+    start = (page - 1) * page_size
+    if format:
+        query = query.filter(GeospatialDataset.document["format"].as_string() == format)
+    if term:
+        query = query.filter(
+            or_(
+                func.lower(GeospatialDataset.document["name"].as_string()).contains(term, autoescape=True),
+                func.lower(GeospatialDataset.document["id"].as_string()).contains(term, autoescape=True),
+            )
+        )
+    total = query.order_by(None).count()
+    rows = query.order_by(GeospatialDataset.id).offset(start).limit(page_size).all()
+    values = [row.document for row in rows]
+    return {"datasets": values, "count": total, "page": page, "page_size": page_size}
 
 
 @router.get("/datasets/{dataset_id}")
@@ -193,7 +204,7 @@ def register_cloud_dataset(
         raise HTTPException(
             status_code=400, detail="Private dataset URLs must be issued by the access endpoint"
         )
-    if db.bind.dialect.name == "postgresql":
+    if db.get_bind().dialect.name == "postgresql":
         # Serialize capacity checks across API workers. The primary key below
         # still handles duplicate registration races safely.
         db.execute(text("SELECT pg_advisory_xact_lock(729401702)"))

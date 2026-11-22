@@ -33,6 +33,7 @@ server-side feature permission all permit it. Server-side checks are decisive.
 _MAX_AGENT_INPUT_BYTES = 64 * 1024
 _MAX_AGENT_HISTORY_BYTES = 24 * 1024
 _MAX_AGENT_HISTORY_MESSAGES = 10
+_MAX_AGENT_IMAGE_BASE64_CHARS = 5_592_408
 _MAX_AGENT_PROVIDER_SECONDS = 30.0
 _MAX_GEOAI_WALL_SECONDS = 90.0
 
@@ -58,10 +59,15 @@ def _bounded_agent_history(history: list[dict] | None) -> list[dict]:
     return list(reversed(valid))
 
 
-def _agent_prompt_within_budget(user_input: str, history: list[dict] | None) -> bool:
+def _agent_prompt_within_budget(
+    user_input: str, history: list[dict] | None, image_b64: str | None = None,
+) -> bool:
     input_bytes = len(user_input.encode("utf-8"))
     history_bytes = sum(len(item["content"].encode("utf-8")) for item in history or [])
-    return input_bytes + history_bytes <= _MAX_AGENT_INPUT_BYTES
+    return (
+        input_bytes + history_bytes <= _MAX_AGENT_INPUT_BYTES
+        and (image_b64 is None or len(image_b64) <= _MAX_AGENT_IMAGE_BASE64_CHARS)
+    )
 
 
 # ── API key pool — per-provider multi-key with 429 rate-limit tracking ────────
@@ -1696,7 +1702,7 @@ def plan_with_ai(message: str, page_state: dict,
 
     user_input = _json.dumps(payload, ensure_ascii=False, indent=2)
     hist = _bounded_agent_history(history)
-    if not _agent_prompt_within_budget(user_input, hist):
+    if not _agent_prompt_within_budget(user_input, hist, image_b64):
         return _controller_fallback("Konteks terlalu besar untuk satu permintaan. Ringkas lampiran atau batasi area yang dibahas.")
 
     try:
@@ -1706,7 +1712,7 @@ def plan_with_ai(message: str, page_state: dict,
                 return _call_anthropic(key, model, user_input, image_b64, hist)
             elif provider in ("openai", "openrouter", "deepseek"):
                 base_url = cfg["custom_base_url"] or _PROVIDER_BASE_URLS.get(provider)
-                return _call_openai_compat(key, model, user_input, base_url, image_b64, hist)
+                return _call_openai_compat(key, model, user_input, base_url, image_b64, hist, provider=provider)
             elif provider == "gemini":
                 return _call_gemini(key, model, user_input, image_b64, hist)
             else:
@@ -1717,7 +1723,7 @@ def plan_with_ai(message: str, page_state: dict,
             base_url = cfg.get("ollama_base_url") or cfg["custom_base_url"] or _PROVIDER_BASE_URLS["ollama"]
             raw = _call_openai_compat(
                 "ollama", model, user_input, base_url, image_b64, hist,
-                force_json=False, allow_private_provider=True,
+                force_json=False, allow_private_provider=True, provider=provider,
             )
         elif provider == "opencode":
             base_url = cfg.get("opencode_base_url") or cfg["custom_base_url"] or _PROVIDER_BASE_URLS["opencode"]
@@ -1726,7 +1732,7 @@ def plan_with_ai(message: str, page_state: dict,
                 return _controller_fallback("OpenCode: nama model wajib diisi di field 'ai.model'.")
             raw = _call_openai_compat(
                 key, model, user_input, base_url, image_b64, hist,
-                force_json=False, allow_private_provider=True,
+                force_json=False, allow_private_provider=True, provider=provider,
             )
         elif provider not in ("anthropic", "openai", "openrouter", "deepseek", "gemini"):
             return _controller_fallback(
@@ -1826,6 +1832,10 @@ def plan_with_ai(message: str, page_state: dict,
     except _json.JSONDecodeError as exc:
         return _controller_fallback(f"Respons AI bukan JSON valid: {exc}")
     except Exception as exc:
+        from app.agentic.cost_budget import AICostBudgetError
+
+        if isinstance(exc, AICostBudgetError):
+            raise
         raise RuntimeError(f"{provider} API error: {exc}") from exc
 
 
@@ -1862,6 +1872,12 @@ def _call_anthropic(api_key: str, model: str, user_input: str,
 
     messages.append({"role": "user", "content": current_content})
 
+    from app.agentic.cost_budget import reserve_call
+
+    reserve_call("anthropic", model, {
+        "system": CONTROLLER_SYSTEM_PROMPT, "messages": messages, "max_tokens": 2048,
+    })
+
     resp = client.messages.create(
         model=model,
         max_tokens=2048,
@@ -1876,7 +1892,8 @@ def _call_openai_compat(api_key: str, model: str, user_input: str,
                         image_b64: str | None = None,
                         history: list[dict] | None = None,
                         force_json: bool = True,
-                        allow_private_provider: bool = False) -> str:
+                        allow_private_provider: bool = False,
+                        provider: str | None = None) -> str:
     _LOCAL_DUMMY_KEYS = {"ollama", "opencode"}
     if not api_key or (api_key not in _LOCAL_DUMMY_KEYS and not api_key.strip()):
         raise ValueError("API key tidak dikonfigurasi untuk provider ini.")
@@ -1937,13 +1954,18 @@ def _call_openai_compat(api_key: str, model: str, user_input: str,
     if force_json:
         create_kwargs["response_format"] = {"type": "json_object"}
 
+    provider_name = provider or ("ollama" if api_key == "ollama" else "opencode" if api_key == "opencode" else "openai")
+    from app.agentic.cost_budget import reserve_call
+
     try:
+        reserve_call(provider_name, model, {"system": CONTROLLER_SYSTEM_PROMPT, **create_kwargs})
         resp = client.chat.completions.create(**create_kwargs)
     except Exception as e:
         # Some providers/models don't support response_format — retry without
         if force_json and ("response_format" in str(e) or "json_object" in str(e)
                           or "not supported" in str(e).lower()):
             create_kwargs.pop("response_format", None)
+            reserve_call(provider_name, model, {"system": CONTROLLER_SYSTEM_PROMPT, **create_kwargs})
             resp = client.chat.completions.create(**create_kwargs)
         else:
             raise
@@ -2021,6 +2043,13 @@ def _call_gemini(api_key: str, model: str, user_input: str,
         ))
     current_parts.append(types.Part(text=user_input))
     contents.append(types.Content(role="user", parts=current_parts))
+
+    from app.agentic.cost_budget import reserve_call
+
+    reserve_call("gemini", model, {
+        "system": CONTROLLER_SYSTEM_PROMPT, "history": history or [], "prompt": user_input,
+        "image_b64": image_b64, "max_output_tokens": 2048,
+    })
 
     resp = client.models.generate_content(
         model=model,
@@ -2372,6 +2401,11 @@ def _call_anthropic_tools(api_key: str, model: str, user_input: str,
         deadline = tool_ctx.get("_deadline_monotonic")
         if isinstance(deadline, (int, float)) and time.monotonic() >= deadline:
             return _tool_round_limit_response()
+        from app.agentic.cost_budget import reserve_call
+
+        reserve_call("anthropic", model, {
+            "system": GEOAI_SYSTEM_PROMPT, "messages": messages, "tools": tools, "max_tokens": 2048,
+        })
         resp = client.messages.create(
             model=model, max_tokens=2048, system=GEOAI_SYSTEM_PROMPT, tools=tools, messages=messages,
         )
@@ -2396,7 +2430,8 @@ def _call_anthropic_tools(api_key: str, model: str, user_input: str,
 def _call_openai_compat_tools(api_key: str, model: str, user_input: str,
                               base_url: str | None, history: list[dict] | None,
                               tool_ctx: dict, max_rounds: int = 4,
-                              allow_private_provider: bool = False) -> str:
+                              allow_private_provider: bool = False,
+                              provider: str | None = None) -> str:
     import json as _json
 
     _LOCAL_DUMMY_KEYS = {"ollama", "opencode"}
@@ -2435,6 +2470,7 @@ def _call_openai_compat_tools(api_key: str, model: str, user_input: str,
         messages.append({"role": h["role"], "content": h["content"]})
     messages.append({"role": "user", "content": user_input})
     tools = _tool_schema_for_openai()
+    provider_name = provider or ("ollama" if api_key == "ollama" else "opencode" if api_key == "opencode" else "openai")
 
     for _ in range(max_rounds):
         deadline = tool_ctx.get("_deadline_monotonic")
@@ -2449,6 +2485,9 @@ def _call_openai_compat_tools(api_key: str, model: str, user_input: str,
         }
         if api_key == "ollama":
             request_kwargs["reasoning_effort"] = "none"
+        from app.agentic.cost_budget import reserve_call
+
+        reserve_call(provider_name, model, {"system": GEOAI_SYSTEM_PROMPT, **request_kwargs})
         resp = client.chat.completions.create(**request_kwargs)
         choice = resp.choices[0]
         msg = choice.message
@@ -2519,6 +2558,12 @@ def _call_gemini_tools(api_key: str, model: str, user_input: str,
         deadline = tool_ctx.get("_deadline_monotonic")
         if isinstance(deadline, (int, float)) and time.monotonic() >= deadline:
             return _tool_round_limit_response()
+        from app.agentic.cost_budget import reserve_call
+
+        reserve_call("gemini", model, {
+            "system": GEOAI_SYSTEM_PROMPT, "contents": contents, "tools": gemini_tools,
+            "max_output_tokens": 2048,
+        })
         resp = client.models.generate_content(
             model=model, contents=contents,
             config=types.GenerateContentConfig(
@@ -2900,7 +2945,7 @@ def geoai_with_ai(message: str, context: dict, db, history: list[dict] | None = 
             return _call_anthropic_tools(key, model, user_input, history, tool_ctx)
         elif provider in ("openai", "openrouter", "deepseek"):
             base_url = cfg["custom_base_url"] or _PROVIDER_BASE_URLS.get(provider)
-            return _call_openai_compat_tools(key, model, user_input, base_url, history, tool_ctx)
+            return _call_openai_compat_tools(key, model, user_input, base_url, history, tool_ctx, provider=provider)
         elif provider == "gemini":
             return _call_gemini_tools(key, model, user_input, history, tool_ctx)
         else:
@@ -2911,7 +2956,7 @@ def geoai_with_ai(message: str, context: dict, db, history: list[dict] | None = 
             base_url = cfg.get("ollama_base_url") or cfg["custom_base_url"] or _PROVIDER_BASE_URLS["ollama"]
             raw = _call_openai_compat_tools(
                 "ollama", model, user_input, base_url, history, tool_ctx,
-                allow_private_provider=True,
+                allow_private_provider=True, provider=provider,
             )
         elif provider == "opencode":
             base_url = cfg.get("opencode_base_url") or cfg["custom_base_url"] or _PROVIDER_BASE_URLS["opencode"]
@@ -2920,7 +2965,7 @@ def geoai_with_ai(message: str, context: dict, db, history: list[dict] | None = 
                 return _geoai_fallback("OpenCode: nama model wajib diisi di field 'ai.model'.")
             raw = _call_openai_compat_tools(
                 key, model, user_input, base_url, history, tool_ctx,
-                allow_private_provider=True,
+                allow_private_provider=True, provider=provider,
             )
         elif provider not in ("anthropic", "openai", "openrouter", "deepseek", "gemini"):
             return _geoai_fallback(f"Provider tidak dikenal: '{provider}'.")
@@ -2985,6 +3030,10 @@ def geoai_with_ai(message: str, context: dict, db, history: list[dict] | None = 
             result["needs_confirmation"] = True
         return result
     except Exception as exc:
+        from app.agentic.cost_budget import AICostBudgetError
+
+        if isinstance(exc, AICostBudgetError):
+            raise
         raise RuntimeError(f"{provider} API error: {exc}") from exc
 
 
