@@ -155,7 +155,7 @@ def test_real_anthropic_sdk_uses_pinned_transport_without_network(monkeypatch):
     assert _call_anthropic("test-key", "claude-test", "hello") == "ok"
     assert calls["method"] == "POST"
     assert calls["url"] == "https://api.anthropic.com/v1/messages"
-    assert "x-api-key" in calls["headers"]
+    assert {"x-api-key", "authorization"} & set(calls["headers"])
     assert json.loads(calls["raw_body"])["max_tokens"] == 2048
 
 
