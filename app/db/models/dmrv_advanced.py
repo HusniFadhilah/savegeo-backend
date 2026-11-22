@@ -34,7 +34,9 @@ class DmrvCreditEvent(Base):
     quantity: Mapped[int] = mapped_column(BigInteger, nullable=False)
     owner_from: Mapped[str | None] = mapped_column(String(200))
     owner_to: Mapped[str | None] = mapped_column(String(200))
-    registry: Mapped[str] = mapped_column(String(100), nullable=False)
+    # ``registry`` is reserved by SQLAlchemy's DeclarativeBase; keep the
+    # database column name while exposing it under a safe Python attribute.
+    registry_name: Mapped[str] = mapped_column("registry", String(100), nullable=False)
     external_transaction_id: Mapped[str] = mapped_column(String(160), nullable=False)
     effective_date: Mapped[dt.date] = mapped_column(nullable=False)
     evidence: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)

@@ -33,27 +33,33 @@ def _distance_m(lat_a: float, lon_a: float, lat_b: float, lon_b: float) -> float
 
 def _same_credit(row: DmrvCreditEvent, data: CreditEventInput) -> bool:
     return all(
-        getattr(row, field) == getattr(data, field)
-        for field in (
-            "batch_reference", "event_type", "quantity", "owner_from", "owner_to", "registry",
-            "external_transaction_id", "effective_date", "evidence",
+        getattr(row, row_field) == getattr(data, data_field)
+        for row_field, data_field in (
+            ("batch_reference", "batch_reference"), ("event_type", "event_type"),
+            ("quantity", "quantity"), ("owner_from", "owner_from"), ("owner_to", "owner_to"),
+            ("registry_name", "registry"), ("external_transaction_id", "external_transaction_id"),
+            ("effective_date", "effective_date"), ("evidence", "evidence"),
         )
     )
 
 
 def _events(db: Session, project_id: str, batch: str) -> list[DmrvCreditEvent]:
-    return db.execute(
-        select(DmrvCreditEvent)
-        .where(DmrvCreditEvent.project_id == project_id, DmrvCreditEvent.batch_reference == batch)
-        .order_by(DmrvCreditEvent.created_at, DmrvCreditEvent.event_id)
-    ).scalars().all()
+    return list(
+        db.execute(
+            select(DmrvCreditEvent)
+            .where(DmrvCreditEvent.project_id == project_id, DmrvCreditEvent.batch_reference == batch)
+            .order_by(DmrvCreditEvent.created_at, DmrvCreditEvent.event_id)
+        )
+        .scalars()
+        .all()
+    )
 
 
 def _balance(events: list[DmrvCreditEvent]) -> tuple[dict[str, int], str | None]:
     balances: dict[str, int] = {}
     registry = None
     for event in events:
-        registry = registry or event.registry
+        registry = registry or event.registry_name
         if event.event_type == "issuance_reported":
             if balances or not event.owner_to:
                 raise DmrvError(409, "ledger_history_invalid", "Riwayat batch memiliki penerbitan yang bertentangan.")
@@ -80,7 +86,7 @@ def credit_event_out(row: DmrvCreditEvent) -> dict:
         "quantity": row.quantity,
         "owner_from": row.owner_from,
         "owner_to": row.owner_to,
-        "registry": row.registry,
+        "registry": row.registry_name,
         "external_transaction_id": row.external_transaction_id,
         "effective_date": row.effective_date.isoformat(),
         "evidence": row.evidence,
@@ -102,11 +108,11 @@ def list_credit_events(db: Session, principal: Principal, project_id: str) -> di
         all_by_batch.setdefault(row.batch_reference, []).append(row)
     for batch, batch_rows in all_by_batch.items():
         row = batch_rows[0]
-        state = batches.setdefault(batch, {"balances": {}, "registry": row.registry})
+        state = batches.setdefault(batch, {"balances": {}, "registry": row.registry_name})
         try:
             balance, registry = _balance(list(reversed(batch_rows)))
         except DmrvError:
-            balance, registry = {}, row.registry
+            balance, registry = {}, row.registry_name
         state["balances"] = balance
         state["registry"] = registry
     return {
@@ -144,7 +150,12 @@ def append_credit_event(db: Session, principal: Principal, project_id: str, data
             raise DmrvError(422, "registry_mismatch", "Event batch harus menggunakan registry yang sama.")
         if balance.get(data.owner_from or "", 0) < data.quantity:
             raise DmrvError(409, "reported_balance_insufficient", "Saldo internal yang dilaporkan tidak cukup.")
-    row = DmrvCreditEvent(**data.model_dump(), project_id=project_id, created_by=principal.key)
+    row = DmrvCreditEvent(
+        **data.model_dump(exclude={"registry"}),
+        registry_name=data.registry,
+        project_id=project_id,
+        created_by=principal.key,
+    )
     db.add(row)
     try:
         db.flush()
