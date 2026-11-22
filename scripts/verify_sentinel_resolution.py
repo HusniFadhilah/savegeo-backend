@@ -12,8 +12,8 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import ee
 import numpy as np
-import requests
 from PIL import Image
+from app.core.public_http import public_http
 from app.core.config import get_settings
 from app.services.gee_common import build_s2_cloud_masked_collection
 from app.services.imagery_resolution import native_median
@@ -48,7 +48,9 @@ def main():
         for dx in range(-2, 3):
             for dy in range(-1, 2):
                 tx, ty = x+dx, y+dy
-                response = requests.get(tile["tile_url"].format(z=z, x=tx, y=ty), timeout=45)
+                response = public_http.get(
+                    tile["tile_url"].format(z=z, x=tx, y=ty), timeout=45, max_bytes=2 * 1024 * 1024,
+                )
                 response.raise_for_status()
                 image = Image.open(io.BytesIO(response.content)).convert("RGBA")
                 assert image.size == (256, 256)

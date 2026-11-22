@@ -80,6 +80,11 @@ def test_rankings_use_percent_not_absolute_area_and_keep_partial_and_missing_row
 def test_new_run_returns_checkpoint_before_expensive_computation(tmp_path, monkeypatch):
     monkeypatch.setattr(service, "get_settings", lambda: SimpleNamespace(upload_path=tmp_path))
     monkeypatch.setattr(service, "dropdown", lambda *args: [("Province", "11")])
+
+    def no_saved_snapshot(_config):
+        raise AnalysisError("Snapshot peringkat wilayah tidak ditemukan.", 404)
+
+    monkeypatch.setattr(service, "latest_snapshot", no_saved_snapshot)
     result = service.run_batch(
         {"_request_owner": "admin:1", "year": 2026, "extension_settings": {"level": "province"}}
     )

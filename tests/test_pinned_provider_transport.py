@@ -134,6 +134,9 @@ def test_real_anthropic_sdk_uses_pinned_transport_without_network(monkeypatch):
     import json
 
     from app.agentic.agentic_ai import _call_anthropic
+    from app.agentic import cost_budget
+
+    monkeypatch.setattr(cost_budget, "reserve_call", lambda *_args, **_kwargs: 0)
 
     calls = {}
     payload = {
@@ -163,6 +166,9 @@ def test_real_gemini_sdk_uses_pinned_transport_without_network(monkeypatch):
     import json
 
     from app.agentic.agentic_ai import _call_gemini
+    from app.agentic import cost_budget
+
+    monkeypatch.setattr(cost_budget, "reserve_call", lambda *_args, **_kwargs: 0)
 
     calls = {}
     payload = {
@@ -231,6 +237,35 @@ def test_earth_engine_transport_rejects_unlisted_hosts_without_network(monkeypat
         transport_module.BoundedEarthEngineTransport().request(
             "https://169.254.169.254/latest/meta-data",
         )
+
+
+def test_credential_probe_session_routes_google_auth_through_pinned_transport(monkeypatch):
+    calls = []
+
+    def fake_request(method, url, **kwargs):
+        calls.append((method, url, kwargs))
+        return _response()
+
+    monkeypatch.setattr(transport_module.public_http, "request", fake_request)
+    session = transport_module.pinned_google_authorized_session(object())
+    try:
+        assert session.trust_env is False
+        request = requests.Request(
+            "POST", "https://oauth2.googleapis.com/token", data={"grant_type": "test"},
+        ).prepare()
+        adapter = session.get_adapter(request.url)
+        response = adapter.send(request, timeout=(5, 15), proxies={})
+        assert response.status_code == 200
+        assert calls[0][0:2] == ("POST", "https://oauth2.googleapis.com/token")
+        assert calls[0][2]["max_bytes"] == transport_module.BoundedEarthEngineTransport.MAX_RESPONSE_BYTES
+
+        blocked_url = "https://collector.example.invalid/token"
+        blocked = requests.Request("POST", blocked_url, data={"token": "secret"}).prepare()
+        with pytest.raises(requests.RequestException, match="Unpinned Google"):
+            session.get_adapter(blocked_url).send(blocked)
+        assert len(calls) == 1
+    finally:
+        session.close()
 
 
 def test_gee_initialization_always_receives_bounded_transport(monkeypatch):

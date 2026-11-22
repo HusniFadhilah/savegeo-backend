@@ -226,6 +226,60 @@ def test_non_availability_errors_do_not_trigger_fallback(db_session, monkeypatch
     assert result["ai"]["fallback_used"] is False
 
 
+def test_over_budget_primary_uses_healthy_allowed_fallback(db_session, monkeypatch):
+    from app.agentic.cost_budget import AICostBudgetError
+
+    calls = []
+
+    cfg = {
+        "provider": "openai",
+        "model": "gpt-4o",
+        "fallback_provider": "openrouter",
+        "fallback_model": "openai/gpt-4o",
+        "allowed_models": [
+            {"provider": "openai", "model": "gpt-4o"},
+            {"provider": "openrouter", "model": "openai/gpt-4o"},
+        ],
+    }
+
+    def plan(*_args):
+        calls.append(agentic_ai._get_ai_config()["provider"])
+        if calls[-1] == "openai":
+            raise AICostBudgetError(429, "Perkiraan biaya terlalu tinggi.", 86400)
+        return {"message": "jawaban dari model yang lebih murah", "actions": []}
+
+    result, status, _ = _control(db_session, monkeypatch, {}, plan=plan, cfg=cfg)
+
+    assert status == 200
+    assert calls == ["openai", "openrouter"]
+    assert result["message"] == "jawaban dari model yang lebih murah"
+    assert result["ai"]["fallback_used"] is True
+    assert result["ai"]["fallback_reason"] == "primary_model_over_budget"
+
+
+def test_daily_cost_budget_exhaustion_returns_429_after_fallback_also_cannot_fit(db_session, monkeypatch):
+    from app.agentic.cost_budget import AICostBudgetError
+
+    cfg = {
+        "provider": "openai", "model": "gpt-4o",
+        "fallback_provider": "openrouter", "fallback_model": "openai/gpt-4o",
+        "allowed_models": [
+            {"provider": "openai", "model": "gpt-4o"},
+            {"provider": "openrouter", "model": "openai/gpt-4o"},
+        ],
+    }
+
+    def plan(*_args):
+        raise AICostBudgetError(429, "Plafon biaya AI harian tercapai.", 321)
+
+    result, status, headers = _control(db_session, monkeypatch, {}, plan=plan, cfg=cfg)
+
+    assert status == 429
+    assert result["intent"] == "rate_limited"
+    assert result["message"] == "Plafon biaya AI harian tercapai."
+    assert headers["Retry-After"] == "321"
+
+
 def test_ai_selection_context_is_reset_after_request(db_session, monkeypatch):
     _control(db_session, monkeypatch, {}, plan=lambda *a, **k: {"message": "ok", "actions": []})
     assert agentic_ai._AI_SELECTION.get() is None

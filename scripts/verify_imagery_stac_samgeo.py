@@ -11,10 +11,10 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import httpx
 import numpy as np
 from PIL import Image
 
+from app.core.public_http import public_http
 from app.services import imagery_service as imagery
 from app.services import samgeo_service
 
@@ -23,6 +23,17 @@ def aoi(west, south, east, north):
     return {"type": "Feature", "properties": {}, "geometry": {"type": "Polygon", "coordinates": [
         [[west, south], [east, south], [east, north], [west, north], [west, south]]
     ]}}
+
+
+def verify_tiff_asset_signature(href: str, label: str) -> int:
+    """Read a tiny TIFF signature through the same pinned transport as the app."""
+    source = public_http.get(
+        href, headers={"Range": "bytes=0-15"}, timeout=60, max_bytes=16,
+    )
+    source.raise_for_status()
+    signature = source.content[:2]
+    assert signature in (b"II", b"MM"), f"{label}: source is not TIFF"
+    return len(source.content)
 
 
 def main():
@@ -50,13 +61,10 @@ def main():
         assert (pixels[:, :, 3] > 0).any(), f"{label}: transparent tile"
         assert float(pixels[:, :, :3].std()) > 1, f"{label}: blank tile"
         href = imagery.get_stac_asset_download_url(scene["id"], asset)
-        with httpx.Client(timeout=60, follow_redirects=True) as client:
-            with client.stream("GET", href, headers={"Range": "bytes=0-15"}) as source:
-                source.raise_for_status()
-                signature = next(source.iter_bytes(chunk_size=16))
-                assert signature[:2] in (b"II", b"MM"), f"{label}: source is not TIFF"
+        source_signature_bytes = verify_tiff_asset_signature(href, label)
         entry = {"catalog": label, "scene": scene["id"], "asset": asset, "scenes": response["count"],
-                 "png_bytes": len(png), "pixel_std": round(float(pixels[:, :, :3].std()), 2)}
+                 "png_bytes": len(png), "source_signature_bytes": source_signature_bytes,
+                 "pixel_std": round(float(pixels[:, :, :3].std()), 2)}
         print(json.dumps(entry), flush=True)
         results.append(entry)
         if collection == "naip" and "--samgeo" in sys.argv:

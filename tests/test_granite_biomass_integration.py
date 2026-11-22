@@ -121,6 +121,51 @@ def test_granite_period_and_prediction_output_validation():
     assert result.shape == (4, 5)
 
 
+def test_incomplete_granite_runtime_fails_before_earth_engine_export(monkeypatch):
+    monkeypatch.setattr(granite_biomass_service, "create_geometry_from_payload", lambda _aoi: object())
+    monkeypatch.setattr(granite_biomass_service, "geometry_area_ha", lambda _aoi: 0.04)
+    monkeypatch.setattr(granite_biomass_service, "granite_biomass_paths", lambda: None)
+    monkeypatch.setattr(
+        granite_biomass_service,
+        "_hls_composite",
+        lambda *_args: pytest.fail("Earth Engine export must not start when the local runtime is incomplete"),
+    )
+
+    with pytest.raises(AnalysisError, match="runtime/checkpoint belum lengkap"):
+        granite_biomass_service.analyze_granite_biomass(
+            EmptyDB(),
+            {"aoi": {"west": 110.4, "south": -7.1, "east": 110.5, "north": -7.0}, "year": 2024},
+        )
+
+
+def test_granite_runtime_readiness_imports_the_actual_worker_entrypoint(monkeypatch):
+    from types import SimpleNamespace
+    import subprocess
+
+    calls = []
+    registry._runtime_has_granite.cache_clear()
+
+    def incomplete_runtime(command, **kwargs):
+        calls.append((command, kwargs))
+        raise subprocess.CalledProcessError(1, command, stderr="ModuleNotFoundError")
+
+    monkeypatch.setattr(registry.subprocess, "run", incomplete_runtime)
+    assert registry._runtime_has_granite("granite-python") is False
+    command, kwargs = calls[0]
+    assert command[0] == "granite-python"
+    assert "LightningInferenceModel" in command[2]
+    assert kwargs["timeout"] == 60
+
+    registry._runtime_has_granite.cache_clear()
+    monkeypatch.setattr(
+        registry.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(stdout="ready\n"),
+    )
+    assert registry._runtime_has_granite("granite-python") is True
+    registry._runtime_has_granite.cache_clear()
+
+
 def test_granite_inference_uses_isolated_runtime_and_validates_worker_response(tmp_path, monkeypatch):
     from types import SimpleNamespace
 

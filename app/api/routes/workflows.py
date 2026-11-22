@@ -95,15 +95,18 @@ def list_workflows(
         query = query.filter(Workflow.category == category)
     if search:
         query = query.filter(Workflow.name.icontains(search, autoescape=True))
-    rows = query.order_by(Workflow.updated_at.desc()).all()
     enabled = viewer_feature_codes(db, user)
-    visible = [
-        row for row in rows
-        if workflow_required_feature_codes(row.workflow_json) <= enabled
-    ]
-    total = len(visible)
     start = (page - 1) * page_size
-    rows = visible[start : start + page_size]
+    end = start + page_size
+    rows = []
+    total = 0
+    # Keep the response page in memory instead of materializing every public
+    # and owned workflow before applying the user's feature permissions.
+    for row in query.order_by(Workflow.updated_at.desc()).yield_per(250):
+        if workflow_required_feature_codes(row.workflow_json) <= enabled:
+            if start <= total < end:
+                rows.append(row)
+            total += 1
     return {"items": [row.to_dict(user.username if row.owner_id == user.id else None) for row in rows], "page": page, "pageSize": page_size, "total": total}
 
 

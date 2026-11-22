@@ -5,11 +5,13 @@ import math
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import numpy as np
 import requests
 from PIL import Image
 
+from app.core.public_http import public_http
 from app.core.security import create_access_token
 from app.db.models.admin_user import AdminUser
 from app.db.models.uploaded_model import UploadedModel
@@ -20,6 +22,17 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="http://localhost:5501/api")
     args = parser.parse_args()
+    base = urlsplit(args.base_url)
+    if (
+        base.scheme not in {"http", "https"}
+        or base.hostname not in {"localhost", "127.0.0.1", "::1"}
+        or base.username is not None
+        or base.password is not None
+        or base.query
+        or base.fragment
+    ):
+        raise SystemExit("The authenticated model verification API must be hosted on loopback.")
+    base_url = args.base_url.rstrip("/")
     with SessionLocal() as db:
         admin = db.query(AdminUser).filter_by(is_active=True).first()
         if admin is None:
@@ -27,7 +40,10 @@ def main():
         headers = {"Authorization": "Bearer " + create_access_token(admin)}
         models = [row.to_dict_public() for row in db.query(UploadedModel).filter_by(model_type="carbon", is_active=True).all()
                   if (row.metadata_json or {}).get("method") == "saved_reference_ensemble"]
-    response = requests.get(args.base_url + "/models?model_type=carbon", headers=headers, timeout=30)
+    response = requests.get(
+        base_url + "/models?model_type=carbon", headers=headers,
+        timeout=(5, 30), allow_redirects=False,
+    )
     response.raise_for_status()
     listed = {model["name"] for model in response.json()["models"]}
     report = {"model_count": len(models), "listed": all(m["name"] in listed for m in models), "runs": []}
@@ -39,7 +55,10 @@ def main():
                 "reference_dataset": meta["target_dataset_key"], "dataset_year": meta["reference_year"],
                 "model_name": model["name"], "clip_to_aoi": True, "scale": 300, "year": 2026}
         try:
-            result = requests.post(args.base_url + "/analyze/carbon", headers=headers, json=body, timeout=300)
+            result = requests.post(
+                base_url + "/analyze/carbon", headers=headers, json=body,
+                timeout=(5, 300), allow_redirects=False,
+            )
             if result.status_code != 200:
                 return {"model": model["name"], "status": "failed", "http_status": result.status_code, "error": result.text[:350]}
             data = result.json()
@@ -57,7 +76,7 @@ def main():
             lat = math.radians(-7.025)
             y = int((1 - math.asinh(math.tan(lat)) / math.pi) / 2 * 2 ** z)
             url = data["carbon_estimated"]["tile_url"].replace("{z}", str(z)).replace("{x}", str(x)).replace("{y}", str(y))
-            tile = requests.get(url, timeout=90)
+            tile = public_http.get(url, timeout=90, max_bytes=2 * 1024 * 1024)
             tile.raise_for_status()
             rgba = np.asarray(Image.open(BytesIO(tile.content)).convert("RGBA"))
             if not np.any(rgba[:, :, 3]):

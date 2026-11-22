@@ -327,6 +327,35 @@ def test_config_update_validates_allowed_models_json():
         assert "ai.allowed_models" in errors, bad
 
 
+def test_cost_budget_requires_valid_prices_for_active_model():
+    pricing = '{"openai:gpt-test":{"input_per_million_usd":2.5,"output_per_million_usd":10}}'
+    current = _current({"ai.provider": "openai", "ai.model": "gpt-test"})
+
+    errors, _ = svc.validate_ai_config_update(
+        {"ai.daily_budget_usd": 10, "ai.model_pricing_json": pricing}, current,
+    )
+    assert errors == {}
+
+    errors, _ = svc.validate_ai_config_update({"ai.daily_budget_usd": "10"}, current)
+    assert "ai.model_pricing_json" in errors
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("ai.daily_budget_usd", "-1"),
+        ("ai.daily_budget_usd", "2001"),
+        ("ai.daily_budget_usd", "NaN"),
+        ("ai.model_pricing_json", "not json"),
+        ("ai.model_pricing_json", '{"openai:gpt-test":{"input_per_million_usd":-1,"output_per_million_usd":10}}'),
+        ("ai.model_pricing_json", '{"openai:gpt-test":{"input_per_million_usd":2}}'),
+    ],
+)
+def test_cost_budget_rejects_invalid_limits_and_prices(key, value):
+    errors, _ = svc.validate_ai_config_update({key: value}, _current({}))
+    assert key in errors
+
+
 def test_config_update_rejects_ollama_model_that_is_not_installed():
     http = FakeHttp({"/api/tags": (200, {"models": [{"name": "llama3.2:latest"}]})})
     errors, warnings = svc.validate_ai_config_update(

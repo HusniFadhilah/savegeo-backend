@@ -8,10 +8,10 @@ from dataclasses import asdict, dataclass
 
 import requests
 from google.auth.exceptions import GoogleAuthError, TransportError
-from google.auth.transport.requests import AuthorizedSession
 from google.oauth2 import service_account
 
 from app.core.config import get_settings
+from app.core.pinned_provider_transport import pinned_google_authorized_session
 
 
 @dataclass(frozen=True)
@@ -42,7 +42,7 @@ def probe(raw: bytes) -> ProbeResult:
             return ProbeResult(False, "invalid_key_metadata", checked)
         credentials = service_account.Credentials.from_service_account_info(
             data, scopes=["https://www.googleapis.com/auth/earthengine"])
-        with AuthorizedSession(credentials, refresh_timeout=15) as session:
+        with pinned_google_authorized_session(credentials, refresh_timeout=15) as session:
             response = session.post(f"https://earthengine.googleapis.com/v1/projects/{project}/value:compute",
                                     json={"expression": {
                                         "values": {"probe_constant": {"constantValue": 1}},

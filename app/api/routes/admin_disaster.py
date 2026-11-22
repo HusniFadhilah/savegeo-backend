@@ -28,11 +28,11 @@ import zipfile
 from pathlib import Path, PurePosixPath
 import stat
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import Response
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -316,9 +316,9 @@ def admin_list_disaster_models(event_id: int | None = None, admin: AdminUser = D
         ),
         "recommended": bool(m.get("multiclass") and configured and m["enabled"])} for m in models]
     if event:
-        aoi = disaster_repo.get_active_aoi(db, event_id)
-        pre = disaster_repo.list_imagery(db, event_id, "pre")
-        post = disaster_repo.list_imagery(db, event_id, "post")
+        aoi = disaster_repo.get_active_aoi(db, event.id)
+        pre = disaster_repo.list_imagery(db, event.id, "pre")
+        post = disaster_repo.list_imagery(db, event.id, "post")
         recommended = False
         for model in models:
             model["recommended"] = False
@@ -994,12 +994,21 @@ def admin_delete_hotspot(
 
 
 @router.get("/disasters/{id}/audit")
-def admin_event_audit(id: int, admin: AdminUser = Depends(require_permission("audit.read")), db: Session = Depends(get_db)):
+def admin_event_audit(
+    id: int,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=100),
+    admin: AdminUser = Depends(require_permission("audit.read")),
+    db: Session = Depends(get_db),
+):
     _get_event_or_404(db, id)
-    logs = (
-        db.query(AuditLog)
-        .filter_by(resource_type="disaster_event", resource_id=str(id))
-        .order_by(AuditLog.created_at.desc())
-        .all()
-    )
-    return {"logs": [log.to_dict() for log in logs]}
+    query = db.query(AuditLog).filter_by(resource_type="disaster_event", resource_id=str(id))
+    total = query.with_entities(func.count(AuditLog.id)).scalar() or 0
+    logs = query.order_by(AuditLog.created_at.desc(), AuditLog.id.desc()) \
+        .offset((page - 1) * page_size).limit(page_size).all()
+    return {
+        "logs": [log.to_dict() for log in logs],
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+    }

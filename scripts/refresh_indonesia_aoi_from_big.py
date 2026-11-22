@@ -12,9 +12,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sys
 from urllib.parse import urlencode
 
-import requests
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from app.core.public_http import public_http
 
 SOURCE_LAYER_URL = "https://geoservices.big.go.id/gis/rest/services/BAPANAS/Batas_Administrasi/MapServer/0"
 OUT_PATH = Path(__file__).resolve().parents[1] / "app" / "static" / "geo" / "indonesia_whole.geojson"
@@ -36,7 +39,7 @@ OUT_FIELDS = ",".join(
 
 def _get_json(params: dict) -> dict:
     url = f"{SOURCE_LAYER_URL}/query?{urlencode(params)}"
-    response = requests.get(url, timeout=60)
+    response = public_http.get(url, timeout=60, max_bytes=128 * 1024 * 1024)
     response.raise_for_status()
     payload = response.json()
     if "error" in payload:

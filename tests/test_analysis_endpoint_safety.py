@@ -253,6 +253,7 @@ def test_analysis_job_queue_rejects_overload(monkeypatch):
     slots = BoundedSemaphore(1)
     assert slots.acquire(blocking=False)
     monkeypatch.setattr(analysis_jobs, "_job_slots", slots)
+    monkeypatch.setattr(analysis_jobs, "_carbon_cache_key", lambda *_args: None)
 
     with pytest.raises(HTTPException) as error:
         analysis_jobs._create_analysis_job_sync(
@@ -268,6 +269,7 @@ def test_analysis_job_queue_rejects_overload(monkeypatch):
 def test_analysis_job_slot_released_after_invalid_provenance(monkeypatch):
     slots = BoundedSemaphore(1)
     monkeypatch.setattr(analysis_jobs, "_job_slots", slots)
+    monkeypatch.setattr(analysis_jobs, "_carbon_cache_key", lambda *_args: None)
 
     def invalid(*_args, **_kwargs):
         raise ValueError("invalid date")

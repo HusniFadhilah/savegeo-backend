@@ -9,6 +9,9 @@ from app.agentic.agentic_ai import _call_openai_compat
 
 
 def test_ollama_uses_openai_compatible_base_url_and_local_dummy_key(monkeypatch):
+    from app.agentic import cost_budget
+
+    monkeypatch.setattr(cost_budget, "reserve_call", lambda *_args, **_kwargs: 0)
     calls: dict[str, object] = {}
 
     class FakeCompletions:
@@ -74,4 +77,5 @@ def test_geoai_dispatches_tool_calling_to_ollama(monkeypatch):
         "model": "qwen3:8b",
         "base_url": "http://host.docker.internal:11434/v1",
         "allow_private_provider": True,
+        "provider": "ollama",
     }

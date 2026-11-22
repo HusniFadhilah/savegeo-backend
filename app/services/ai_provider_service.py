@@ -206,7 +206,8 @@ def list_ollama_models(base_url: str, http: HttpCall | None = None,
     for item in models:
         if not isinstance(item, dict) or not isinstance(item.get("name"), str) or not item["name"]:
             continue
-        details = item.get("details") if isinstance(item.get("details"), dict) else {}
+        raw_details = item.get("details")
+        details = raw_details if isinstance(raw_details, dict) else {}
         cleaned.append(
             {
                 "name": item["name"],
@@ -430,6 +431,7 @@ def validate_ai_config_update(updates: dict[str, Any], current: Callable[[str], 
     is still starting; a reachable one that lacks the model is a hard error.
     """
     import json
+    from decimal import Decimal, InvalidOperation
 
     errors: dict[str, str] = {}
     warnings: list[str] = []
@@ -469,9 +471,98 @@ def validate_ai_config_update(updates: dict[str, Any], current: Callable[[str], 
                 'Harus berupa JSON array berisi {"provider": ..., "model": ...} dengan provider yang dikenal.'
             )
 
+    budget_value = updates.get("ai.daily_budget_usd")
+    if "ai.daily_budget_usd" in updates:
+        try:
+            budget = Decimal(str(budget_value))
+            if not budget.is_finite() or budget < 0 or budget > Decimal("2000"):
+                raise ValueError
+        except (InvalidOperation, TypeError, ValueError):
+            errors["ai.daily_budget_usd"] = "Plafon biaya harus berupa angka dari 0 sampai 2000 USD per hari."
+
+    def parse_pricing(raw: Any) -> dict[str, Any] | None:
+        if not isinstance(raw, str) or len(raw) > 256_000:
+            return None
+        try:
+            value = json.loads(raw)
+        except (ValueError, RecursionError):
+            return None
+        if not isinstance(value, dict) or len(value) > 1000:
+            return None
+        from decimal import Decimal, InvalidOperation
+
+        for key, rate in value.items():
+            if (not isinstance(key, str) or ":" not in key or len(key) > 240
+                    or not isinstance(rate, dict)
+                    or set(rate) != {"input_per_million_usd", "output_per_million_usd"}):
+                return None
+            provider, model = key.split(":", 1)
+            if provider not in KNOWN_PROVIDERS or not model.strip():
+                return None
+            for field in ("input_per_million_usd", "output_per_million_usd"):
+                try:
+                    price = Decimal(str(rate[field]))
+                except (InvalidOperation, TypeError, ValueError):
+                    return None
+                if not price.is_finite() or price < 0 or price > Decimal("1000"):
+                    return None
+        return value
+
+    pricing_value = updates.get("ai.model_pricing_json")
+    if "ai.model_pricing_json" in updates and parse_pricing(pricing_value) is None:
+        errors["ai.model_pricing_json"] = (
+            'Harga model harus berupa objek JSON provider:model dengan input_per_million_usd dan output_per_million_usd.'
+        )
+
     def effective(key: str) -> str:
         value = updates.get(key)
-        return (value if isinstance(value, str) else current(key) or "").strip()
+        return (str(value) if value is not None else current(key) or "").strip()
+
+    cost_config_changed = bool(
+        {"ai.daily_budget_usd", "ai.model_pricing_json", "ai.provider", "ai.model",
+         "ai.fallback_provider", "ai.fallback_model", "ai.allowed_models"} & set(updates)
+    )
+    if cost_config_changed and not any(key in errors for key in ("ai.daily_budget_usd", "ai.model_pricing_json")):
+        try:
+            effective_budget = Decimal(effective("ai.daily_budget_usd") or "0")
+        except (InvalidOperation, ValueError):
+            effective_budget = Decimal(0)
+        if effective_budget > 0:
+            effective_pricing = parse_pricing(effective("ai.model_pricing_json"))
+            if effective_pricing is None:
+                errors["ai.model_pricing_json"] = "Isi harga model yang valid sebelum mengaktifkan plafon biaya."
+            else:
+                required_pairs = [
+                    (effective("ai.provider").lower(), effective("ai.model")),
+                    (effective("ai.fallback_provider").lower(), effective("ai.fallback_model")),
+                ]
+                raw_models = effective("ai.allowed_models")
+                if raw_models:
+                    try:
+                        required_pairs.extend(
+                            (item["provider"].lower(), item["model"])
+                            for item in json.loads(raw_models)
+                            if isinstance(item, dict) and isinstance(item.get("provider"), str)
+                            and isinstance(item.get("model"), str)
+                        )
+                    except (ValueError, TypeError):
+                        pass  # the dedicated allowed-model validation reports its own error
+                defaults = {
+                    "anthropic": "claude-sonnet-4-6", "openai": "gpt-4o",
+                    "openrouter": "openai/gpt-4o", "deepseek": "deepseek-chat",
+                    "gemini": "gemini-2.5-flash-lite", "ollama": "llama3.2", "opencode": "",
+                }
+                missing = []
+                for provider, model in required_pairs:
+                    if not provider or provider in {"ollama", "opencode"}:
+                        continue
+                    selected_model = model or defaults.get(provider, "")
+                    if selected_model and f"{provider}:{selected_model}" not in effective_pricing:
+                        missing.append(f"{provider}:{selected_model}")
+                if missing:
+                    errors["ai.model_pricing_json"] = (
+                        "Harga belum tersedia untuk model aktif/cadangan/pilihan: " + ", ".join(sorted(set(missing)))
+                    )
 
     if any(k in updates for k in ("ai.provider", "ai.model", "ai.ollama_base_url")) and not (
         {"ai.provider", "ai.model", "ai.ollama_base_url"} & set(errors)
