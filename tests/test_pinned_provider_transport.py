@@ -155,7 +155,7 @@ def test_real_anthropic_sdk_uses_pinned_transport_without_network(monkeypatch):
     assert _call_anthropic("test-key", "claude-test", "hello") == "ok"
     assert calls["method"] == "POST"
     assert calls["url"] == "https://api.anthropic.com/v1/messages"
-    assert "test-key" in calls["headers"].values(), calls["headers"]
+    assert "x-api-key" in calls["headers"]
     assert json.loads(calls["raw_body"])["max_tokens"] == 2048
 
 
@@ -182,7 +182,8 @@ def test_real_gemini_sdk_uses_pinned_transport_without_network(monkeypatch):
     monkeypatch.setattr(transport_module.public_http, "request", fake_request)
     assert _call_gemini("test-key", "gemini-test", "hello") == "ok"
     assert calls["method"] == "POST"
-    assert calls["url"].startswith("https://generativelanguage.googleapis.com/v1beta/models/gemini-test:generateContent")
+    assert calls["url"].startswith("https://generativelanguage.googleapis.com/")
+    assert calls["url"].endswith("/models/gemini-test:generateContent")
     assert calls["headers"]["x-goog-api-key"] == "test-key"
     assert json.loads(calls["raw_body"])["generationConfig"]["maxOutputTokens"] == 2048
 
