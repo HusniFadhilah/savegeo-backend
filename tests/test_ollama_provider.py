@@ -60,8 +60,8 @@ def test_geoai_dispatches_tool_calling_to_ollama(monkeypatch):
         },
     )
 
-    def fake_tool_call(api_key, model, user_input, base_url, history, tool_ctx):
-        calls.update(api_key=api_key, model=model, base_url=base_url)
+    def fake_tool_call(api_key, model, user_input, base_url, history, tool_ctx, **kwargs):
+        calls.update(api_key=api_key, model=model, base_url=base_url, **kwargs)
         return '{"message":"jawaban lokal","actions":[],"warnings":[],"cards":[]}'
 
     monkeypatch.setattr(agentic_ai, "_call_openai_compat_tools", fake_tool_call)
@@ -73,4 +73,5 @@ def test_geoai_dispatches_tool_calling_to_ollama(monkeypatch):
         "api_key": "ollama",
         "model": "qwen3:8b",
         "base_url": "http://host.docker.internal:11434/v1",
+        "allow_private_provider": True,
     }

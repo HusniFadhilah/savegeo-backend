@@ -33,3 +33,50 @@ def test_public_get_does_not_retry_rate_limit_and_counts_it_as_failure(monkeypat
     assert response.status_code == 429
     assert len(calls) == 1
     assert circuit_results == [("provider.example", False)]
+
+
+def test_public_post_accepts_bounded_raw_sdk_body_and_provider_headers(monkeypatch):
+    captured = {}
+    response = SimpleNamespace(status_code=200)
+    monkeypatch.setattr(public_http_module, "public_addresses", lambda _host: ["8.8.8.8"])
+    monkeypatch.setattr(public_http, "_circuit_before", lambda _host: None)
+    monkeypatch.setattr(public_http, "_circuit_result", lambda *_args, **_kwargs: None)
+
+    def request_once(method, url, **kwargs):
+        captured.update(method=method, url=url, **kwargs)
+        return response
+
+    monkeypatch.setattr(public_http, "_request_once", request_once)
+    result = public_http.request(
+        "POST",
+        "https://provider.example/v1/chat",
+        raw_body=b'{"message":"bounded"}',
+        headers={"x-api-key": "test-key", "content-type": "application/json"},
+        timeout=5,
+        max_bytes=2048,
+        max_request_bytes=1024,
+    )
+
+    assert result is response
+    assert captured["raw_body"] == b'{"message":"bounded"}'
+    assert captured["max_request_bytes"] == 1024
+    assert captured["headers"] == {"x-api-key": "test-key", "content-type": "application/json"}
+
+
+def test_public_post_rejects_oversized_raw_sdk_body_before_connect(monkeypatch):
+    monkeypatch.setattr(
+        public_http_module,
+        "public_addresses",
+        lambda _host: (_ for _ in ()).throw(AssertionError("oversized body must be rejected before DNS")),
+    )
+
+    import pytest
+
+    with pytest.raises(ValueError, match="body exceeds the size limit"):
+        public_http.request(
+            "POST",
+            "https://provider.example/v1/chat",
+            raw_body=b"x" * 1025,
+            timeout=5,
+            max_request_bytes=1024,
+        )

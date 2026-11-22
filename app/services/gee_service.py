@@ -24,7 +24,13 @@ def _init_from_key_file(client_email: str, key_path: str, project_id: str | None
     # Supplying the configured Cloud project avoids relying on the default
     # Earth Engine discovery context, which can time out for service accounts.
     effective_project_id = project_id or get_settings().gee_project_id or None
-    ee.Initialize(credentials, project=effective_project_id)
+    from app.core.pinned_provider_transport import BoundedEarthEngineTransport
+
+    ee.Initialize(
+        credentials,
+        project=effective_project_id,
+        http_transport=BoundedEarthEngineTransport(),
+    )
     return True
 
 
@@ -33,7 +39,13 @@ def _init_from_key_data(client_email: str, key_bytes: bytes, project_id: str | N
 
     credentials = ee.ServiceAccountCredentials(client_email, key_data=key_bytes.decode("utf-8"))
     effective_project_id = project_id or get_settings().gee_project_id or None
-    ee.Initialize(credentials, project=effective_project_id)
+    from app.core.pinned_provider_transport import BoundedEarthEngineTransport
+
+    ee.Initialize(
+        credentials,
+        project=effective_project_id,
+        http_transport=BoundedEarthEngineTransport(),
+    )
     return True
 
 

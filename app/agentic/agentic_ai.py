@@ -1715,13 +1715,19 @@ def plan_with_ai(message: str, page_state: dict,
         # Providers that use no key pool (local/special)
         if provider == "ollama":
             base_url = cfg.get("ollama_base_url") or cfg["custom_base_url"] or _PROVIDER_BASE_URLS["ollama"]
-            raw = _call_openai_compat("ollama", model, user_input, base_url, image_b64, hist, force_json=False)
+            raw = _call_openai_compat(
+                "ollama", model, user_input, base_url, image_b64, hist,
+                force_json=False, allow_private_provider=True,
+            )
         elif provider == "opencode":
             base_url = cfg.get("opencode_base_url") or cfg["custom_base_url"] or _PROVIDER_BASE_URLS["opencode"]
             key      = cfg.get("opencode_api_key") or "opencode"
             if not model:
                 return _controller_fallback("OpenCode: nama model wajib diisi di field 'ai.model'.")
-            raw = _call_openai_compat(key, model, user_input, base_url, image_b64, hist, force_json=False)
+            raw = _call_openai_compat(
+                key, model, user_input, base_url, image_b64, hist,
+                force_json=False, allow_private_provider=True,
+            )
         elif provider not in ("anthropic", "openai", "openrouter", "deepseek", "gemini"):
             return _controller_fallback(
                 f"Provider tidak dikenal: '{provider}'. "
@@ -1833,7 +1839,15 @@ def _call_anthropic(api_key: str, model: str, user_input: str,
     except ImportError:
         raise ImportError("Jalankan: pip install anthropic")
 
-    client   = anthropic.Anthropic(api_key=api_key, timeout=_MAX_AGENT_PROVIDER_SECONDS, max_retries=0)
+    from app.core.pinned_provider_transport import public_httpx2_client
+
+    provider_http = public_httpx2_client(
+        "https://api.anthropic.com", timeout=_MAX_AGENT_PROVIDER_SECONDS,
+    )
+    client   = anthropic.Anthropic(
+        api_key=api_key, timeout=_MAX_AGENT_PROVIDER_SECONDS, max_retries=0,
+        http_client=provider_http,
+    )
     messages = [{"role": h["role"], "content": h["content"]} for h in (history or [])]
 
     if image_b64:
@@ -1861,7 +1875,8 @@ def _call_openai_compat(api_key: str, model: str, user_input: str,
                         base_url: str | None = None,
                         image_b64: str | None = None,
                         history: list[dict] | None = None,
-                        force_json: bool = True) -> str:
+                        force_json: bool = True,
+                        allow_private_provider: bool = False) -> str:
     _LOCAL_DUMMY_KEYS = {"ollama", "opencode"}
     if not api_key or (api_key not in _LOCAL_DUMMY_KEYS and not api_key.strip()):
         raise ValueError("API key tidak dikonfigurasi untuk provider ini.")
@@ -1870,9 +1885,25 @@ def _call_openai_compat(api_key: str, model: str, user_input: str,
     except ImportError:
         raise ImportError("Jalankan: pip install openai")
 
+    import httpx
+
+    from app.core.pinned_provider_transport import public_httpx_client
+
     kwargs: dict = {"api_key": api_key}
-    if base_url:
-        kwargs["base_url"] = base_url
+    effective_base_url = base_url or "https://api.openai.com/v1"
+    kwargs["base_url"] = effective_base_url
+    if allow_private_provider or api_key in _LOCAL_DUMMY_KEYS:
+        provider_http = httpx.Client(
+            timeout=_MAX_AGENT_PROVIDER_SECONDS,
+            follow_redirects=False,
+            trust_env=False,
+            limits=httpx.Limits(max_connections=4, max_keepalive_connections=2, keepalive_expiry=5),
+        )
+    else:
+        provider_http = public_httpx_client(
+            effective_base_url, timeout=_MAX_AGENT_PROVIDER_SECONDS,
+        )
+    kwargs["http_client"] = provider_http
     client = OpenAI(**kwargs, timeout=_MAX_AGENT_PROVIDER_SECONDS, max_retries=0)
 
     messages: list = [{"role": "system", "content": CONTROLLER_SYSTEM_PROMPT}]
@@ -1954,6 +1985,8 @@ def _call_gemini(api_key: str, model: str, user_input: str,
     except ImportError:
         raise ImportError("Jalankan: pip install google-genai")
 
+    from app.core.pinned_provider_transport import public_httpx_client
+
     import base64 as _b64
 
     client = genai.Client(
@@ -1961,6 +1994,10 @@ def _call_gemini(api_key: str, model: str, user_input: str,
         http_options=types.HttpOptions(
             timeout=int(_MAX_AGENT_PROVIDER_SECONDS * 1000),
             retry_options=types.HttpRetryOptions(attempts=1),
+            httpx_client=public_httpx_client(
+                "https://generativelanguage.googleapis.com",
+                timeout=_MAX_AGENT_PROVIDER_SECONDS,
+            ),
         ),
     )
 
@@ -2318,7 +2355,15 @@ def _call_anthropic_tools(api_key: str, model: str, user_input: str,
 
     from app.agentic.geoai_tools import execute_geoai_tool
 
-    client = anthropic.Anthropic(api_key=api_key, timeout=_MAX_AGENT_PROVIDER_SECONDS, max_retries=0)
+    from app.core.pinned_provider_transport import public_httpx2_client
+
+    provider_http = public_httpx2_client(
+        "https://api.anthropic.com", timeout=_MAX_AGENT_PROVIDER_SECONDS,
+    )
+    client = anthropic.Anthropic(
+        api_key=api_key, timeout=_MAX_AGENT_PROVIDER_SECONDS, max_retries=0,
+        http_client=provider_http,
+    )
     messages: list = [{"role": h["role"], "content": h["content"]} for h in (history or [])]
     messages.append({"role": "user", "content": user_input})
     tools = _tool_schema_for_anthropic()
@@ -2350,7 +2395,8 @@ def _call_anthropic_tools(api_key: str, model: str, user_input: str,
 
 def _call_openai_compat_tools(api_key: str, model: str, user_input: str,
                               base_url: str | None, history: list[dict] | None,
-                              tool_ctx: dict, max_rounds: int = 4) -> str:
+                              tool_ctx: dict, max_rounds: int = 4,
+                              allow_private_provider: bool = False) -> str:
     import json as _json
 
     _LOCAL_DUMMY_KEYS = {"ollama", "opencode"}
@@ -2363,9 +2409,25 @@ def _call_openai_compat_tools(api_key: str, model: str, user_input: str,
 
     from app.agentic.geoai_tools import execute_geoai_tool
 
+    import httpx
+
+    from app.core.pinned_provider_transport import public_httpx_client
+
     kwargs: dict = {"api_key": api_key}
-    if base_url:
-        kwargs["base_url"] = base_url
+    effective_base_url = base_url or "https://api.openai.com/v1"
+    kwargs["base_url"] = effective_base_url
+    if allow_private_provider or api_key in _LOCAL_DUMMY_KEYS:
+        provider_http = httpx.Client(
+            timeout=_MAX_AGENT_PROVIDER_SECONDS,
+            follow_redirects=False,
+            trust_env=False,
+            limits=httpx.Limits(max_connections=4, max_keepalive_connections=2, keepalive_expiry=5),
+        )
+    else:
+        provider_http = public_httpx_client(
+            effective_base_url, timeout=_MAX_AGENT_PROVIDER_SECONDS,
+        )
+    kwargs["http_client"] = provider_http
     client = OpenAI(**kwargs, timeout=_MAX_AGENT_PROVIDER_SECONDS, max_retries=0)
 
     messages: list = [{"role": "system", "content": GEOAI_SYSTEM_PROMPT}]
@@ -2425,6 +2487,8 @@ def _call_gemini_tools(api_key: str, model: str, user_input: str,
     except ImportError:
         raise ImportError("Jalankan: pip install google-genai")
 
+    from app.core.pinned_provider_transport import public_httpx_client
+
     from app.agentic.geoai_tools import GEOAI_TOOLS, execute_geoai_tool
 
     client = genai.Client(
@@ -2432,6 +2496,10 @@ def _call_gemini_tools(api_key: str, model: str, user_input: str,
         http_options=types.HttpOptions(
             timeout=int(_MAX_AGENT_PROVIDER_SECONDS * 1000),
             retry_options=types.HttpRetryOptions(attempts=1),
+            httpx_client=public_httpx_client(
+                "https://generativelanguage.googleapis.com",
+                timeout=_MAX_AGENT_PROVIDER_SECONDS,
+            ),
         ),
     )
 
@@ -2841,13 +2909,19 @@ def geoai_with_ai(message: str, context: dict, db, history: list[dict] | None = 
     try:
         if provider == "ollama":
             base_url = cfg.get("ollama_base_url") or cfg["custom_base_url"] or _PROVIDER_BASE_URLS["ollama"]
-            raw = _call_openai_compat_tools("ollama", model, user_input, base_url, history, tool_ctx)
+            raw = _call_openai_compat_tools(
+                "ollama", model, user_input, base_url, history, tool_ctx,
+                allow_private_provider=True,
+            )
         elif provider == "opencode":
             base_url = cfg.get("opencode_base_url") or cfg["custom_base_url"] or _PROVIDER_BASE_URLS["opencode"]
             key = cfg.get("opencode_api_key") or "opencode"
             if not model:
                 return _geoai_fallback("OpenCode: nama model wajib diisi di field 'ai.model'.")
-            raw = _call_openai_compat_tools(key, model, user_input, base_url, history, tool_ctx)
+            raw = _call_openai_compat_tools(
+                key, model, user_input, base_url, history, tool_ctx,
+                allow_private_provider=True,
+            )
         elif provider not in ("anthropic", "openai", "openrouter", "deepseek", "gemini"):
             return _geoai_fallback(f"Provider tidak dikenal: '{provider}'.")
         else:

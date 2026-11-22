@@ -25,6 +25,16 @@ _CIRCUIT_LOCK = threading.Lock()
 _CIRCUITS: dict[str, dict[str, float | int | bool]] = {}
 _CIRCUIT_FAILURE_THRESHOLD = 5
 _CIRCUIT_OPEN_SECONDS = 30.0
+_PUBLIC_REQUEST_HEADERS = {
+    "user-agent", "accept", "content-type", "authorization", "range", "if-range",
+    "x-amz-target", "ocp-apim-subscription-key", "x-api-key", "x-goog-api-key",
+    "x-goog-user-project", "x-goog-api-client", "x-goog-request-params", "x-goog-quota-user",
+    "x-goog-upload-protocol", "x-goog-upload-command", "x-goog-upload-offset",
+    "x-upload-content-type", "x-upload-content-length", "anthropic-version", "anthropic-beta",
+    "openai-organization", "openai-project", "idempotency-key", "http-referer", "x-title",
+    "x-stainless-lang", "x-stainless-package-version", "x-stainless-os", "x-stainless-arch",
+    "x-stainless-runtime", "x-stainless-runtime-version",
+}
 
 
 def public_addresses(host: str) -> list[str]:
@@ -186,9 +196,9 @@ class PublicHTTPS:
                 state["opened_until"] = time.monotonic() + _CIRCUIT_OPEN_SECONDS
             state["probe_in_flight"] = False
 
-    def request(self, method: str, url: str, *, params=None, data=None, json_body=None, timeout=30,
+    def request(self, method: str, url: str, *, params=None, data=None, json_body=None, raw_body=None, timeout=30,
                 allow_redirects=False, allow_redirect_status=False,
-                max_bytes=16 * 1024 * 1024, headers=None) -> requests.Response:
+                max_bytes=16 * 1024 * 1024, max_request_bytes=16 * 1024 * 1024, headers=None) -> requests.Response:
         _, hostname = self._validated_url(url)
         seconds = self._timeout_seconds(timeout)
         deadline = time.monotonic() + seconds
@@ -208,10 +218,12 @@ class PublicHTTPS:
                     params=params,
                     data=data,
                     json_body=json_body,
+                    raw_body=raw_body,
                     timeout=remaining,
                     allow_redirects=allow_redirects,
                     allow_redirect_status=allow_redirect_status,
                     max_bytes=max_bytes,
+                    max_request_bytes=max_request_bytes,
                     headers=headers,
                 )
             except (requests.RequestException, OSError):
@@ -236,27 +248,31 @@ class PublicHTTPS:
             return response
         raise requests.ConnectionError("Public HTTPS request failed")
 
-    def _request_once(self, method: str, url: str, *, params=None, data=None, json_body=None, timeout=30,
+    def _request_once(self, method: str, url: str, *, params=None, data=None, json_body=None, raw_body=None, timeout=30,
                 allow_redirects=False, allow_redirect_status=False,
-                max_bytes=16 * 1024 * 1024, headers=None) -> requests.Response:
+                max_bytes=16 * 1024 * 1024, max_request_bytes=16 * 1024 * 1024, headers=None) -> requests.Response:
         parsed, hostname = self._validated_url(url)
         if allow_redirects:
             raise ValueError("Only direct public HTTPS destinations are allowed")
-        address = public_addresses(hostname)[0]
         query = parsed.query
         if params:
             query += ("&" if query else "") + urlencode(params, doseq=True)
         target = urlunsplit(("", "", parsed.path or "/", query, ""))
-        if data is not None and json_body is not None:
-            raise ValueError("Choose either form data or JSON body")
+        if sum(value is not None for value in (data, json_body, raw_body)) > 1:
+            raise ValueError("Choose one request body format")
         body = urlencode(data, doseq=True).encode() if data is not None else None
         if json_body is not None:
             body = json.dumps(json_body, allow_nan=False, separators=(",", ":")).encode()
+        if raw_body is not None:
+            body = raw_body.encode("utf-8") if isinstance(raw_body, str) else bytes(raw_body)
+        if not isinstance(max_request_bytes, int) or max_request_bytes < 0 or (body is not None and len(body) > max_request_bytes):
+            raise ValueError("Public HTTPS request body exceeds the size limit")
         supplied_headers = headers or {}
-        if any(key.lower() not in {"user-agent", "accept", "content-type", "authorization", "range", "if-range", "x-amz-target", "ocp-apim-subscription-key"} for key in supplied_headers):
+        if any(key.lower() not in _PUBLIC_REQUEST_HEADERS for key in supplied_headers):
             raise ValueError("Public HTTPS accepts only application identification headers")
+        address = public_addresses(hostname)[0]
         headers = {**supplied_headers, "Host": hostname, "Accept-Encoding": "identity"}
-        if body is not None and json_body is None:
+        if body is not None and data is not None:
             headers["Content-Type"] = "application/x-www-form-urlencoded"
         elif json_body is not None:
             headers["Content-Type"] = "application/json"
