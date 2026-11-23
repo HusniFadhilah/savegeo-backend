@@ -683,6 +683,7 @@ def render_carbon_reference_tile(
     year: int | None = None,
     vis_min: float | None = None,
     vis_max: float | None = None,
+    vis_palette: list[str] | None = None,
 ) -> bytes | None:
     """Render a 256px transparent PNG from a public COG reference.
 
@@ -716,7 +717,8 @@ def render_carbon_reference_tile(
             raise ChlorisUnavailableError("Gunakan tile Planetary Computer untuk Chloris publik 2003-2019.")
         http_options = chloris_raster_http_options(chloris_download.url)
         source_identity = hashlib.sha256(chloris_download.url.encode()).hexdigest()
-    cache_key = f"{dataset_key}:{z}:{x % (2 ** z)}:{y}:{year}:{vis_min}:{vis_max}"
+    palette_key = ",".join(vis_palette or [])
+    cache_key = f"{dataset_key}:{z}:{x % (2 ** z)}:{y}:{year}:{vis_min}:{vis_max}:{palette_key}"
     if source_identity:
         cache_key += f":{source_identity}"
     with _CARBON_TILE_CACHE_LOCK:
@@ -796,7 +798,7 @@ def render_carbon_reference_tile(
     if hi <= lo:
         hi = lo + 1
     normalized = np.clip((canvas - lo) / (hi - lo), 0, 1)
-    palette = meta.get("vis_palette") or ["ffffff", "006d2c"]
+    palette = vis_palette or meta.get("vis_palette") or ["ffffff", "006d2c"]
     rgb = np.zeros((256, 256, 3), dtype=np.uint8)
     for channel in range(3):
         stops = np.array([int(color.lstrip("#")[channel * 2:channel * 2 + 2], 16) for color in palette], dtype=float)

@@ -62,7 +62,9 @@ def ranking_config(settings, year, start_month, end_month, *, force_refresh=Fals
         "start_month": start_month,
         "end_month": end_month,
         "scale": {"province": 100, "city": 30, "district": 20, "village": 10}[level],
-        "algorithm": 1,
+        # v2 adds saved AGB/BGB/SOC/litter/deadwood pool statistics. Keep its
+        # snapshots separate from the older land-cover-only calculation.
+        "algorithm": 2,
         "observed_through": min(
             date(year, end_month, monthrange(year, end_month)[1]), datetime.now(UTC).date()
         ).isoformat(),
@@ -235,6 +237,11 @@ def snapshot_page(
             "crops_ha": GreenRankingSnapshotRow.crops_ha,
             "shrubs_ha": GreenRankingSnapshotRow.shrubs_ha,
             "flooded_ha": GreenRankingSnapshotRow.flooded_ha,
+            "agb_mg_c_ha": GreenRankingSnapshotRow.agb_mg_c_ha,
+            "bgb_mg_c_ha": GreenRankingSnapshotRow.bgb_mg_c_ha,
+            "soc_mg_c_ha": GreenRankingSnapshotRow.soc_mg_c_ha,
+            "litter_mg_c_ha": GreenRankingSnapshotRow.litter_mg_c_ha,
+            "deadwood_mg_c_ha": GreenRankingSnapshotRow.deadwood_mg_c_ha,
         }
         if sort_by not in sort_columns and sort_by != "rank":
             sort_by = "rank"
@@ -430,6 +437,11 @@ def publish_snapshot(run, owner):
                         "crops_ha": classes.get("crops"),
                         "shrubs_ha": classes.get("shrubs"),
                         "flooded_ha": classes.get("flooded"),
+                        "agb_mg_c_ha": payload.get("agb_mg_c_ha"),
+                        "bgb_mg_c_ha": payload.get("bgb_mg_c_ha"),
+                        "soc_mg_c_ha": payload.get("soc_mg_c_ha"),
+                        "litter_mg_c_ha": payload.get("litter_mg_c_ha"),
+                        "deadwood_mg_c_ha": payload.get("deadwood_mg_c_ha"),
                         "payload": {**payload, "rank": row_rank},
                     }
                 )
@@ -499,6 +511,44 @@ def _insert(db, run, row):
     )
 
 
+CARBON_POOL_DATASETS = {
+    "agb": "SPAWN",
+    "bgb": "ORNL_BGB",
+    "soc": "SOILGRIDS_OCS_0_30CM",
+    "litter": "TROPICAL_LITTER_REFERENCE",
+    "deadwood": "TROPICAL_DEADWOOD_REFERENCE",
+}
+
+
+def _carbon_pool_band_stack(features):
+    """Make area-weighted carbon stock bands from the app's registered references."""
+    from app.registries.carbon_dataset_registry import load_carbon_reference_ee
+
+    roi = ee.FeatureCollection(features).geometry()
+    pixel_area_ha = ee.Image.pixelArea().divide(10000)
+    bands = None
+    for pool, dataset in CARBON_POOL_DATASETS.items():
+        density = load_carbon_reference_ee(dataset, 2020, roi=roi).select("agb")
+        valid_area = pixel_area_ha.updateMask(density.mask()).rename(f"{pool}_valid_area_ha")
+        total = density.multiply(pixel_area_ha).rename(f"{pool}_total_mg_c")
+        pool_bands = valid_area.addBands(total)
+        bands = pool_bands if bands is None else bands.addBands(pool_bands)
+    return bands
+
+
+def _carbon_pool_values(properties):
+    """Convert zonal sums to Mg C/ha mean densities and preserve regional totals."""
+    values = {}
+    for pool in CARBON_POOL_DATASETS:
+        valid_area = properties.get(f"{pool}_valid_area_ha")
+        total = properties.get(f"{pool}_total_mg_c")
+        valid_area = float(valid_area) if valid_area is not None else 0.0
+        total = float(total) if total is not None else 0.0
+        values[f"{pool}_mg_c_ha"] = total / valid_area if valid_area > 0 else None
+        values[f"{pool}_total_mg_c"] = total if valid_area > 0 else None
+    return values
+
+
 def result_page(
     run, owner, page=1, page_size=50, search="", sort_by="rank", sort_dir="asc", filter_config=None
 ):
@@ -533,6 +583,11 @@ def result_page(
             "crops_ha": "crops_sort",
             "shrubs_ha": "shrubs_sort",
             "flooded_ha": "flooded_sort",
+            "agb_mg_c_ha": "agb_sort",
+            "bgb_mg_c_ha": "bgb_sort",
+            "soc_mg_c_ha": "soc_sort",
+            "litter_mg_c_ha": "litter_sort",
+            "deadwood_mg_c_ha": "deadwood_sort",
         }
         if sort_by not in sort_columns and sort_by != "rank":
             sort_by = "rank"
@@ -589,6 +644,11 @@ def result_page(
                     json_extract(payload,'$.classes_ha.crops') AS crops_sort,
                     json_extract(payload,'$.classes_ha.shrubs') AS shrubs_sort,
                     json_extract(payload,'$.classes_ha.flooded') AS flooded_sort,
+                    json_extract(payload,'$.agb_mg_c_ha') AS agb_sort,
+                    json_extract(payload,'$.bgb_mg_c_ha') AS bgb_sort,
+                    json_extract(payload,'$.soc_mg_c_ha') AS soc_sort,
+                    json_extract(payload,'$.litter_mg_c_ha') AS litter_sort,
+                    json_extract(payload,'$.deadwood_mg_c_ha') AS deadwood_sort,
                     CASE WHEN eligible=1 THEN ROW_NUMBER() OVER (PARTITION BY eligible ORDER BY green DESC, code ASC) END AS official_rank
                 FROM rows WHERE run=?
             )
@@ -609,6 +669,11 @@ def result_page(
                     WHEN 'crops_ha' THEN crops_sort
                     WHEN 'shrubs_ha' THEN shrubs_sort
                     WHEN 'flooded_ha' THEN flooded_sort
+                    WHEN 'agb_mg_c_ha' THEN agb_sort
+                    WHEN 'bgb_mg_c_ha' THEN bgb_sort
+                    WHEN 'soc_mg_c_ha' THEN soc_sort
+                    WHEN 'litter_mg_c_ha' THEN litter_sort
+                    WHEN 'deadwood_mg_c_ha' THEN deadwood_sort
                 END IS NULL THEN 1 ELSE 0 END ASC,
                 CASE WHEN ? = 'asc' THEN CASE ?
                     WHEN 'rank' THEN official_rank
@@ -624,6 +689,11 @@ def result_page(
                     WHEN 'crops_ha' THEN crops_sort
                     WHEN 'shrubs_ha' THEN shrubs_sort
                     WHEN 'flooded_ha' THEN flooded_sort
+                    WHEN 'agb_mg_c_ha' THEN agb_sort
+                    WHEN 'bgb_mg_c_ha' THEN bgb_sort
+                    WHEN 'soc_mg_c_ha' THEN soc_sort
+                    WHEN 'litter_mg_c_ha' THEN litter_sort
+                    WHEN 'deadwood_mg_c_ha' THEN deadwood_sort
                 END END ASC,
                 CASE WHEN ? = 'desc' THEN CASE ?
                     WHEN 'rank' THEN official_rank
@@ -639,6 +709,11 @@ def result_page(
                     WHEN 'crops_ha' THEN crops_sort
                     WHEN 'shrubs_ha' THEN shrubs_sort
                     WHEN 'flooded_ha' THEN flooded_sort
+                    WHEN 'agb_mg_c_ha' THEN agb_sort
+                    WHEN 'bgb_mg_c_ha' THEN bgb_sort
+                    WHEN 'soc_mg_c_ha' THEN soc_sort
+                    WHEN 'litter_mg_c_ha' THEN litter_sort
+                    WHEN 'deadwood_mg_c_ha' THEN deadwood_sort
                 END END DESC,
                 code ASC
             LIMIT ? OFFSET ?""",
@@ -864,6 +939,23 @@ def run_batch(data):
                     .map(lambda feature: feature.setGeometry(None))
                     .getInfo()
                 )
+                pool_bands = _carbon_pool_band_stack(features)
+                pool_reduced = (
+                    pool_bands.reduceRegions(
+                        collection=ee.FeatureCollection(features),
+                        reducer=ee.Reducer.sum(),
+                        # Reference products are 250–300 m. Avoid oversampling
+                        # them at the much finer village ranking scale.
+                        scale=max(300, config["scale"]),
+                        tileScale=4,
+                    )
+                    .map(lambda feature: feature.setGeometry(None))
+                    .getInfo()
+                )
+                carbon_by_code = {
+                    str(feature["properties"]["code"]): _carbon_pool_values(feature["properties"])
+                    for feature in pool_reduced.get("features", [])
+                }
                 for feature in reduced.get("features", []):
                     props = feature["properties"]
                     candidate, key = context[str(props["code"])]
@@ -883,6 +975,7 @@ def run_batch(data):
                         "classes_ha": {
                             name: props.get(name) for name in ("trees", "grass", "crops", "shrubs", "flooded")
                         },
+                        **carbon_by_code.get(str(props["code"]), {}),
                     }
                     _insert(db, run, row)
                     db.execute("INSERT OR REPLACE INTO cache VALUES(?,?)", (key, json.dumps(row)))
@@ -927,6 +1020,16 @@ def snapshot_csv_rows(scope_key, filter_config=None):
         "crops_ha",
         "shrubs_ha",
         "flooded_ha",
+        "agb_mg_c_ha",
+        "bgb_mg_c_ha",
+        "soc_mg_c_ha",
+        "litter_mg_c_ha",
+        "deadwood_mg_c_ha",
+        "agb_total_mg_c",
+        "bgb_total_mg_c",
+        "soc_total_mg_c",
+        "litter_total_mg_c",
+        "deadwood_total_mg_c",
         "error",
     ]
     meta = snapshot_page(scope_key, page_size=10, filter_config=filter_config)
@@ -1031,6 +1134,16 @@ def csv_rows(run, owner, filter_config=None):
             "crops_ha",
             "shrubs_ha",
             "flooded_ha",
+            "agb_mg_c_ha",
+            "bgb_mg_c_ha",
+            "soc_mg_c_ha",
+            "litter_mg_c_ha",
+            "deadwood_mg_c_ha",
+            "agb_total_mg_c",
+            "bgb_total_mg_c",
+            "soc_total_mg_c",
+            "litter_total_mg_c",
+            "deadwood_total_mg_c",
             "error",
         ]
         buffer = io.StringIO()
