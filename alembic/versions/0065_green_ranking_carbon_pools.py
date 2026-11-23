@@ -4,7 +4,11 @@ from alembic import op
 import sqlalchemy as sa
 
 revision = "0065_green_rank_carbon"
-down_revision = "0064_merge_0063_heads"
+# Databases created from the previous integrated migration branch record
+# 0064_merge_dmrv_platform_heads. Merge that history with the current split
+# RLS/catalogue heads so both existing databases and fresh installs advance
+# through the same carbon-pool migration.
+down_revision = ("0064_merge_0063_heads", "0064_merge_dmrv_platform_heads")
 branch_labels = None
 depends_on = None
 
