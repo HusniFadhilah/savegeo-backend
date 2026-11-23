@@ -9,11 +9,13 @@ from app.services import carbon_pool_service as service
 
 def test_distribution_preserves_zero_bins_and_observed_quantiles():
     result = service._pool_density_statistics({"agb_mean": 5, "agb_stdDev": 2, "agb_min": 0, "agb_max": 10,
-        "agb_p25": 2, "agb_p50": 5, "agb_p75": 8,
+        "agb_p2": 0, "agb_p5": 0.5, "agb_p25": 2, "agb_p50": 5, "agb_p75": 8,
+        "agb_p95": 9.5, "agb_p98": 10,
         "agb_histogram": {"bucketMeans": [0, 5, 10], "histogram": [2, 0, 3]}}, 1000, 250)
     assert result["histogram"] == {"bucket_means": [0, 5, 10], "counts": [2, 0, 3],
                                    "pixel_count": 5, "sampled": True, "scale_m": 1000}
-    assert result["percentiles"] == {"p25": 2, "median": 5, "p75": 8}
+    assert result["percentiles"] == {"p2": 0, "p5": 0.5, "p25": 2, "median": 5,
+                                     "p75": 8, "p95": 9.5, "p98": 10}
 
 
 def test_fallback_uses_actual_sample_values_including_constant_zero_raster():
@@ -57,7 +59,7 @@ def test_simple_pool_response_and_saved_summary_include_distribution(dataset, po
          patch.object(store, "load_summary", return_value=None), patch.object(store, "save_summary", return_value=True) as save:
         result = service.analyze_carbon_pool(MagicMock(), data)
         ee.Reducer.histogram.assert_called_once_with(32, None, 10000)
-        ee.Reducer.percentile.assert_called_once_with([25, 50, 75])
+        ee.Reducer.percentile.assert_called_once_with([2, 5, 25, 50, 75, 95, 98])
     stats = result["carbon_estimated"]["statistics"]
     assert stats["histogram"]["counts"] == [2, 6, 2]
     assert stats["percentiles"]["median"] == 10

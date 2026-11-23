@@ -15,14 +15,21 @@ logger = logging.getLogger(__name__)
 
 def _pool_density_statistics(raw, scale, native_scale):
     """Normalize the observed raster distribution to the chart response contract."""
+    percentile_fields = (
+        ("p2", "agb_p2"), ("p5", "agb_p5"), ("p25", "agb_p25"),
+        ("median", "agb_p50"), ("p75", "agb_p75"), ("p95", "agb_p95"),
+        ("p98", "agb_p98"),
+    )
+    percentiles = {
+        name: value
+        for name, field in percentile_fields
+        if isinstance((value := raw.get(field)), (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    }
     stats = {"mean": raw["agb_mean"], "std_dev": raw.get("agb_stdDev"),
              "min": raw["agb_min"], "max": raw["agb_max"],
-             "percentiles": {
-                 "p2": raw.get("agb_p2"), "p5": raw.get("agb_p5"),
-                 "p25": raw.get("agb_p25"), "median": raw.get("agb_p50"),
-                 "p75": raw.get("agb_p75"), "p95": raw.get("agb_p95"),
-                 "p98": raw.get("agb_p98"),
-             }}
+             "percentiles": percentiles}
     histogram = raw.get("agb_histogram") or {}
     centers = histogram.get("bucketMeans", []) if isinstance(histogram, dict) else []
     counts = histogram.get("histogram", []) if isinstance(histogram, dict) else []
