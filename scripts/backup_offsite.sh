@@ -55,8 +55,17 @@ aws_backup s3 cp "$tmp_dir/database.dump.age" "$db_key" "${sse_args[@]}" --only-
 evidence_state="absent"
 evidence_key=""
 evidence_sha=""
-if [[ -d "$EVIDENCE_DIR" ]] && find "$EVIDENCE_DIR" -type f -print -quit | grep -q .; then
-  tar -C "$(dirname "$EVIDENCE_DIR")" -czf - "$(basename "$EVIDENCE_DIR")" \
+if [[ -d "$EVIDENCE_DIR" && ! -L "$EVIDENCE_DIR" ]] && find "$EVIDENCE_DIR" -type f -print -quit | grep -q .; then
+  evidence_parent="$(cd "$(dirname "$EVIDENCE_DIR")" && pwd -P)"
+  evidence_name="$(basename "$EVIDENCE_DIR")"
+  # Evidence files may be mode 0600 and owned by the API runtime UID. Read
+  # through an isolated, read-only container with DAC read/search override,
+  # matching the production deployment archive path, without changing source
+  # permissions or exposing the data to a networked container.
+  docker run --rm --network none --read-only --user 0:0 \
+    --cap-drop ALL --cap-add DAC_READ_SEARCH \
+    --volume "$evidence_parent:/source:ro" \
+    postgres:16-alpine tar -C /source -czf - "$evidence_name" \
     | age -r "$SAVEGEO_BACKUP_AGE_RECIPIENT" -o "$tmp_dir/evidence.tar.gz.age" -
   evidence_sha="$(sha256sum "$tmp_dir/evidence.tar.gz.age" | awk '{print $1}')"
   evidence_key="${key_base}.evidence.tar.gz.age"

@@ -68,3 +68,13 @@ def test_production_deploy_preserves_and_provisions_local_backup_storage() -> No
     assert "--exclude '.env.backup'" in workflow
     assert "- name: Provision encrypted local backup storage" in workflow
     assert "bash scripts/setup_local_s3_backup_storage.sh" in workflow
+
+
+def test_offsite_backup_reads_private_evidence_in_isolated_read_only_container() -> None:
+    script = (ROOT / "scripts/backup_offsite.sh").read_text(encoding="utf-8")
+
+    assert '[[ -d "$EVIDENCE_DIR" && ! -L "$EVIDENCE_DIR" ]]' in script
+    assert "docker run --rm --network none --read-only --user 0:0" in script
+    assert "--cap-drop ALL --cap-add DAC_READ_SEARCH" in script
+    assert '"$evidence_parent:/source:ro"' in script
+    assert "postgres:16-alpine tar -C /source -czf - \"$evidence_name\"" in script
