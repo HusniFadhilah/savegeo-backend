@@ -1,8 +1,8 @@
-name: SAVEGEO encrypted off-site backup
+name: SAVEGEO encrypted backup to local S3 storage
 
 on:
   schedule:
-    - cron: "17 2 * * *"
+    - cron: "17 2 * * 0"
   workflow_dispatch:
 
 permissions:
@@ -49,7 +49,7 @@ jobs:
           printf '%s\n' "$SSH_KNOWN_HOSTS" > "$RUNNER_TEMP/savegeo-known-hosts"
           printf '%s\n' "$DEPLOY_SSH_PRIVATE_KEY" > "$RUNNER_TEMP/savegeo-deploy-key"
           chmod 600 "$RUNNER_TEMP/savegeo-known-hosts" "$RUNNER_TEMP/savegeo-deploy-key"
-      - name: Create encrypted, verified backup and apply scoped retention
+      - name: Create encrypted backup in local S3 storage and apply scoped retention
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_SSH_PORT: ${{ secrets.DEPLOY_SSH_PORT }}
@@ -60,4 +60,4 @@ jobs:
           test -n "$DEPLOY_HOST" && test -n "$DEPLOY_SSH_PORT" && test -n "$DEPLOY_USER" && test -n "$BACKEND_REMOTE_DIR"
           ssh -i "$RUNNER_TEMP/savegeo-deploy-key" -p "$DEPLOY_SSH_PORT" \
             -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/savegeo-known-hosts" \
-            "$DEPLOY_USER@$DEPLOY_HOST" "cd '$BACKEND_REMOTE_DIR' && bash scripts/backup_offsite.sh"
+            "$DEPLOY_USER@$DEPLOY_HOST" "cd '$BACKEND_REMOTE_DIR' && SAVEGEO_BACKUP_ENV_FILE=.env.backup bash scripts/backup_offsite.sh"

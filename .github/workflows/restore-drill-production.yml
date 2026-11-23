@@ -1,4 +1,4 @@
-name: SAVEGEO off-site backup restore drill
+name: SAVEGEO local S3 backup restore drill
 
 on:
   schedule:
@@ -49,7 +49,7 @@ jobs:
           printf '%s\n' "$SSH_KNOWN_HOSTS" > "$RUNNER_TEMP/savegeo-known-hosts"
           printf '%s\n' "$DEPLOY_SSH_PRIVATE_KEY" > "$RUNNER_TEMP/savegeo-deploy-key"
           chmod 600 "$RUNNER_TEMP/savegeo-known-hosts" "$RUNNER_TEMP/savegeo-deploy-key"
-      - name: Restore off-site backup into an isolated disposable database
+      - name: Restore local S3 backup into an isolated disposable database
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_SSH_PORT: ${{ secrets.DEPLOY_SSH_PORT }}
@@ -60,4 +60,4 @@ jobs:
           test -n "$DEPLOY_HOST" && test -n "$DEPLOY_SSH_PORT" && test -n "$DEPLOY_USER" && test -n "$BACKEND_REMOTE_DIR"
           ssh -i "$RUNNER_TEMP/savegeo-deploy-key" -p "$DEPLOY_SSH_PORT" \
             -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/savegeo-known-hosts" \
-            "$DEPLOY_USER@$DEPLOY_HOST" "cd '$BACKEND_REMOTE_DIR' && bash scripts/restore_drill.sh"
+            "$DEPLOY_USER@$DEPLOY_HOST" "cd '$BACKEND_REMOTE_DIR' && SAVEGEO_BACKUP_ENV_FILE=.env.backup bash scripts/restore_drill.sh"

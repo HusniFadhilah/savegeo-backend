@@ -13,13 +13,25 @@ for command in age aws docker jq sha256sum python3; do
 done
 [[ -f "$SAVEGEO_BACKUP_AGE_IDENTITY_FILE" && ! -L "$SAVEGEO_BACKUP_AGE_IDENTITY_FILE" ]] || { echo "Age identity file is missing or unsafe." >&2; exit 2; }
 [[ "$(stat -c '%a' "$SAVEGEO_BACKUP_AGE_IDENTITY_FILE")" == "600" ]] || { echo "Age identity file must have mode 600." >&2; exit 2; }
-aws sts get-caller-identity >/dev/null
-
 bucket_prefix="${SAVEGEO_BACKUP_S3_URI#s3://}"
 bucket="${bucket_prefix%%/*}"
 key_prefix="${bucket_prefix#*/}"
 key_prefix="${key_prefix%/}/"
-manifest_key="$(aws s3api list-objects-v2 --bucket "$bucket" --prefix "$key_prefix" --query 'sort_by(Contents[?ends_with(Key, `.manifest.json`)], &LastModified)[-1].Key' --output text)"
+if [[ -n "${SAVEGEO_BACKUP_S3_ENDPOINT_URL:-}" ]]; then
+  : "${SAVEGEO_BACKUP_S3_ACCESS_KEY_ID:?Set the local S3 access key in the backup environment}"
+  : "${SAVEGEO_BACKUP_S3_SECRET_ACCESS_KEY:?Set the local S3 secret key in the backup environment}"
+  export AWS_ACCESS_KEY_ID="$SAVEGEO_BACKUP_S3_ACCESS_KEY_ID"
+  export AWS_SECRET_ACCESS_KEY="$SAVEGEO_BACKUP_S3_SECRET_ACCESS_KEY"
+  export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
+  export AWS_EC2_METADATA_DISABLED=true
+  [[ -z "${SAVEGEO_BACKUP_AWS_CONFIG_FILE:-}" ]] || export AWS_CONFIG_FILE="$SAVEGEO_BACKUP_AWS_CONFIG_FILE"
+  aws_backup() { aws --endpoint-url "$SAVEGEO_BACKUP_S3_ENDPOINT_URL" "$@"; }
+  aws_backup s3api head-bucket --bucket "$bucket" >/dev/null
+else
+  aws_backup() { aws "$@"; }
+  aws sts get-caller-identity >/dev/null
+fi
+manifest_key="$(aws_backup s3api list-objects-v2 --bucket "$bucket" --prefix "$key_prefix" --query 'sort_by(Contents[?ends_with(Key, `.manifest.json`)], &LastModified)[-1].Key' --output text)"
 [[ -n "$manifest_key" && "$manifest_key" != None ]] || { echo "No backup manifest found at $SAVEGEO_BACKUP_S3_URI." >&2; exit 4; }
 
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/savegeo-restore-drill.XXXXXX")"
@@ -29,10 +41,10 @@ cleanup() {
   rm -rf -- "$tmp_dir"
 }
 trap cleanup EXIT
-aws s3 cp "s3://${bucket}/${manifest_key}" "$tmp_dir/manifest.json" --only-show-errors
+aws_backup s3 cp "s3://${bucket}/${manifest_key}" "$tmp_dir/manifest.json" --only-show-errors
 db_key="$(jq -er '.database.key' "$tmp_dir/manifest.json")"
 expected_db_sha="$(jq -er '.database.sha256_encrypted' "$tmp_dir/manifest.json")"
-aws s3 cp "s3://${bucket}/${db_key}" "$tmp_dir/database.dump.age" --only-show-errors
+aws_backup s3 cp "s3://${bucket}/${db_key}" "$tmp_dir/database.dump.age" --only-show-errors
 actual_db_sha="$(sha256sum "$tmp_dir/database.dump.age" | awk '{print $1}')"
 [[ "$actual_db_sha" == "$expected_db_sha" ]] || { echo "Encrypted database checksum mismatch." >&2; exit 5; }
 docker run -d --rm --name "$container" --network none -e POSTGRES_PASSWORD=restore-drill-only "$POSTGRES_IMAGE" >/dev/null
@@ -53,7 +65,7 @@ evidence_state="$(jq -r '.evidence.state' "$tmp_dir/manifest.json")"
 if [[ "$evidence_state" == "present" ]]; then
   evidence_key="$(jq -er '.evidence.key' "$tmp_dir/manifest.json")"
   expected_evidence_sha="$(jq -er '.evidence.sha256_encrypted' "$tmp_dir/manifest.json")"
-  aws s3 cp "s3://${bucket}/${evidence_key}" "$tmp_dir/evidence.tar.gz.age" --only-show-errors
+  aws_backup s3 cp "s3://${bucket}/${evidence_key}" "$tmp_dir/evidence.tar.gz.age" --only-show-errors
   actual_evidence_sha="$(sha256sum "$tmp_dir/evidence.tar.gz.age" | awk '{print $1}')"
   [[ "$actual_evidence_sha" == "$expected_evidence_sha" ]] || { echo "Encrypted evidence checksum mismatch." >&2; exit 7; }
   age -d -i "$SAVEGEO_BACKUP_AGE_IDENTITY_FILE" "$tmp_dir/evidence.tar.gz.age" > "$tmp_dir/evidence.tar.gz"
@@ -67,7 +79,7 @@ restored_data_entries=0
 if [[ "$data_state" == "present" ]]; then
   data_key="$(jq -er '.runtime_data.key' "$tmp_dir/manifest.json")"
   expected_data_sha="$(jq -er '.runtime_data.sha256_encrypted' "$tmp_dir/manifest.json")"
-  aws s3 cp "s3://${bucket}/${data_key}" "$tmp_dir/runtime-data.tar.gz.age" --only-show-errors
+  aws_backup s3 cp "s3://${bucket}/${data_key}" "$tmp_dir/runtime-data.tar.gz.age" --only-show-errors
   actual_data_sha="$(sha256sum "$tmp_dir/runtime-data.tar.gz.age" | awk '{print $1}')"
   [[ "$actual_data_sha" == "$expected_data_sha" ]] || { echo "Encrypted runtime data checksum mismatch." >&2; exit 8; }
   age -d -i "$SAVEGEO_BACKUP_AGE_IDENTITY_FILE" "$tmp_dir/runtime-data.tar.gz.age" > "$tmp_dir/runtime-data.tar.gz"

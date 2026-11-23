@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
-# Read only backup-related assignments from the Compose .env file. Never
-# source/eval that file: it is configuration data and must not execute shell.
+# Read only backup-related assignments from the private backup env file. Never
+# source/eval it: the file is configuration data and must not execute shell.
 backup_load_environment() {
   local env_file="${SAVEGEO_BACKUP_ENV_FILE:-.env}" assignment key encoded value
   [[ -f "$env_file" && ! -L "$env_file" ]] || return 0
@@ -10,7 +10,9 @@ backup_load_environment() {
     key="${assignment%%=*}"
     encoded="${assignment#*=}"
     case "$key" in
-      SAVEGEO_BACKUP_S3_URI|SAVEGEO_BACKUP_AGE_RECIPIENT|SAVEGEO_BACKUP_RETENTION_DAYS|\
+      SAVEGEO_BACKUP_S3_URI|SAVEGEO_BACKUP_S3_ENDPOINT_URL|SAVEGEO_BACKUP_S3_ACCESS_KEY_ID|\
+      SAVEGEO_BACKUP_S3_SECRET_ACCESS_KEY|SAVEGEO_BACKUP_AWS_CONFIG_FILE|\
+      SAVEGEO_BACKUP_AGE_RECIPIENT|SAVEGEO_BACKUP_RETENTION_DAYS|\
       SAVEGEO_BACKUP_COMPOSE_FILE|SAVEGEO_BACKUP_EVIDENCE_DIR|SAVEGEO_BACKUP_DATA_PATHS|\
       SAVEGEO_BACKUP_AGE_IDENTITY_FILE|SAVEGEO_RESTORE_POSTGRES_IMAGE|SAVEGEO_LOCAL_BACKUP_DIR)
         ;;
@@ -31,6 +33,10 @@ from pathlib import Path
 
 allowed = {
     "SAVEGEO_BACKUP_S3_URI",
+    "SAVEGEO_BACKUP_S3_ENDPOINT_URL",
+    "SAVEGEO_BACKUP_S3_ACCESS_KEY_ID",
+    "SAVEGEO_BACKUP_S3_SECRET_ACCESS_KEY",
+    "SAVEGEO_BACKUP_AWS_CONFIG_FILE",
     "SAVEGEO_BACKUP_AGE_RECIPIENT",
     "SAVEGEO_BACKUP_RETENTION_DAYS",
     "SAVEGEO_BACKUP_COMPOSE_FILE",

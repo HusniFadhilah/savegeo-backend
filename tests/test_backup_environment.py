@@ -20,6 +20,10 @@ def test_backup_environment_reads_allowlisted_values_without_executing_env(tmp_p
         "\n".join(
             [
                 'SAVEGEO_BACKUP_S3_URI="s3://savegeo-test/private prefix"',
+                'SAVEGEO_BACKUP_S3_ENDPOINT_URL="http://127.0.0.1:8333"',
+                "SAVEGEO_BACKUP_S3_ACCESS_KEY_ID=test-access-key",
+                "SAVEGEO_BACKUP_S3_SECRET_ACCESS_KEY='$(touch ignored-secret-marker)'",
+                'SAVEGEO_BACKUP_AWS_CONFIG_FILE="/tmp/aws-config-test"',
                 f"SAVEGEO_BACKUP_DATA_PATHS='var/saved_models $(touch {marker})'",
                 "SAVEGEO_BACKUP_RETENTION_DAYS=90",
                 "UNTRUSTED_VALUE=$(touch ignored-marker)",
@@ -42,7 +46,7 @@ def test_backup_environment_reads_allowlisted_values_without_executing_env(tmp_p
         [
             bash,
             "-c",
-            'source "$1"; printf "%s\\n" "$SAVEGEO_BACKUP_S3_URI" "$SAVEGEO_BACKUP_DATA_PATHS" "$SAVEGEO_BACKUP_RETENTION_DAYS"',
+            'source "$1"; printf "%s\\n" "$SAVEGEO_BACKUP_S3_URI" "$SAVEGEO_BACKUP_DATA_PATHS" "$SAVEGEO_BACKUP_RETENTION_DAYS" "$SAVEGEO_BACKUP_S3_ENDPOINT_URL" "$SAVEGEO_BACKUP_S3_ACCESS_KEY_ID" "$SAVEGEO_BACKUP_S3_SECRET_ACCESS_KEY" "$SAVEGEO_BACKUP_AWS_CONFIG_FILE"',
             "backup-environment-test",
             str(helper),
         ],
@@ -57,6 +61,11 @@ def test_backup_environment_reads_allowlisted_values_without_executing_env(tmp_p
         "s3://savegeo-test/private prefix",
         f"var/saved_models $(touch {marker})",
         "30",
+        "http://127.0.0.1:8333",
+        "test-access-key",
+        "$(touch ignored-secret-marker)",
+        "/tmp/aws-config-test",
     ]
     assert not marker.exists()
     assert not (tmp_path / "ignored-marker").exists()
+    assert not (tmp_path / "ignored-secret-marker").exists()

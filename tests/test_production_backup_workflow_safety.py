@@ -45,3 +45,16 @@ def test_remote_restore_drill_transfers_and_cleans_up_verification_helper() -> N
     assert "scripts/select_verified_backup.py" in workflow
     assert "SAVEGEO_BACKUP_SELECTOR='$remote_selector'" in workflow
     assert r'rm -f -- \"$remote_script\" \"$remote_selector\"' in workflow
+
+
+def test_local_s3_backup_workflows_load_separate_secrets_and_run_weekly() -> None:
+    backup = (ROOT / ".github/workflows/backup-production.yml").read_text(
+        encoding="utf-8"
+    )
+    restore = (ROOT / ".github/workflows/restore-drill-production.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'cron: "17 2 * * 0"' in backup
+    assert "SAVEGEO_BACKUP_ENV_FILE=.env.backup bash scripts/backup_offsite.sh" in backup
+    assert "SAVEGEO_BACKUP_ENV_FILE=.env.backup bash scripts/restore_drill.sh" in restore

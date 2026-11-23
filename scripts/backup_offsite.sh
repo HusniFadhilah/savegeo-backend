@@ -20,7 +20,24 @@ bucket="${uri_path%%/*}"
 object_prefix="${uri_path#*/}"
 [[ -n "$bucket" && -n "$object_prefix" && "$object_prefix" != "$uri_path" && "$object_prefix" != *".."* ]] || { echo "Backup URI must contain a bucket and non-empty safe prefix." >&2; exit 2; }
 [[ "$RETENTION_DAYS" =~ ^[0-9]+$ ]] && (( RETENTION_DAYS >= 30 )) || { echo "Retention must be an integer of at least 30 days." >&2; exit 2; }
-aws sts get-caller-identity >/dev/null
+if [[ -n "${SAVEGEO_BACKUP_S3_ENDPOINT_URL:-}" ]]; then
+  : "${SAVEGEO_BACKUP_S3_ACCESS_KEY_ID:?Set the local S3 access key in the backup environment}"
+  : "${SAVEGEO_BACKUP_S3_SECRET_ACCESS_KEY:?Set the local S3 secret key in the backup environment}"
+  export AWS_ACCESS_KEY_ID="$SAVEGEO_BACKUP_S3_ACCESS_KEY_ID"
+  export AWS_SECRET_ACCESS_KEY="$SAVEGEO_BACKUP_S3_SECRET_ACCESS_KEY"
+  export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
+  export AWS_EC2_METADATA_DISABLED=true
+  [[ -z "${SAVEGEO_BACKUP_AWS_CONFIG_FILE:-}" ]] || export AWS_CONFIG_FILE="$SAVEGEO_BACKUP_AWS_CONFIG_FILE"
+  aws_backup() { aws --endpoint-url "$SAVEGEO_BACKUP_S3_ENDPOINT_URL" "$@"; }
+  if ! aws_backup s3api head-bucket --bucket "$bucket" >/dev/null 2>&1; then
+    aws_backup s3api create-bucket --bucket "$bucket" --region "$AWS_DEFAULT_REGION"
+  fi
+  sse_args=()
+else
+  aws_backup() { aws "$@"; }
+  aws sts get-caller-identity >/dev/null
+  sse_args=(--sse AES256)
+fi
 docker compose -f "$COMPOSE_FILE" ps --status running db | grep -q db || { echo "Production database container is not running." >&2; exit 3; }
 
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/savegeo-backup.XXXXXX")"
@@ -33,7 +50,7 @@ docker compose -f "$COMPOSE_FILE" exec -T db pg_dump -U savegeo -Fc savegeo \
   | age -r "$SAVEGEO_BACKUP_AGE_RECIPIENT" -o "$tmp_dir/database.dump.age" -
 db_sha="$(sha256sum "$tmp_dir/database.dump.age" | awk '{print $1}')"
 db_key="${key_base}.dump.age"
-aws s3 cp "$tmp_dir/database.dump.age" "$db_key" --sse AES256 --only-show-errors
+aws_backup s3 cp "$tmp_dir/database.dump.age" "$db_key" "${sse_args[@]}" --only-show-errors
 
 evidence_state="absent"
 evidence_key=""
@@ -43,7 +60,7 @@ if [[ -d "$EVIDENCE_DIR" ]] && find "$EVIDENCE_DIR" -type f -print -quit | grep 
     | age -r "$SAVEGEO_BACKUP_AGE_RECIPIENT" -o "$tmp_dir/evidence.tar.gz.age" -
   evidence_sha="$(sha256sum "$tmp_dir/evidence.tar.gz.age" | awk '{print $1}')"
   evidence_key="${key_base}.evidence.tar.gz.age"
-  aws s3 cp "$tmp_dir/evidence.tar.gz.age" "$evidence_key" --sse AES256 --only-show-errors
+  aws_backup s3 cp "$tmp_dir/evidence.tar.gz.age" "$evidence_key" "${sse_args[@]}" --only-show-errors
   evidence_state="present"
 fi
 
@@ -61,7 +78,7 @@ if (( ${#archive_paths[@]} )); then
     | age -r "$SAVEGEO_BACKUP_AGE_RECIPIENT" -o "$tmp_dir/runtime-data.tar.gz.age" -
   data_sha="$(sha256sum "$tmp_dir/runtime-data.tar.gz.age" | awk '{print $1}')"
   data_key="${key_base}.runtime-data.tar.gz.age"
-  aws s3 cp "$tmp_dir/runtime-data.tar.gz.age" "$data_key" --sse AES256 --only-show-errors
+  aws_backup s3 cp "$tmp_dir/runtime-data.tar.gz.age" "$data_key" "${sse_args[@]}" --only-show-errors
   data_state="present"
 fi
 
@@ -76,15 +93,15 @@ print(json.dumps({"schema":"savegeo-offsite-backup-v1","created_at_utc":stamp,"c
   sort_keys=True,separators=(",",":")))
 PY
 manifest_key="${key_base}.manifest.json"
-aws s3 cp "$tmp_dir/manifest.json" "$manifest_key" --sse AES256 --content-type application/json --only-show-errors
+aws_backup s3 cp "$tmp_dir/manifest.json" "$manifest_key" "${sse_args[@]}" --content-type application/json --only-show-errors
 
 # Merge only this named lifecycle rule so existing bucket retention policies remain intact.
 rule_id="savegeo-backup-retention-v1"
-rules="$(aws s3api get-bucket-lifecycle-configuration --bucket "$bucket" --output json 2>/dev/null | jq -c '.Rules // []' || printf '[]')"
+rules="$(aws_backup s3api get-bucket-lifecycle-configuration --bucket "$bucket" --output json 2>/dev/null | jq -c '.Rules // []' || printf '[]')"
 merged="$(jq --arg id "$rule_id" --arg prefix "${object_prefix%/}/" --argjson days "$RETENTION_DAYS" \
   'map(select(.ID != $id)) + [{"ID":$id,"Filter":{"Prefix":$prefix},"Status":"Enabled","Expiration":{"Days":$days},"NoncurrentVersionExpiration":{"NoncurrentDays":$days},"AbortIncompleteMultipartUpload":{"DaysAfterInitiation":7}}]' <<< "$rules")"
-aws s3api put-bucket-lifecycle-configuration --bucket "$bucket" --lifecycle-configuration "$(jq -cn --argjson Rules "$merged" '{Rules:$Rules}')"
-aws s3api put-bucket-versioning --bucket "$bucket" --versioning-configuration Status=Enabled
+aws_backup s3api put-bucket-lifecycle-configuration --bucket "$bucket" --lifecycle-configuration "$(jq -cn --argjson Rules "$merged" '{Rules:$Rules}')"
+aws_backup s3api put-bucket-versioning --bucket "$bucket" --versioning-configuration Status=Enabled
 printf 'Encrypted SAVEGEO backup uploaded: %s (database sha256=%s, evidence=%s, retention=%s days)\n' \
   "$manifest_key" "$db_sha" "$evidence_state" "$RETENTION_DAYS"
 printf 'Persistent application data archive: %s\n' "$data_state"
