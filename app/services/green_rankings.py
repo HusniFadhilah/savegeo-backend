@@ -844,7 +844,10 @@ def run_batch(data):
         try:
             candidates = []
             # Large province polygons need smaller requests than village boundaries.
-            batch_size = {"province": 1, "city": 4, "district": 10, "village": 20}[config["level"]]
+            # Municipalities can be very large polygons. Grouping four in one
+            # Earth Engine reduction often exceeds the bounded HTTPS timeout;
+            # isolate them so one costly region does not block its neighbors.
+            batch_size = {"province": 1, "city": 1, "district": 10, "village": 20}[config["level"]]
             for _ in range(batch_size):
                 candidate = next_region(stack, config)
                 if candidate is None:
