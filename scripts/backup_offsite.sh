@@ -43,14 +43,13 @@ docker compose -f "$COMPOSE_FILE" ps --status running db | grep -q db || { echo 
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/savegeo-backup.XXXXXX")"
 trap 'rm -rf -- "$tmp_dir"' EXIT
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
-prefix="${SAVEGEO_BACKUP_S3_URI%/}/"
-key_base="${prefix}savegeo_${stamp}"
+key_base="${object_prefix%/}/savegeo_${stamp}"
 
 docker compose -f "$COMPOSE_FILE" exec -T db pg_dump -U savegeo -Fc savegeo \
   | age -r "$SAVEGEO_BACKUP_AGE_RECIPIENT" -o "$tmp_dir/database.dump.age" -
 db_sha="$(sha256sum "$tmp_dir/database.dump.age" | awk '{print $1}')"
 db_key="${key_base}.dump.age"
-aws_backup s3 cp "$tmp_dir/database.dump.age" "$db_key" "${sse_args[@]}" --only-show-errors
+aws_backup s3 cp "$tmp_dir/database.dump.age" "s3://${bucket}/${db_key}" "${sse_args[@]}" --only-show-errors
 
 evidence_state="absent"
 evidence_key=""
@@ -69,7 +68,7 @@ if [[ -d "$EVIDENCE_DIR" && ! -L "$EVIDENCE_DIR" ]] && find "$EVIDENCE_DIR" -typ
     | age -r "$SAVEGEO_BACKUP_AGE_RECIPIENT" -o "$tmp_dir/evidence.tar.gz.age" -
   evidence_sha="$(sha256sum "$tmp_dir/evidence.tar.gz.age" | awk '{print $1}')"
   evidence_key="${key_base}.evidence.tar.gz.age"
-  aws_backup s3 cp "$tmp_dir/evidence.tar.gz.age" "$evidence_key" "${sse_args[@]}" --only-show-errors
+  aws_backup s3 cp "$tmp_dir/evidence.tar.gz.age" "s3://${bucket}/${evidence_key}" "${sse_args[@]}" --only-show-errors
   evidence_state="present"
 fi
 
@@ -93,7 +92,7 @@ if (( ${#archive_paths[@]} )); then
     | age -r "$SAVEGEO_BACKUP_AGE_RECIPIENT" -o "$tmp_dir/runtime-data.tar.gz.age" -
   data_sha="$(sha256sum "$tmp_dir/runtime-data.tar.gz.age" | awk '{print $1}')"
   data_key="${key_base}.runtime-data.tar.gz.age"
-  aws_backup s3 cp "$tmp_dir/runtime-data.tar.gz.age" "$data_key" "${sse_args[@]}" --only-show-errors
+  aws_backup s3 cp "$tmp_dir/runtime-data.tar.gz.age" "s3://${bucket}/${data_key}" "${sse_args[@]}" --only-show-errors
   data_state="present"
 fi
 
@@ -108,7 +107,7 @@ print(json.dumps({"schema":"savegeo-offsite-backup-v1","created_at_utc":stamp,"c
   sort_keys=True,separators=(",",":")))
 PY
 manifest_key="${key_base}.manifest.json"
-aws_backup s3 cp "$tmp_dir/manifest.json" "$manifest_key" "${sse_args[@]}" --content-type application/json --only-show-errors
+aws_backup s3 cp "$tmp_dir/manifest.json" "s3://${bucket}/${manifest_key}" "${sse_args[@]}" --content-type application/json --only-show-errors
 
 # Merge only this named lifecycle rule so existing bucket retention policies remain intact.
 rule_id="savegeo-backup-retention-v1"
@@ -118,5 +117,5 @@ merged="$(jq --arg id "$rule_id" --arg prefix "${object_prefix%/}/" --argjson da
 aws_backup s3api put-bucket-lifecycle-configuration --bucket "$bucket" --lifecycle-configuration "$(jq -cn --argjson Rules "$merged" '{Rules:$Rules}')"
 aws_backup s3api put-bucket-versioning --bucket "$bucket" --versioning-configuration Status=Enabled
 printf 'Encrypted SAVEGEO backup uploaded: %s (database sha256=%s, evidence=%s, retention=%s days)\n' \
-  "$manifest_key" "$db_sha" "$evidence_state" "$RETENTION_DAYS"
+  "s3://${bucket}/${manifest_key}" "$db_sha" "$evidence_state" "$RETENTION_DAYS"
 printf 'Persistent application data archive: %s\n' "$data_state"

@@ -87,3 +87,14 @@ def test_offsite_backup_reads_private_runtime_data_in_isolated_read_only_contain
     assert '[[ ! -L "$path" ]]' in script
     assert "--volume \"$PWD/var:/source/var:ro\"" in script
     assert "postgres:16-alpine tar -C /source -czf - \"${archive_paths[@]}\"" in script
+
+
+def test_backup_manifest_uses_object_keys_and_restore_accepts_legacy_s3_uris() -> None:
+    backup = (ROOT / "scripts/backup_offsite.sh").read_text(encoding="utf-8")
+    restore = (ROOT / "scripts/restore_drill.sh").read_text(encoding="utf-8")
+
+    assert 'key_base="${object_prefix%/}/savegeo_${stamp}"' in backup
+    assert '"s3://${bucket}/${db_key}"' in backup
+    assert 'normalize_object_key()' in restore
+    assert 'if [[ "$value" == s3://* ]]' in restore
+    assert '[[ "$value" == "$key_prefix"*' in restore

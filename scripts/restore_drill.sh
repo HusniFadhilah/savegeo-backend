@@ -42,7 +42,24 @@ cleanup() {
 }
 trap cleanup EXIT
 aws_backup s3 cp "s3://${bucket}/${manifest_key}" "$tmp_dir/manifest.json" --only-show-errors
-db_key="$(jq -er '.database.key' "$tmp_dir/manifest.json")"
+normalize_object_key() {
+  local value="$1"
+  if [[ "$value" == s3://* ]]; then
+    local uri_path="${value#s3://}"
+    local uri_bucket="${uri_path%%/*}"
+    [[ "$uri_bucket" == "$bucket" && "$uri_path" == */* ]] || {
+      echo "Backup manifest references an unexpected S3 bucket." >&2
+      return 1
+    }
+    value="${uri_path#*/}"
+  fi
+  [[ "$value" == "$key_prefix"* && "/$value/" != *"/../"* ]] || {
+    echo "Backup manifest object key is outside the configured backup prefix." >&2
+    return 1
+  }
+  printf '%s' "$value"
+}
+db_key="$(normalize_object_key "$(jq -er '.database.key' "$tmp_dir/manifest.json")")"
 expected_db_sha="$(jq -er '.database.sha256_encrypted' "$tmp_dir/manifest.json")"
 aws_backup s3 cp "s3://${bucket}/${db_key}" "$tmp_dir/database.dump.age" --only-show-errors
 actual_db_sha="$(sha256sum "$tmp_dir/database.dump.age" | awk '{print $1}')"
@@ -63,7 +80,7 @@ alembic_version="$(docker exec "$container" psql -U postgres -d savegeo_restore_
 
 evidence_state="$(jq -r '.evidence.state' "$tmp_dir/manifest.json")"
 if [[ "$evidence_state" == "present" ]]; then
-  evidence_key="$(jq -er '.evidence.key' "$tmp_dir/manifest.json")"
+  evidence_key="$(normalize_object_key "$(jq -er '.evidence.key' "$tmp_dir/manifest.json")")"
   expected_evidence_sha="$(jq -er '.evidence.sha256_encrypted' "$tmp_dir/manifest.json")"
   aws_backup s3 cp "s3://${bucket}/${evidence_key}" "$tmp_dir/evidence.tar.gz.age" --only-show-errors
   actual_evidence_sha="$(sha256sum "$tmp_dir/evidence.tar.gz.age" | awk '{print $1}')"
@@ -77,7 +94,7 @@ fi
 data_state="$(jq -r '.runtime_data.state // "absent"' "$tmp_dir/manifest.json")"
 restored_data_entries=0
 if [[ "$data_state" == "present" ]]; then
-  data_key="$(jq -er '.runtime_data.key' "$tmp_dir/manifest.json")"
+  data_key="$(normalize_object_key "$(jq -er '.runtime_data.key' "$tmp_dir/manifest.json")")"
   expected_data_sha="$(jq -er '.runtime_data.sha256_encrypted' "$tmp_dir/manifest.json")"
   aws_backup s3 cp "s3://${bucket}/${data_key}" "$tmp_dir/runtime-data.tar.gz.age" --only-show-errors
   actual_data_sha="$(sha256sum "$tmp_dir/runtime-data.tar.gz.age" | awk '{print $1}')"
