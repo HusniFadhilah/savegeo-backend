@@ -217,7 +217,9 @@ def test_earth_engine_transport_uses_pinned_public_http_and_httplib2_contract(mo
 
     assert response.status == 200
     assert body == b'{"ok":true}'
-    assert calls["timeout"] == 60
+    assert calls["timeout"] == 120
+    assert calls["max_timeout"] == 180.0
+    assert calls["read_timeout"] == 120.0
     assert calls["max_bytes"] == transport.MAX_RESPONSE_BYTES
     assert calls["max_request_bytes"] == transport.MAX_REQUEST_BYTES
     assert calls["headers"] == {

@@ -198,9 +198,11 @@ class PublicHTTPS:
 
     def request(self, method: str, url: str, *, params=None, data=None, json_body=None, raw_body=None, timeout=30,
                 allow_redirects=False, allow_redirect_status=False,
-                max_bytes=16 * 1024 * 1024, max_request_bytes=16 * 1024 * 1024, headers=None) -> requests.Response:
+                max_bytes=16 * 1024 * 1024, max_request_bytes=16 * 1024 * 1024, headers=None,
+                max_timeout=60.0, read_timeout=10.0) -> requests.Response:
         _, hostname = self._validated_url(url)
-        seconds = self._timeout_seconds(timeout)
+        seconds = self._timeout_seconds(timeout, maximum=min(max(float(max_timeout), 1.0), 180.0))
+        read_seconds = min(max(float(read_timeout), 1.0), 120.0)
         deadline = time.monotonic() + seconds
         method = method.upper()
         attempts = 2 if method in {"GET", "HEAD"} else 1
@@ -220,6 +222,7 @@ class PublicHTTPS:
                     json_body=json_body,
                     raw_body=raw_body,
                     timeout=remaining,
+                    read_timeout=read_seconds,
                     allow_redirects=allow_redirects,
                     allow_redirect_status=allow_redirect_status,
                     max_bytes=max_bytes,
@@ -250,7 +253,8 @@ class PublicHTTPS:
 
     def _request_once(self, method: str, url: str, *, params=None, data=None, json_body=None, raw_body=None, timeout=30,
                 allow_redirects=False, allow_redirect_status=False,
-                max_bytes=16 * 1024 * 1024, max_request_bytes=16 * 1024 * 1024, headers=None) -> requests.Response:
+                max_bytes=16 * 1024 * 1024, max_request_bytes=16 * 1024 * 1024, headers=None,
+                read_timeout=10.0) -> requests.Response:
         parsed, hostname = self._validated_url(url)
         if allow_redirects:
             raise ValueError("Only direct public HTTPS destinations are allowed")
@@ -285,7 +289,7 @@ class PublicHTTPS:
         upstream = None
         try:
             upstream = pool.urlopen(method, target, body=body, headers=headers,
-                timeout=urllib3.Timeout(connect=min(seconds, 5), read=min(seconds, 10), total=seconds),
+                timeout=urllib3.Timeout(connect=min(seconds, 5), read=min(seconds, read_timeout), total=seconds),
                 redirect=False, retries=False, preload_content=False)
             if 300 <= upstream.status < 400 and not allow_redirect_status:
                 raise ValueError("Public HTTPS redirects are not allowed")

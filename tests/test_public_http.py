@@ -5,6 +5,29 @@ from app.core import public_http as public_http_module
 public_http = public_http_module.public_http
 
 
+def test_public_request_forwards_explicit_bounded_timeout_limits(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(public_http_module, "_CIRCUITS", {})
+    monkeypatch.setattr(
+        public_http,
+        "_request_once",
+        lambda *args, **kwargs: (captured.update(kwargs), SimpleNamespace(status_code=200))[1],
+    )
+    monkeypatch.setattr(public_http, "_circuit_result", lambda *_args, **_kwargs: None)
+
+    public_http.request(
+        "POST",
+        "https://earthengine.googleapis.com/v1/compute",
+        raw_body=b"{}",
+        timeout=180,
+        max_timeout=180,
+        read_timeout=120,
+    )
+
+    assert 179 < captured["timeout"] <= 180
+    assert captured["read_timeout"] == 120
+
+
 def test_public_get_retries_transient_gateway_failure_once(monkeypatch):
     calls = []
     circuit_results = []

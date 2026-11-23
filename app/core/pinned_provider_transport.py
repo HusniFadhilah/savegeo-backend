@@ -224,8 +224,8 @@ class BoundedEarthEngineTransport:
     MAX_RESPONSE_BYTES = 64 * 1024 * 1024
     MAX_REQUEST_BYTES = 16 * 1024 * 1024
 
-    def __init__(self, *, timeout: float = 60) -> None:
-        self.timeout = min(max(float(timeout), 1.0), 60.0)
+    def __init__(self, *, timeout: float = 180) -> None:
+        self.timeout = min(max(float(timeout), 1.0), 180.0)
 
     def request(self, uri: str, method: str = "GET", body=None, headers=None,
                 redirections=None, connection_type=None):
@@ -255,6 +255,8 @@ class BoundedEarthEngineTransport:
                 raw_body=body if body else None,
                 headers=safe_headers,
                 timeout=self.timeout,
+                max_timeout=180.0,
+                read_timeout=120.0,
                 max_bytes=self.MAX_RESPONSE_BYTES,
                 max_request_bytes=self.MAX_REQUEST_BYTES,
             )
