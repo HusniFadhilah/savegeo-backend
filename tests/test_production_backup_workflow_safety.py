@@ -78,3 +78,12 @@ def test_offsite_backup_reads_private_evidence_in_isolated_read_only_container()
     assert "--cap-drop ALL --cap-add DAC_READ_SEARCH" in script
     assert '"$evidence_parent:/source:ro"' in script
     assert "postgres:16-alpine tar -C /source -czf - \"$evidence_name\"" in script
+
+
+def test_offsite_backup_reads_private_runtime_data_in_isolated_read_only_container() -> None:
+    script = (ROOT / "scripts/backup_offsite.sh").read_text(encoding="utf-8")
+
+    assert '"$path" == var/*' in script
+    assert '[[ ! -L "$path" ]]' in script
+    assert "--volume \"$PWD/var:/source/var:ro\"" in script
+    assert "postgres:16-alpine tar -C /source -czf - \"${archive_paths[@]}\"" in script

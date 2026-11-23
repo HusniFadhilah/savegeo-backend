@@ -80,10 +80,16 @@ read -r -a data_paths <<< "$DATA_PATHS"
 archive_paths=()
 for path in "${data_paths[@]}"; do
   [[ "$path" == var/* && "/$path/" != *"/../"* ]] || { echo "Backup data paths must remain inside the application var directory." >&2; exit 2; }
+  [[ ! -L "$path" ]] || { echo "Refusing to archive a symlink in persistent runtime data: $path" >&2; exit 2; }
   [[ -e "$path" ]] && archive_paths+=("$path")
 done
 if (( ${#archive_paths[@]} )); then
-  tar -C . -czf - "${archive_paths[@]}" \
+  # Runtime files can be owned by service UIDs with mode 0600. Read only the
+  # var directory in an isolated container with DAC read/search override.
+  docker run --rm --network none --read-only --user 0:0 \
+    --cap-drop ALL --cap-add DAC_READ_SEARCH \
+    --volume "$PWD/var:/source/var:ro" \
+    postgres:16-alpine tar -C /source -czf - "${archive_paths[@]}" \
     | age -r "$SAVEGEO_BACKUP_AGE_RECIPIENT" -o "$tmp_dir/runtime-data.tar.gz.age" -
   data_sha="$(sha256sum "$tmp_dir/runtime-data.tar.gz.age" | awk '{print $1}')"
   data_key="${key_base}.runtime-data.tar.gz.age"
