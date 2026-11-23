@@ -247,6 +247,7 @@ jobs:
           rsync -az --delete \
             --exclude '.git/' \
             --exclude '.env' \
+            --exclude '.env.backup' \
             --exclude 'var/' \
             --exclude '__pycache__/' \
             --exclude '.pytest_cache/' \
@@ -394,6 +395,13 @@ jobs:
             "$DEPLOY_USER@$DEPLOY_HOST:$BACKEND_REMOTE_DIR/var/build-metadata.json"
           ssh -o BatchMode=yes -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p "$DEPLOY_SSH_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
             "BACKEND_REMOTE_DIR='$BACKEND_REMOTE_DIR' BACKEND_HEALTH_URL='$BACKEND_HEALTH_URL' SAVEGEO_PRODUCT_VERSION='$SAVEGEO_PRODUCT_VERSION' SAVEGEO_BUILD_NUMBER='$SAVEGEO_BUILD_NUMBER' SAVEGEO_RUN_ATTEMPT='$SAVEGEO_RUN_ATTEMPT' SAVEGEO_COMMIT_SHA='$SAVEGEO_COMMIT_SHA' SAVEGEO_REF='$SAVEGEO_REF' SAVEGEO_BUILD_TIME_UTC='$SAVEGEO_BUILD_TIME_UTC' SAVEGEO_WORKFLOW_NAME='$SAVEGEO_WORKFLOW_NAME' SAVEGEO_WORKFLOW_RUN_ID='$SAVEGEO_WORKFLOW_RUN_ID' SAVEGEO_WORKFLOW_RUN_URL='$SAVEGEO_WORKFLOW_RUN_URL' SAVEGEO_DEPLOYMENT_ENVIRONMENT='$SAVEGEO_DEPLOYMENT_ENVIRONMENT' bash '$BACKEND_REMOTE_DIR/var/deploy-backend.sh'"
+
+      - name: Provision encrypted local backup storage
+        run: |
+          set -euo pipefail
+          ssh -o BatchMode=yes -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p "$DEPLOY_SSH_PORT" \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            "cd '$BACKEND_REMOTE_DIR' && if ! command -v age >/dev/null || ! command -v aws >/dev/null || ! command -v jq >/dev/null; then bash scripts/install_backup_host_dependencies.sh; fi && bash scripts/setup_local_s3_backup_storage.sh"
 
       - name: Record production deployment
         run: |

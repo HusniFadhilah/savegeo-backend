@@ -58,3 +58,13 @@ def test_local_s3_backup_workflows_load_separate_secrets_and_run_weekly() -> Non
     assert 'cron: "17 2 * * 0"' in backup
     assert "SAVEGEO_BACKUP_ENV_FILE=.env.backup bash scripts/backup_offsite.sh" in backup
     assert "SAVEGEO_BACKUP_ENV_FILE=.env.backup bash scripts/restore_drill.sh" in restore
+
+
+def test_production_deploy_preserves_and_provisions_local_backup_storage() -> None:
+    workflow = (ROOT / ".github/workflows/deploy-production.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "--exclude '.env.backup'" in workflow
+    assert "- name: Provision encrypted local backup storage" in workflow
+    assert "bash scripts/setup_local_s3_backup_storage.sh" in workflow
