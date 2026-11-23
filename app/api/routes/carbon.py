@@ -379,6 +379,7 @@ def carbon_reference_tile(
     year: int | None = Query(default=None),
     min: float | None = Query(default=None),
     max: float | None = Query(default=None),
+    palette: str | None = Query(default=None),
 ):
     """Serve XYZ tiles for public COG carbon references (Hansen/ESA/CTrees)."""
     from app.providers.local_raster_provider import record_carbon_tile_error, render_carbon_reference_tile
@@ -387,8 +388,20 @@ def carbon_reference_tile(
     meta = get_external_carbon_meta(dataset_key)
     if not meta or meta.get("ingestion_method") != "cog_rasterio":
         raise HTTPException(status_code=404, detail="Dataset tidak memiliki tile COG publik")
+    parsed_palette = None
+    if palette:
+        colors = [color.strip().lstrip("#") for color in palette.split(",")]
+        if not 2 <= len(colors) <= 12 or any(
+            len(color) != 6 or any(char not in "0123456789abcdefABCDEF" for char in color)
+            for color in colors
+        ):
+            raise HTTPException(status_code=400, detail="Palet warna tidak valid")
+        parsed_palette = colors
     try:
-        content = render_carbon_reference_tile(dataset_key, z, x, y, year=year, vis_min=min, vis_max=max)
+        content = render_carbon_reference_tile(
+            dataset_key, z, x, y, year=year, vis_min=min, vis_max=max,
+            vis_palette=parsed_palette,
+        )
     except Exception as exc:  # noqa: BLE001 - return a stable tile response, log details server-side
         record_carbon_tile_error()
         logger.warning("Carbon reference tile failed for %s/%s/%s/%s: %s", dataset_key, z, x, y, type(exc).__name__)

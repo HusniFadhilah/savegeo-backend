@@ -1062,11 +1062,15 @@ def analyze_carbon(db: Session, data: dict) -> dict:
     # client accidentally includes model_name, never enter model inference.
     if load_only:
         reference_only = True
-    vis_min = int(data.get("vis_min", config_service.get_analysis_defaults(db)["carbon_vis_min"]))
-    vis_max = int(data.get("vis_max", config_service.get_analysis_defaults(db)["carbon_vis_max"]))
-    vis_palette = data.get("vis_palette", config_service.get_analysis_defaults(db)["carbon_vis_palette"])
-    carbon_scale = int(data.get("scale", config_service.get_analysis_defaults(db)["carbon_scale"]))
-    auto_vis = bool(data.get("auto_vis", False))
+    analysis_defaults = config_service.get_analysis_defaults(db)
+    vis_min = int(data.get("vis_min", analysis_defaults["carbon_vis_min"]))
+    vis_max = int(data.get("vis_max", analysis_defaults["carbon_vis_max"]))
+    vis_palette = data.get("vis_palette", analysis_defaults["carbon_vis_palette"])
+    carbon_scale = int(data.get("scale", analysis_defaults["carbon_scale"]))
+    visualization_mode = str(data.get("auto_vis_mode") or "p2_98").lower()
+    if visualization_mode not in {"admin", "p2_98", "p5_95", "min_max"}:
+        visualization_mode = "p2_98"
+    auto_vis = bool(data.get("auto_vis", False)) and visualization_mode != "admin"
     match_reference_vis = bool(data.get("match_reference_vis", True))
     cloud_mask_technique = resolve_cloud_mask_technique(data.get("cloud_mask_technique"))
 
@@ -1400,6 +1404,25 @@ def analyze_carbon(db: Session, data: dict) -> dict:
 
     _compat_meta = model_compatibility.backfill_legacy_metadata(_compat_meta, inference_engine.model_name)
 
+    target_pool = dataset_info.get("target_pool") or _compat_meta.get("target_pool")
+    pool_key = {
+        "aboveground_biomass_carbon": "agb",
+        "belowground_biomass_carbon": "bgb",
+        "soil_organic_carbon": "soc",
+        "litter_carbon": "litter",
+        "deadwood_carbon": "deadwood",
+        "agb": "agb",
+        "bgb": "bgb",
+        "soc": "soc",
+        "litter": "litter",
+        "deadwood": "deadwood",
+    }.get(str(target_pool or "").lower())
+    pool_visualization = analysis_defaults["carbon_pool_visualization"].get(pool_key)
+    if pool_visualization:
+        vis_min = pool_visualization["min"]
+        vis_max = pool_visualization["max"]
+        vis_palette = pool_visualization["palette"]
+
     # Non-GEE-trained models (STAC/local-raster feature stacks, e.g. interaction terms
     # like NDVI_x_elevation) cannot be built server-side in GEE — CarbonInferenceEngine
     # would fail deep inside tile construction with a confusing missing-feature error.
@@ -1417,7 +1440,7 @@ def analyze_carbon(db: Session, data: dict) -> dict:
     model_compatibility.validate_model_dataset_compatibility(_compat_meta, reference_dataset, require_gee=False)
 
     is_gee_deployable = bool(_compat_meta.get("gee_deployable", False))
-    co2_factor = config_service.get_analysis_defaults(db)["carbon_co2_factor"]
+    co2_factor = analysis_defaults["carbon_co2_factor"]
     vis_params = {"min": vis_min, "max": vis_max, "palette": vis_palette}
 
     # Reference tile — branched: ArcGIS proxy URL, external sampled stats, or GEE tile
@@ -1573,7 +1596,7 @@ def analyze_carbon(db: Session, data: dict) -> dict:
         # the density map's color stretch across the rest of the AOI.
         include_percentiles = bool(data.get("include_percentiles", False)) or auto_vis
         if include_percentiles:
-            carbon_reducer = carbon_reducer.combine(ee.Reducer.percentile([2, 98]), "", True)
+            carbon_reducer = carbon_reducer.combine(ee.Reducer.percentile([2, 5, 95, 98]), "", True)
         try:
             carbon_stats = carbon_estimated.clip(roi_for_calculation).reduceRegion(
                 reducer=carbon_reducer,
@@ -1596,11 +1619,18 @@ def analyze_carbon(db: Session, data: dict) -> dict:
         _user_pinned_vis = ("vis_min" in data or "vis_max" in data) and not auto_vis
         _default_vis = vis_params
         if auto_vis and not _user_pinned_vis:
-            # Use the 2nd/98th percentile range for display; retain actual
-            # min/max in statistics and fall back to them if the percentile
-            # range is empty (for example, a constant-valued raster).
-            _est_min = carbon_stats.get("carbon_estimated_p2")
-            _est_max = carbon_stats.get("carbon_estimated_p98")
+            # Use a robust percentile stretch for display while retaining the
+            # actual min/max in statistics. The user can choose a stronger
+            # 5-95 contrast or the full data range from the map controls.
+            if visualization_mode == "min_max":
+                _est_min = carbon_stats.get("carbon_estimated_min")
+                _est_max = carbon_stats.get("carbon_estimated_max")
+            elif visualization_mode == "p5_95":
+                _est_min = carbon_stats.get("carbon_estimated_p5")
+                _est_max = carbon_stats.get("carbon_estimated_p95")
+            else:
+                _est_min = carbon_stats.get("carbon_estimated_p2")
+                _est_max = carbon_stats.get("carbon_estimated_p98")
             if _est_min is None or _est_max is None or _est_max <= _est_min:
                 _est_min = carbon_stats.get("carbon_estimated_min")
                 _est_max = carbon_stats.get("carbon_estimated_max")
@@ -1636,9 +1666,13 @@ def analyze_carbon(db: Session, data: dict) -> dict:
             "min": _rounded_stat("carbon_estimated_min"),
             "max": _rounded_stat("carbon_estimated_max"),
             "percentiles": {
+                "p2": _rounded_stat("carbon_estimated_p2"),
+                "p5": _rounded_stat("carbon_estimated_p5"),
                 "p25": _rounded_stat("carbon_estimated_p25"),
                 "median": _rounded_stat("carbon_estimated_p50"),
                 "p75": _rounded_stat("carbon_estimated_p75"),
+                "p95": _rounded_stat("carbon_estimated_p95"),
+                "p98": _rounded_stat("carbon_estimated_p98"),
             },
         }
         raw_histogram = carbon_stats.get("carbon_estimated_histogram")
@@ -1778,6 +1812,7 @@ def analyze_carbon(db: Session, data: dict) -> dict:
             "model_name": inference_engine.model_name,
             "model_version": _db_model.version if _db_model else None,
             "algorithm": model_info["algorithm"],
+            "visualization_mode": visualization_mode,
             "trained_at": model_info.get("trained_at"),
             "training_samples": model_info.get("n_samples"),
             "cv_metrics": model_info.get("cv_metrics", {}),

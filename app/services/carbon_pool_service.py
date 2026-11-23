@@ -17,7 +17,12 @@ def _pool_density_statistics(raw, scale, native_scale):
     """Normalize the observed raster distribution to the chart response contract."""
     stats = {"mean": raw["agb_mean"], "std_dev": raw.get("agb_stdDev"),
              "min": raw["agb_min"], "max": raw["agb_max"],
-             "percentiles": {"p25": raw.get("agb_p25"), "median": raw.get("agb_p50"), "p75": raw.get("agb_p75")}}
+             "percentiles": {
+                 "p2": raw.get("agb_p2"), "p5": raw.get("agb_p5"),
+                 "p25": raw.get("agb_p25"), "median": raw.get("agb_p50"),
+                 "p75": raw.get("agb_p75"), "p95": raw.get("agb_p95"),
+                 "p98": raw.get("agb_p98"),
+             }}
     histogram = raw.get("agb_histogram") or {}
     centers = histogram.get("bucketMeans", []) if isinstance(histogram, dict) else []
     counts = histogram.get("histogram", []) if isinstance(histogram, dict) else []
@@ -32,6 +37,54 @@ def _pool_density_statistics(raw, scale, native_scale):
                                   "pixel_count": round(sum(count for _, count in pairs)),
                                   "sampled": scale > native_scale, "scale_m": scale}
     return stats
+
+
+def _histogram_percentile(stats, percentile):
+    """Approximate a percentile for cached runs whose raster stats lack it."""
+    histogram = stats.get("histogram") if isinstance(stats, dict) else None
+    if not isinstance(histogram, dict):
+        return None
+    centers = histogram.get("bucket_means")
+    counts = histogram.get("counts")
+    if not isinstance(centers, list) or not isinstance(counts, list) or len(centers) != len(counts):
+        return None
+    pairs = sorted(
+        (float(center), float(count))
+        for center, count in zip(centers, counts, strict=True)
+        if isinstance(center, (int, float)) and math.isfinite(center)
+        and isinstance(count, (int, float)) and math.isfinite(count) and count > 0
+    )
+    total = sum(count for _, count in pairs)
+    if not pairs or total <= 0:
+        return None
+    target = (max(0.0, min(100.0, float(percentile))) / 100) * max(total - 1, 0)
+    cumulative = 0.0
+    for center, count in pairs:
+        if cumulative + count > target:
+            return center
+        cumulative += count
+    return pairs[-1][0]
+
+
+def _pool_stretch_range(stats, mode, configured_min, configured_max):
+    if mode == "admin":
+        low, high = configured_min, configured_max
+    elif mode == "min_max":
+        low, high = stats.get("min"), stats.get("max")
+    else:
+        lower_pct, upper_pct = (5, 95) if mode == "p5_95" else (2, 98)
+        percentiles = stats.setdefault("percentiles", {})
+        low = percentiles.get(f"p{lower_pct}")
+        high = percentiles.get(f"p{upper_pct}")
+        if low is None:
+            low = _histogram_percentile(stats, lower_pct)
+        if high is None:
+            high = _histogram_percentile(stats, upper_pct)
+        if low is None or high is None or high <= low:
+            low, high = stats.get("min"), stats.get("max")
+    if not isinstance(low, (int, float)) or not isinstance(high, (int, float)) or not math.isfinite(low) or not math.isfinite(high) or high <= low:
+        return configured_min, configured_max
+    return float(low), float(high)
 
 
 def _sample_pool_distribution(image, roi, scale):
@@ -324,7 +377,7 @@ def analyze_carbon_pool(db, data):
             bands = bands.addBands(display.multiply(pixel_ha).rename("carbon_total"))
         reducer = (ee.Reducer.mean().combine(ee.Reducer.stdDev(), sharedInputs=True)
                    .combine(ee.Reducer.minMax(), sharedInputs=True).combine(ee.Reducer.sum(), sharedInputs=True)
-                   .combine(ee.Reducer.percentile([25, 50, 75]), sharedInputs=True)
+                   .combine(ee.Reducer.percentile([2, 5, 25, 50, 75, 95, 98]), sharedInputs=True)
                    .combine(ee.Reducer.histogram(32, None, 10000), sharedInputs=True))
         reduced = bands.reduceRegion(reducer=reducer, geometry=calculation_roi, scale=scale,
                                      maxPixels=defaults["max_pixels"], tileScale=4)
@@ -343,10 +396,14 @@ def analyze_carbon_pool(db, data):
         coverage = min(100, raw["valid_area_sum"] / raw["aoi_area"] * 100) if raw["aoi_area"] else None
         area_info.update(calculation_area_ha=raw["aoi_area"], area_ha=raw["aoi_area"], valid_area_ha=raw["valid_area_sum"],
                          total_carbon_tons=total, carbon_dioxide_equivalent_tons=total * defaults["carbon_co2_factor"] if total is not None else None)
-    # The per-pool admin stretch controls the served tile and its legend. Keep
-    # AOI-specific auto-stretch only for datasets without a known carbon pool.
-    if data.get("auto_vis") and not pool_vis and stats and stats["max"] > stats["min"]:
-        vis.update(min=stats["min"], max=stats["max"])
+    visualization_mode = str(data.get("auto_vis_mode") or "admin").lower()
+    if visualization_mode not in {"admin", "p2_98", "p5_95", "min_max"}:
+        visualization_mode = "admin"
+    if data.get("auto_vis") and visualization_mode != "admin" and stats:
+        vis_min, vis_max = _pool_stretch_range(
+            stats, visualization_mode, vis["min"], vis["max"]
+        )
+        vis.update(min=vis_min, max=vis_max)
     display = image.clip(calculation_roi)
     tile = display.getMapId(vis)["tile_fetcher"].url_format
     if external:
@@ -355,7 +412,11 @@ def analyze_carbon_pool(db, data):
 
             reference_tile = get_direct_carbon_reference_layer(key, year, vis_min=vis["min"], vis_max=vis["max"])["tile_url"]
         else:
-            reference_tile = f"/api/carbon/reference-tiles/{key}/{{z}}/{{x}}/{{y}}.png?year={meta['year']}&min={vis['min']}&max={vis['max']}"
+            palette_query = ",".join(str(color).lstrip("#") for color in vis["palette"])
+            reference_tile = (
+                f"/api/carbon/reference-tiles/{key}/{{z}}/{{x}}/{{y}}.png?"
+                f"year={meta['year']}&min={vis['min']}&max={vis['max']}&palette={palette_query}"
+            )
     else:
         reference_tile = reference.clip(calculation_roi).getMapId(vis)["tile_fetcher"].url_format if model else tile
     provenance = {k: meta.get(k) for k in ("unit", "target_pool", "quantity", "depth_cm", "source_period", "product_version", "source_url", "attribution")}
@@ -378,6 +439,7 @@ def analyze_carbon_pool(db, data):
                              "reference_year": source_year,
                              "target_pool": meta["target_pool"], "depth_cm": meta.get("depth_cm"), "source_period": meta.get("source_period"),
                              "load_only": bool(data.get("load_only")), "statistics_available": stats is not None,
+                             "visualization_mode": visualization_mode,
                              "large_aoi_baseline": simple_baseline,
                              "method_description": model["description"] if model else meta["description"], **extras},
               "data_quality": {"valid_pixel_pct": coverage, "gap_filled": None, "images_used": None,
