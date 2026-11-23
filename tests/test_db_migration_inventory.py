@@ -60,3 +60,24 @@ def test_comparison_allows_additions_but_blocks_missing_tables_or_rows():
     assert result["status"] == "failed"
     assert result["removed_tables"] == ["plots"]
     assert result["tables_with_decreased_rows"] == {"users": {"before": 2, "after": 1}}
+
+
+def test_comparison_allows_expired_request_rate_buckets_but_reports_the_change():
+    before = {
+        "schema": "savegeo-table-row-counts/v1",
+        "tables": {"users": 2, "request_rate_buckets": 2},
+        "counts_sha256": "before",
+        "alembic_revisions": ["0066"],
+        "user_identity_hashes": {},
+    }
+    after = {
+        **before,
+        "tables": {"users": 2, "request_rate_buckets": 1},
+        "counts_sha256": "after",
+    }
+
+    result = compare_inventories(before, after)
+
+    assert result["status"] == "passed"
+    assert result["volatile_table_count_changes"] == {"request_rate_buckets": {"before": 2, "after": 1}}
+    assert result["tables_with_decreased_rows"] == {}

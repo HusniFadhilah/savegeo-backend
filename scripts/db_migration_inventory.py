@@ -19,6 +19,8 @@ from typing import Any
 
 from sqlalchemy import Engine, create_engine, inspect, text
 
+VOLATILE_ROW_COUNT_TABLES = frozenset({"request_rate_buckets"})
+
 
 def capture_inventory(engine: Engine, *, identity_salt: bytes | None = None) -> dict[str, Any]:
     inspector = inspect(engine)
@@ -81,10 +83,15 @@ def compare_inventories(before: dict[str, Any], after: dict[str, Any]) -> dict[s
         raise ValueError("Migration inventory does not contain a table-count map")
 
     removed = sorted(set(old_tables) - set(new_tables))
+    volatile_count_changes = {
+        name: {"before": int(old_tables[name]), "after": int(new_tables[name])}
+        for name in sorted(VOLATILE_ROW_COUNT_TABLES & set(old_tables) & set(new_tables))
+        if int(new_tables[name]) != int(old_tables[name])
+    }
     decreased = {
         name: {"before": int(old_tables[name]), "after": int(new_tables[name])}
         for name in sorted(set(old_tables) & set(new_tables))
-        if int(new_tables[name]) < int(old_tables[name])
+        if name not in VOLATILE_ROW_COUNT_TABLES and int(new_tables[name]) < int(old_tables[name])
     }
     added = sorted(set(new_tables) - set(old_tables))
     before_identities = before.get("user_identity_hashes") or {}
@@ -108,6 +115,7 @@ def compare_inventories(before: dict[str, Any], after: dict[str, Any]) -> dict[s
         "added_tables": added,
         "removed_tables": removed,
         "tables_with_decreased_rows": decreased,
+        "volatile_table_count_changes": volatile_count_changes,
         "removed_user_or_admin_identities": removed_user_identities,
         "status": "passed" if not removed and not decreased and not removed_user_identities else "failed",
     }
