@@ -10,6 +10,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Request, Query
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
+from starlette.datastructures import UploadFile
 
 from app.core.isolated_process import run_isolated
 from app.core.http import SHP_JSON_BODY_LIMIT_BYTES
@@ -157,6 +158,8 @@ async def convert_shp(request: Request):
         f = form.get("file")
         if not f:
             raise HTTPException(status_code=400, detail="Field file tidak ditemukan.")
+        if not isinstance(f, UploadFile):
+            raise HTTPException(status_code=400, detail="Field file harus berupa unggahan berkas.")
         original_name = (f.filename or "shapefile")[:255]
         zip_bytes = await f.read(_SHP_MAX_UPLOAD_BYTES + 1)
     else:

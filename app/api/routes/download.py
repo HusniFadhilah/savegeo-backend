@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_ee
-from app.core.security import get_current_app_viewer
+from app.core.security import AppViewer, get_current_app_viewer
 from app.core.bounded_json import read_typed_json_object
 from app.core.viewer_features import ensure_export_feature_access
 from app.db.session import get_db
@@ -30,7 +30,7 @@ class RasterTaskStatusRequest(BaseModel):
 
 
 @router.post("/raster-task-status", dependencies=[Depends(get_current_app_viewer), Depends(require_ee)])
-def raster_task_status(data: RasterTaskStatusRequest, viewer: object = Depends(get_current_app_viewer)):
+def raster_task_status(data: RasterTaskStatusRequest, viewer: AppViewer = Depends(get_current_app_viewer)):
     from app.services.raster_batch_export import export_status
     from app.api.routes.analysis_jobs import job_owner_key
 
@@ -43,7 +43,7 @@ def raster_task_status(data: RasterTaskStatusRequest, viewer: object = Depends(g
 @router.post("/geotiff", dependencies=[Depends(get_current_app_viewer), Depends(require_ee)])
 async def download_geotiff(
     request: Request,
-    viewer: object = Depends(get_current_app_viewer),
+    viewer: AppViewer = Depends(get_current_app_viewer),
     db: Session = Depends(get_db),
 ):
     data = await read_typed_json_object(request, AnalysisPayload)

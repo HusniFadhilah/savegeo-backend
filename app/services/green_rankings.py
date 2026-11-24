@@ -54,17 +54,21 @@ def ranking_config(settings, year, start_month, end_month, *, force_refresh=Fals
     year = int(year)
     start_month = int(start_month)
     end_month = int(end_month)
-    if not 2015 <= year <= datetime.now(UTC).year or not 1 <= start_month <= end_month <= 12:
+    if not 2000 <= year <= datetime.now(UTC).year or not 1 <= start_month <= end_month <= 12:
         raise AnalysisError("Periode peringkat tidak valid.", 422)
+    land_cover_source = "GLC_FCS30D" if year <= 2022 else "Dynamic_World"
+    if land_cover_source == "GLC_FCS30D" and (start_month, end_month) != (1, 12):
+        raise AnalysisError("GLC_FCS30D hanya menyediakan klasifikasi tahunan; pilih bulan Januari hingga Desember.", 422)
     config = {
         "level": level,
         "year": year,
+        "land_cover_source": land_cover_source,
         "start_month": start_month,
         "end_month": end_month,
         "scale": {"province": 100, "city": 30, "district": 20, "village": 10}[level],
-        # v2 adds saved AGB/BGB/SOC/litter/deadwood pool statistics. Keep its
-        # snapshots separate from the older land-cover-only calculation.
-        "algorithm": 2,
+        # v4 adds historical GLC_FCS30D support and per-pool provenance.
+        # Keep the result separate from snapshots calculated with earlier methods.
+        "algorithm": 4,
         "observed_through": min(
             date(year, end_month, monthrange(year, end_month)[1]), datetime.now(UTC).date()
         ).isoformat(),
@@ -81,7 +85,7 @@ def ranking_config(settings, year, start_month, end_month, *, force_refresh=Fals
 
 def snapshot_scope_key(config):
     """Stable cache identity for an annual or seasonal administrative ranking."""
-    keys = ("level", "year", "start_month", "end_month", "scale", "algorithm", *LEVELS[:-1])
+    keys = ("level", "year", "start_month", "end_month", "scale", "algorithm", "land_cover_source", *LEVELS[:-1])
     identity = {key: config[key] for key in keys if key in config}
     encoded = json.dumps(identity, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode()).hexdigest()
@@ -104,7 +108,7 @@ def snapshot_page(
             raise AnalysisError("Snapshot peringkat wilayah tidak ditemukan.", 404)
         stored_config = snapshot.config or {}
         requested_config = dict(filter_config or stored_config)
-        identity_keys = ("level", "year", "start_month", "end_month", "scale", "algorithm")
+        identity_keys = ("level", "year", "start_month", "end_month", "scale", "algorithm", "land_cover_source")
         if filter_config and any(
             requested_config.get(key) != stored_config.get(key) for key in identity_keys
         ):
@@ -514,30 +518,104 @@ def _insert(db, run, row):
 CARBON_POOL_DATASETS = {
     "agb": "SPAWN",
     "bgb": "ORNL_BGB",
-    "soc": "SOILGRIDS_OCS_0_30CM",
+    "soc": "OPENLANDMAP_SOC_STOCK_0_30CM_30M",
     "litter": "TROPICAL_LITTER_REFERENCE",
     "deadwood": "TROPICAL_DEADWOOD_REFERENCE",
 }
 
 
-def _carbon_pool_band_stack(features):
-    """Make area-weighted carbon stock bands from the app's registered references."""
-    from app.registries.carbon_dataset_registry import load_carbon_reference_ee
+def _carbon_pool_source_plan(year):
+    """Resolve open sources, preserving source year and native resolution."""
+    year = int(year)
+    from app.registries.carbon_dataset_registry import OPENLANDMAP_SOC_PERIODS, CARBON_DATASET_REGISTRY
+
+    agb_dataset = "ESA_CCI"
+    agb_source_year = min(CARBON_DATASET_REGISTRY[agb_dataset]["available_years"], key=lambda candidate: abs(candidate - year))
+    agb_status = "nearest_year_product" if agb_source_year != year else "year_product"
+    if year == 2023:
+        agb_dataset, agb_source_year, agb_status = "GEDI_L4D", 2023, "modelled_wall_to_wall"
+    elif 2019 <= year <= 2025:
+        agb_dataset, agb_source_year, agb_status = "GEDI_L4A_MONTHLY", year, "sparse_footprint_sample"
+    elif year > 2025:
+        agb_dataset, agb_source_year, agb_status = "GEDI_L4A_MONTHLY", 2025, "forward_estimate_from_latest_sample"
+
+    plan = {
+        "agb": {"dataset": agb_dataset, "source_year": agb_source_year, "status": agb_status},
+        "bgb": {"dataset": "ORNL_BGB", "source_year": 2010, "estimate_year": year, "reference_year": 2010, "status": "derived_estimate"},
+        "soc": {"dataset": "OPENLANDMAP_SOC_STOCK_0_30CM_30M", "source_year": None, "status": "period_model"},
+        "litter": {"dataset": "TROPICAL_LITTER_REFERENCE", "source_year": 2010, "estimate_year": year, "reference_year": 2010, "status": "derived_proxy"},
+        "deadwood": {"dataset": "TROPICAL_DEADWOOD_REFERENCE", "source_year": 2010, "estimate_year": year, "reference_year": 2010, "status": "derived_proxy"},
+    }
+    # Use the period containing the selected year, or the closest published
+    # period outside its coverage. The source period remains in provenance.
+    period_year = next(
+        (key for key, (start, end) in OPENLANDMAP_SOC_PERIODS.items() if start <= year < end),
+        min(OPENLANDMAP_SOC_PERIODS, key=lambda key: min(abs(year - OPENLANDMAP_SOC_PERIODS[key][0]), abs(year - OPENLANDMAP_SOC_PERIODS[key][1]))),
+    )
+    period_start, period_end = OPENLANDMAP_SOC_PERIODS[period_year]
+    plan["soc"].update(
+        source_year=period_year,
+        source_period=f"{period_start}–{period_end}",
+        status="period_model" if period_start <= year < period_end else "period_extrapolation",
+    )
+    return plan
+
+
+def _carbon_pool_band_stack(features, year):
+    """Build area-weighted stocks and return the exact source plan for provenance."""
+    from app.registries.carbon_dataset_registry import CARBON_DATASET_REGISTRY, load_carbon_reference_ee
 
     roi = ee.FeatureCollection(features).geometry()
     pixel_area_ha = ee.Image.pixelArea().divide(10000)
+    source_plan = _carbon_pool_source_plan(year)
+    agb_source = source_plan["agb"]
+    agb_image = load_carbon_reference_ee(agb_source["dataset"], agb_source["source_year"], roi=roi).select("agb")
+    baseline_agb = load_carbon_reference_ee("SPAWN", 2010, roi=roi).select("agb")
+    baseline_bgb = load_carbon_reference_ee("ORNL_BGB", 2010, roi=roi).select("agb")
+    safe_baseline_agb = baseline_agb.updateMask(baseline_agb.gt(0))
+    from app.services.detritus_reference import reference_image
+
+    pool_images = {
+        "agb": agb_image,
+        "bgb": agb_image.multiply(baseline_bgb.divide(safe_baseline_agb)).rename("agb"),
+        "soc": load_carbon_reference_ee(source_plan["soc"]["dataset"], source_plan["soc"]["source_year"], roi=roi).select("agb"),
+        "litter": agb_image.multiply(reference_image("litter", ee).divide(safe_baseline_agb)).rename("agb"),
+        "deadwood": agb_image.multiply(reference_image("deadwood", ee).divide(safe_baseline_agb)).rename("agb"),
+    }
     bands = None
-    for pool, dataset in CARBON_POOL_DATASETS.items():
-        density = load_carbon_reference_ee(dataset, 2020, roi=roi).select("agb")
+    for pool, source in source_plan.items():
+        density = pool_images[pool]
         valid_area = pixel_area_ha.updateMask(density.mask()).rename(f"{pool}_valid_area_ha")
         total = density.multiply(pixel_area_ha).rename(f"{pool}_total_mg_c")
         pool_bands = valid_area.addBands(total)
         bands = pool_bands if bands is None else bands.addBands(pool_bands)
-    return bands
+        dataset = source["dataset"]
+        meta = CARBON_DATASET_REGISTRY.get(dataset)
+        if meta is None:
+            raise AnalysisError(f"Metadata sumber karbon tidak ditemukan: {dataset}.", 500)
+        if pool in {"bgb", "litter", "deadwood"}:
+            source["formula"] = "AGB(year) × source_pool_2010 / AGB_2010"
+            source["resolution_m"] = max(
+                int(source_plan["agb"].get("resolution_m") or 0),
+                int(meta.get("resolution") or 0),
+            ) or None
+            source["name"] = meta.get("name", dataset)
+            source["source_url"] = meta.get("source_url") or meta.get("gee_id")
+            source["coverage_type"] = source_plan["agb"].get("coverage_type", "wall_to_wall")
+            source["method"] = meta.get("description", "")
+            continue
+        source.update(
+            name=meta.get("name", dataset),
+            resolution_m=meta.get("resolution"),
+            source_url=meta.get("source_url") or meta.get("gee_id"),
+            coverage_type=("sampled_footprints" if dataset == "GEDI_L4A_MONTHLY" else "wall_to_wall"),
+            method=meta.get("description", ""),
+        )
+    return bands, source_plan
 
 
-def _carbon_pool_values(properties):
-    """Convert zonal sums to Mg C/ha mean densities and preserve regional totals."""
+def _carbon_pool_values(properties, source_plan):
+    """Convert zonal sums and attach source vintage/resolution to every pool."""
     values = {}
     for pool in CARBON_POOL_DATASETS:
         valid_area = properties.get(f"{pool}_valid_area_ha")
@@ -546,6 +624,11 @@ def _carbon_pool_values(properties):
         total = float(total) if total is not None else 0.0
         values[f"{pool}_mg_c_ha"] = total / valid_area if valid_area > 0 else None
         values[f"{pool}_total_mg_c"] = total if valid_area > 0 else None
+        values.setdefault("carbon_pool_sources", {})[pool] = {
+            **source_plan[pool],
+            "valid_area_ha": valid_area,
+            "valid_coverage_percent": None,
+        }
     return values
 
 
@@ -767,9 +850,17 @@ def result_page(
             "rows": rows,
             "statistics": summary,
             "status": "complete" if item["done"] else "partial",
-            "method": "Dynamic World: mode kelas periode terpilih; hijau = pohon, rumput, vegetasi tergenang, tanaman, semak. Persentase memakai luas batas administrasi penuh. Wilayah dengan cakupan data <80% tidak diberi peringkat. Urutan pada hasil parsial belum merupakan peringkat nasional lengkap.",
+            "method": (
+                "GLC_FCS30D tahunan 30 m (2000–2022); kelas hutan, semak, rumput, tanaman, dan lahan basah dikelompokkan sebagai hijau. "
+                if json.loads(item["config"]).get("land_cover_source") == "GLC_FCS30D"
+                else "Dynamic World: mode kelas periode terpilih; hijau = pohon, rumput, vegetasi tergenang, tanaman, semak. "
+            ) + "Persentase memakai luas batas administratif penuh. Wilayah dengan cakupan data <80% tidak diberi peringkat. Urutan pada hasil parsial belum merupakan peringkat nasional lengkap.",
             "boundary_source": "Penyedia batas administrasi SAVEGEO; kode hierarki dan geometri per wilayah dipertahankan.",
-            "source_url": "https://developers.google.com/earth-engine/datasets/catalog/GOOGLE_DYNAMICWORLD_V1",
+            "source_url": (
+                "https://essd.copernicus.org/articles/16/1353/2024/"
+                if json.loads(item["config"]).get("land_cover_source") == "GLC_FCS30D"
+                else "https://developers.google.com/earth-engine/datasets/catalog/GOOGLE_DYNAMICWORLD_V1"
+            ),
         }
 
 
@@ -911,24 +1002,39 @@ def run_batch(data):
                     if config["end_month"] == 12
                     else f"{config['year']}-{config['end_month'] + 1:02d}-01"
                 )
-                collection = (
-                    ee.ImageCollection("GOOGLE/DYNAMICWORLD/V1")
-                    .filterBounds(ee.FeatureCollection(features).geometry())
-                    .filterDate(start, end)
-                )
-                if not collection.size().getInfo():
-                    raise AnalysisError("Tidak ada Dynamic World untuk batch dan periode ini.", 404)
-                labels = collection.select("label").mode()
-                area = ee.Image.pixelArea().divide(10000).updateMask(labels.mask())
+                if config.get("land_cover_source") == "GLC_FCS30D":
+                    labels = (
+                        ee.ImageCollection("projects/sat-io/open-datasets/GLC-FCS30D/annual")
+                        .select(f"b{config['year'] - 1999}")
+                        .mosaic()
+                        .clip(ee.FeatureCollection(features).geometry())
+                    )
+                    valid_labels = labels.gt(0)
+                    classes_by_group = {
+                        "green": [10, 11, 12, 20, 51, 52, 61, 62, 71, 72, 81, 82, 91, 92, 120, 121, 122, 130, 152, 153, 180, 181, 182, 183, 184, 185, 186, 187],
+                        "trees": [51, 52, 61, 62, 71, 72, 81, 82, 91, 92],
+                        "grass": [130, 153],
+                        "crops": [10, 11, 12, 20],
+                        "shrubs": [120, 121, 122, 152],
+                        "flooded": [180, 181, 182, 183, 184, 185, 186, 187],
+                    }
+                else:
+                    collection = (
+                        ee.ImageCollection("GOOGLE/DYNAMICWORLD/V1")
+                        .filterBounds(ee.FeatureCollection(features).geometry())
+                        .filterDate(start, end)
+                    )
+                    if not collection.size().getInfo():
+                        raise AnalysisError("Tidak ada Dynamic World untuk batch dan periode ini.", 404)
+                    labels = collection.select("label").mode()
+                    valid_labels = labels.mask()
+                    classes_by_group = {
+                        "green": [1, 2, 3, 4, 5], "trees": [1], "grass": [2],
+                        "crops": [4], "shrubs": [5], "flooded": [3],
+                    }
+                area = ee.Image.pixelArea().divide(10000).updateMask(valid_labels)
                 bands = area.rename("valid")
-                for name, classes in {
-                    "green": [1, 2, 3, 4, 5],
-                    "trees": [1],
-                    "grass": [2],
-                    "crops": [4],
-                    "shrubs": [5],
-                    "flooded": [3],
-                }.items():
+                for name, classes in classes_by_group.items():
                     bands = bands.addBands(
                         labels.remap(classes, [1] * len(classes), 0).multiply(area).rename(name)
                     )
@@ -942,21 +1048,20 @@ def run_batch(data):
                     .map(lambda feature: feature.setGeometry(None))
                     .getInfo()
                 )
-                pool_bands = _carbon_pool_band_stack(features)
+                pool_bands, pool_source_plan = _carbon_pool_band_stack(features, config["year"])
                 pool_reduced = (
                     pool_bands.reduceRegions(
                         collection=ee.FeatureCollection(features),
                         reducer=ee.Reducer.sum(),
-                        # Reference products are 250–300 m. Avoid oversampling
-                        # them at the much finer village ranking scale.
-                        scale=max(300, config["scale"]),
+                        # Preserve the 30 m GEDI L4D and OpenLandMap grids where selected.
+                        scale=max(30, config["scale"]),
                         tileScale=4,
                     )
                     .map(lambda feature: feature.setGeometry(None))
                     .getInfo()
                 )
                 carbon_by_code = {
-                    str(feature["properties"]["code"]): _carbon_pool_values(feature["properties"])
+                    str(feature["properties"]["code"]): _carbon_pool_values(feature["properties"], pool_source_plan)
                     for feature in pool_reduced.get("features", [])
                 }
                 for feature in reduced.get("features", []):
@@ -966,6 +1071,12 @@ def run_batch(data):
                     valid = float(props.get("valid") or 0)
                     green = float(props.get("green") or 0)
                     coverage = min(100, valid / area_ha * 100) if area_ha else 0
+                    carbon_values = carbon_by_code.get(str(props["code"]), {})
+                    for source in carbon_values.get("carbon_pool_sources", {}).values():
+                        source["valid_coverage_percent"] = (
+                            min(100, source["valid_area_ha"] / area_ha * 100) if area_ha else None
+                        )
+                        source["total_scope"] = "sampled_valid_area" if source.get("coverage_type") == "sampled_footprints" else "valid_raster_area"
                     row = {
                         **candidate,
                         "area_ha": area_ha,
@@ -978,7 +1089,7 @@ def run_batch(data):
                         "classes_ha": {
                             name: props.get(name) for name in ("trees", "grass", "crops", "shrubs", "flooded")
                         },
-                        **carbon_by_code.get(str(props["code"]), {}),
+                        **carbon_values,
                     }
                     _insert(db, run, row)
                     db.execute("INSERT OR REPLACE INTO cache VALUES(?,?)", (key, json.dumps(row)))

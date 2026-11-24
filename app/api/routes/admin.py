@@ -149,7 +149,7 @@ def _ensure_model_execution_permission(admin: AdminUser) -> None:
 def login(payload: LoginRequest, request: Request, response: Response, db: Session = Depends(get_db)):
     auth_throttle.ensure_login_allowed(request, "admin", payload.username)
     admin = db.query(AdminUser).filter_by(username=payload.username).first()
-    if not verify_login_password(payload.password, admin):
+    if admin is None or not verify_login_password(payload.password, admin):
         auth_throttle.record_login_failure(request, "admin", payload.username)
         raise HTTPException(status_code=401, detail="Invalid username or password")
     auth_throttle.record_login_success(request, "admin", payload.username)

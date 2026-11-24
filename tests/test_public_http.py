@@ -103,3 +103,22 @@ def test_public_post_rejects_oversized_raw_sdk_body_before_connect(monkeypatch):
             timeout=5,
             max_request_bytes=1024,
         )
+
+
+def test_public_http_emits_structured_secret_free_provider_event(monkeypatch, caplog):
+    response = SimpleNamespace(status_code=200)
+    monkeypatch.setattr(
+        public_http,
+        "_request_bounded",
+        lambda *_args, **_kwargs: response,
+    )
+
+    with caplog.at_level("INFO", logger="app.core.public_http"):
+        assert public_http.get("https://provider.example/data?token=secret-value").status_code == 200
+
+    rendered = "\n".join(record.getMessage() for record in caplog.records)
+    assert '"provider":"provider.example"' in rendered
+    assert '"method":"GET"' in rendered
+    assert '"status":200' in rendered
+    assert "secret-value" not in rendered
+    assert "/data" not in rendered

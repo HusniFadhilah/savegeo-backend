@@ -1,13 +1,17 @@
 from pathlib import Path
+from types import SimpleNamespace
+import sys
 
 import pytest
 from pyproj import Transformer
 
 from scripts.evaluate_c13_field_validation import (
     error_metrics,
+    failure_qualification,
     fit_bias_offset,
     load_bu_dessy,
     load_dahana,
+    _predict_plot_means,
     square_plot_bounds,
 )
 
@@ -57,3 +61,77 @@ def test_single_independent_plot_metrics_are_labeled_preliminary():
     assert result["mae_mg_c_ha"] == pytest.approx(8.25)
     assert result["r2"] is None
     assert result["qualification"] == "single_plot_preliminary_not_generalizable"
+
+
+def test_c13_unavailable_provider_is_not_mislabeled_as_missing_model():
+    transport_error = type("TransportError", (Exception,), {})("offline")
+
+    assert failure_qualification(transport_error) == "not_computed_provider_transport_failure"
+    assert failure_qualification(ValueError("invalid model")) == "not_computed_model_or_inference_failure"
+
+
+def test_field_predictions_are_requested_per_plot_not_one_large_bounding_box(monkeypatch):
+    calls = []
+
+    class Geometry:
+        @staticmethod
+        def Polygon(coordinates, **_kwargs):
+            return SimpleNamespace(coordinates=coordinates, bounds=lambda **kwargs: ("bounds", coordinates))
+
+    class FeatureCollection:
+        def __init__(self, features):
+            self.features = features
+
+    class Reducer:
+        @staticmethod
+        def mean():
+            return SimpleNamespace(combine=lambda *_args, **_kwargs: "mean+count")
+
+        @staticmethod
+        def count():
+            return "count"
+
+    class FakeImage:
+        def reduceRegions(self, *, collection, **_kwargs):
+            assert len(collection.features) == 1
+            feature = collection.features[0]
+            self.plot_id = feature[1]["plot_id"]
+            return self
+
+        def getInfo(self):
+            return {"features": [{"properties": {
+                "plot_id": self.plot_id,
+                "carbon_estimated_mean": 25.5,
+                "carbon_estimated_count": 1,
+            }}]}
+
+    ee = SimpleNamespace(
+        Geometry=Geometry,
+        Feature=lambda geometry, properties: (geometry, properties),
+        FeatureCollection=FeatureCollection,
+        Reducer=Reducer,
+    )
+    monkeypatch.setitem(sys.modules, "ee", ee)
+
+    class Engine:
+        last_s2_image_count = None
+
+        def predict_for_region(self, **kwargs):
+            calls.append(kwargs["roi"])
+            self.last_s2_image_count = 3
+            return FakeImage()
+
+    predictions, image_count, pixel_counts = _predict_plot_means(
+        Engine(),
+        [
+            {"plot_id": "near", "longitude": 110.4, "latitude": -7.0, "plot_area_m2": 400},
+            {"plot_id": "far", "longitude": 120.4, "latitude": -3.0, "plot_area_m2": 400},
+        ],
+        2024,
+    )
+
+    assert len(calls) == 2
+    assert calls[0] != calls[1]
+    assert predictions == {"near": 25.5, "far": 25.5}
+    assert image_count == 3
+    assert pixel_counts == {"near": 1, "far": 1}

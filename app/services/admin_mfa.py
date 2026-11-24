@@ -80,6 +80,8 @@ def _challenge(db: Session, token: str, now: dt.datetime) -> tuple[AdminUser, Ad
         raise HTTPException(401, "Invalid or expired MFA challenge")
     admin, factor = _locked(db, found.admin_id)
     challenge = db.scalar(select(MfaChallenge).where(MfaChallenge.id == found.id).with_for_update())
+    if challenge is None:
+        raise HTTPException(401, "Invalid or expired MFA challenge")
     if (challenge.consumed_at is not None or _utc(challenge.expires_at) <= now
             or challenge.session_version != (admin.session_version or 0)
             or not hmac.compare_digest(challenge.password_fingerprint, security._password_fingerprint(admin))):

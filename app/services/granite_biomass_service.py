@@ -37,6 +37,7 @@ from app.registries.granite_biomass_registry import (
 from app.services import config_service
 from app.services.gee_common import AnalysisError, create_geometry_from_payload, geometry_area_ha
 from app.core.public_http import public_http
+from app.core.model_worker import model_worker_environment
 
 logger = logging.getLogger(__name__)
 
@@ -153,7 +154,7 @@ def _run_model_inference(input_dir: Path, checkpoint: Path, config: Path, output
     python = os.getenv("GRANITE_PYTHON", sys.executable)
     metadata_path = output_path.with_suffix(".json")
     try:
-        subprocess.run(
+        completed = subprocess.run(
             [
                 str(python),
                 str(_WORKER),
@@ -165,10 +166,17 @@ def _run_model_inference(input_dir: Path, checkpoint: Path, config: Path, output
                 json.dumps(PREDICT_DATASET_BANDS),
             ],
             capture_output=True,
-            check=True,
             text=True,
             timeout=900,
+            cwd=str(output_path.parent),
+            env=model_worker_environment(checkpoint.parent),
+            stdin=subprocess.DEVNULL,
+            check=False,
         )
+        if completed.returncode != 0:
+            stderr_digest = hashlib.sha256((completed.stderr or "").encode("utf-8", errors="replace")).hexdigest()[:16]
+            logger.error("IBM Granite worker failed exit_code=%s stderr_sha256=%s", completed.returncode, stderr_digest)
+            raise subprocess.CalledProcessError(completed.returncode, _WORKER)
         payload = json.loads(metadata_path.read_text(encoding="utf-8"))
         filenames = payload.get("filenames")
         if not isinstance(filenames, list) or any(not isinstance(name, str) for name in filenames):

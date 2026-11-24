@@ -14,6 +14,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from app.core.config import Settings, get_settings
+from app.core.model_worker import model_worker_environment
 
 MODEL_NAME = "ibm_granite_geospatial_biomass"
 TARGET_DATASET = "GEDI_L4A_MONTHLY"
@@ -41,6 +42,9 @@ def _runtime_has_granite(python: str) -> bool:
             check=True,
             text=True,
             timeout=60,
+            cwd=str(Path(python).resolve().parent),
+            env=model_worker_environment(Path(python).resolve().parent / "model-cache"),
+            stdin=subprocess.DEVNULL,
         )
         return result.stdout.strip().endswith("ready")
     except (OSError, subprocess.SubprocessError, ValueError, TypeError):

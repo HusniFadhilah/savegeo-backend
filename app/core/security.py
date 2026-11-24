@@ -25,6 +25,8 @@ from app.db.models.admin_user import AdminUser
 from app.db.models.user import User
 from app.db.session import get_db
 
+AppViewer = User | AdminUser
+
 _bearer_scheme = HTTPBearer(auto_error=False)
 
 ADMIN_SESSION_COOKIE = "savegeo_admin_session"
@@ -419,7 +421,7 @@ def get_current_app_viewer(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
     db: Session = Depends(get_db),
-) -> User | AdminUser:
+) -> AppViewer:
     """Authentication dependency for the protected SaveGeo application.
 
     Public users and active admins may use the analysis workspace, while the

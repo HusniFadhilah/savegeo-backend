@@ -1,9 +1,11 @@
 """Conservative, shared daily cost guard for paid AI provider calls.
 
-The budget is opt-in and configured by a superadmin. Prices are keyed by the
-exact provider/model pair because provider prices change and model aliases are
-not interchangeable. Each call reserves its worst-case input/output estimate
-before network access; there is deliberately no refund after a request starts.
+The budget is configured by a superadmin. Until a positive daily cap and
+valid provider/model rates are configured, billable providers are blocked;
+local providers remain available. Prices are keyed by the exact provider/model
+pair because provider prices change and model aliases are not interchangeable.
+Each call reserves its worst-case input/output estimate before network access;
+there is deliberately no refund after a request starts.
 """
 from __future__ import annotations
 
@@ -98,16 +100,23 @@ def load_budget_config() -> tuple[Decimal, dict[str, Any]]:
 def reserve_call(provider: str, model: str, request_payload: Any, *, max_output_tokens: int = 2048) -> int:
     """Atomically reserve one provider call against the global daily budget.
 
-    Returns the reserved amount in micro-USD. A zero budget disables monetary
-    accounting; the existing request, input, token, and wall-time limits remain
-    active. If accounting is enabled, missing prices fail closed.
+    Returns the reserved amount in micro-USD. A zero budget blocks billable
+    providers before network access. Self-hosted providers do not consume the
+    hosted-provider budget. If spending is enabled, missing prices fail closed.
     """
+    provider_key = provider.strip().lower()
+    if provider_key in _LOCAL_PROVIDERS:
+        return 0
     budget, pricing = load_budget_config()
     if budget == 0:
-        return 0
+        raise AICostBudgetError(
+            429,
+            "Panggilan AI berbayar dinonaktifkan sampai administrator menetapkan plafon biaya harian.",
+            86400,
+        )
     try:
         units = estimate_cost_micro_usd(
-            provider, model, request_payload,
+            provider_key, model, request_payload,
             max_output_tokens=max_output_tokens, pricing=pricing,
         )
     except ValueError as exc:

@@ -14,7 +14,7 @@ from fastapi.responses import Response, StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_ee
-from app.core.security import get_current_admin_panel, get_current_app_viewer
+from app.core.security import AppViewer, get_current_admin_panel, get_current_app_viewer
 from app.core.bounded_json import read_typed_json_object
 from app.core.viewer_features import require_feature
 from app.db.session import get_db
@@ -81,7 +81,7 @@ def latest_green_rankings_snapshot(
     search: str = Query(default="", max_length=100),
     sort_by: str = Query(default="rank", max_length=40),
     sort_dir: str = Query(default="asc", pattern="^(asc|desc)$"),
-    viewer: object = Depends(get_current_app_viewer),
+    viewer: AppViewer = Depends(get_current_app_viewer),
 ):
     """Load the latest completed public ranking for an exact year/period/scope."""
     from app.services.green_rankings import latest_snapshot, ranking_config
@@ -128,7 +128,7 @@ def green_rankings_page(
     province: str | None = Query(default=None, max_length=40),
     city: str | None = Query(default=None, max_length=40),
     district: str | None = Query(default=None, max_length=40),
-    viewer: object = Depends(get_current_app_viewer),
+    viewer: AppViewer = Depends(get_current_app_viewer),
 ):
     from app.api.routes.analysis_jobs import job_owner_key
     from app.services.green_rankings import (
@@ -192,7 +192,7 @@ def export_green_rankings(
     province: str | None = Query(default=None, max_length=40),
     city: str | None = Query(default=None, max_length=40),
     district: str | None = Query(default=None, max_length=40),
-    viewer: object = Depends(get_current_app_viewer),
+    viewer: AppViewer = Depends(get_current_app_viewer),
 ):
     from app.api.routes.analysis_jobs import job_owner_key
     from app.services.green_rankings import ranking_config
@@ -275,7 +275,7 @@ def direct_carbon_reference_layer(
 
 
 @router.post("/analyze/carbon", dependencies=[Depends(get_current_app_viewer)])
-async def analyze_carbon(request: Request, db: Session = Depends(get_db), viewer: object = Depends(get_current_app_viewer)):
+async def analyze_carbon(request: Request, db: Session = Depends(get_db), viewer: AppViewer = Depends(get_current_app_viewer)):
     data = await read_typed_json_object(request, CarbonAnalysisRequest)
     from app.api.routes.analysis_jobs import job_owner_key
 

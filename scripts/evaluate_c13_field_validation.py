@@ -130,6 +130,15 @@ def error_metrics(observed: list[float], predicted: list[float]) -> dict[str, An
     }
 
 
+def failure_qualification(exc: Exception) -> str:
+    """Classify an incomplete run without implying the model was unavailable."""
+    if type(exc).__name__ in {"TransportError", "Timeout", "ConnectionError"}:
+        return "not_computed_provider_transport_failure"
+    if isinstance(exc, ValueError):
+        return "not_computed_model_or_inference_failure"
+    return "not_computed_evaluation_failure"
+
+
 def _r2(observed: list[float], predicted: list[float]) -> float | None:
     mean = sum(observed) / len(observed)
     denominator = sum((value - mean) ** 2 for value in observed)
@@ -158,49 +167,57 @@ def _square_plot_coordinates(longitude: float, latitude: float, area_m2: float) 
 def _predict_plot_means(
     engine, plots: list[dict[str, Any]], year: int,
 ) -> tuple[dict[str, float], int | None, dict[str, int]]:
-    """Reduce SaveGeo's predicted raster over each exact plot footprint."""
+    """Reduce SaveGeo's predicted raster over each exact plot footprint.
+
+    Keep the inference request to one plot at a time. A single bounding box for
+    a set of field plots can span a large area with no samples and exceed Earth
+    Engine's native processing budget before zonal reduction begins.
+    """
     import ee
 
-    features = []
+    predictions, pixel_counts, image_counts = {}, {}, []
+    reducer = ee.Reducer.mean().combine(
+        ee.Reducer.count(), sharedInputs=True,
+    )
     for plot in plots:
         coordinates = _square_plot_coordinates(
             float(plot["longitude"]), float(plot["latitude"]), float(plot["plot_area_m2"]),
         )
         geometry = ee.Geometry.Polygon([coordinates], proj="EPSG:4326", geodesic=False)
-        features.append(ee.Feature(geometry, {"plot_id": str(plot["plot_id"])}))
-    collection = ee.FeatureCollection(features)
-    roi = collection.geometry().bounds(maxError=100)
-    prediction_image = engine.predict_for_region(
-        roi=roi,
-        year=year,
-        start_month=1,
-        end_month=12,
-        cloud_threshold=MODEL_CLOUD_THRESHOLD,
-        scale=MODEL_SCALE_M,
-    )
-    reducer = ee.Reducer.mean().combine(
-        ee.Reducer.count(), sharedInputs=True,
-    )
-    result = prediction_image.reduceRegions(
-        collection=collection,
-        reducer=reducer,
-        scale=MODEL_SCALE_M,
-        tileScale=4,
-    ).getInfo()
-
-    predictions, pixel_counts = {}, {}
-    for feature in result.get("features", []):
-        properties = feature.get("properties") or {}
-        plot_id = str(properties.get("plot_id", ""))
-        prediction = properties.get("carbon_estimated_mean", properties.get("carbon_estimated", properties.get("mean")))
-        if plot_id and prediction is not None:
-            number = float(prediction)
-            if math.isfinite(number):
-                predictions[plot_id] = max(0.0, number)
-                count = properties.get("carbon_estimated_count", properties.get("count"))
-                if count is not None:
-                    pixel_counts[plot_id] = int(count)
-    return predictions, engine.last_s2_image_count, pixel_counts
+        plot_id = str(plot["plot_id"])
+        collection = ee.FeatureCollection([ee.Feature(geometry, {"plot_id": plot_id})])
+        roi = geometry.bounds(maxError=100)
+        prediction_image = engine.predict_for_region(
+            roi=roi,
+            year=year,
+            start_month=1,
+            end_month=12,
+            cloud_threshold=MODEL_CLOUD_THRESHOLD,
+            scale=MODEL_SCALE_M,
+        )
+        result = prediction_image.reduceRegions(
+            collection=collection,
+            reducer=reducer,
+            scale=MODEL_SCALE_M,
+            tileScale=4,
+        ).getInfo()
+        image_count = engine.last_s2_image_count
+        if isinstance(image_count, int):
+            image_counts.append(image_count)
+        for feature in result.get("features", []):
+            properties = feature.get("properties") or {}
+            returned_plot_id = str(properties.get("plot_id", ""))
+            if returned_plot_id != plot_id:
+                continue
+            prediction = properties.get("carbon_estimated_mean", properties.get("carbon_estimated", properties.get("mean")))
+            if prediction is not None:
+                number = float(prediction)
+                if math.isfinite(number):
+                    predictions[plot_id] = max(0.0, number)
+            count = properties.get("carbon_estimated_count", properties.get("count"))
+            if count is not None:
+                pixel_counts[plot_id] = int(count)
+    return predictions, max(image_counts) if image_counts else None, pixel_counts
 
 
 def _sha256(path: Path) -> str:
@@ -328,6 +345,7 @@ def main() -> int:
     except Exception as exc:
         # Preserve a machine-readable evidence record when prerequisites are
         # missing. A blocked run must never look like a zero-error result.
+        qualification = failure_qualification(exc)
         validation = load_bu_dessy(args.bu_dessy_csv)
         calibration = load_dahana(args.dahana_csv)
         report = {
@@ -354,7 +372,7 @@ def main() -> int:
                 "bias_mg_c_ha": None,
                 "rmse_mg_c_ha": None,
                 "mae_mg_c_ha": None,
-                "qualification": "not_computed_no_approved_or_ready_model",
+                "qualification": qualification,
             },
         }
         args.output.parent.mkdir(parents=True, exist_ok=True)

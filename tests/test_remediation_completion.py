@@ -1,5 +1,7 @@
 """Regression cases for remaining recommendations in the signed review."""
 import time
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
@@ -10,6 +12,8 @@ from sqlalchemy.pool import StaticPool
 from app.db.models.analysis_job import AnalysisJob
 from app.db.models.provider_cache import ProviderCache
 from app.services import analysis_queue as queue, location_provider as locations
+from app.services import samgeo_service
+from app.api.routes import carbon_calibration
 
 
 @pytest.fixture
@@ -134,3 +138,79 @@ def test_imagery_proxy_coarsens_coordinates_before_egress(monkeypatch):
     locations.imagery_date_metadata(-6.9781234567, 110.412345678)
     assert captured["geometry"] == "110.41,-6.98"
     assert "110.412345678" not in str(captured)
+
+
+def test_place_search_response_cache_expires_after_five_minutes(monkeypatch):
+    captured = {}
+
+    def fake_cache(provider, params, fetch, **kwargs):
+        captured.update(provider=provider, params=params, **kwargs)
+        return []
+
+    monkeypatch.setattr(locations, "cached_lookup", fake_cache)
+    locations.search_places("Semarang", limit=5)
+
+    assert captured["provider"] == "nominatim"
+    assert captured["ttl"] == 300
+
+
+def test_optional_model_worker_does_not_inherit_application_secrets(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://user:private@example.test/db")
+    monkeypatch.setenv("OPENAI_API_KEY", "private-api-key")
+    monkeypatch.setenv("HTTPS_PROXY", "https://proxy-user:private@example.test")
+    monkeypatch.setenv("PATH", "C:/python")
+
+    env = samgeo_service._worker_environment(tmp_path / "checkpoints")
+
+    assert env["PATH"] == "C:/python"
+    assert env["HF_HUB_DISABLE_TELEMETRY"] == "1"
+    assert Path(env["HF_HOME"]) == tmp_path / "checkpoints" / "huggingface"
+    assert "DATABASE_URL" not in env
+    assert "OPENAI_API_KEY" not in env
+    assert "HTTPS_PROXY" not in env
+    assert "private" not in str(env)
+
+
+def test_optional_model_worker_uses_bounded_sanitized_subprocess(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured.update(command=command, **kwargs)
+        return object()
+
+    monkeypatch.setattr(samgeo_service.subprocess, "run", fake_run)
+    workdir = tmp_path / "job"
+    checkpoints = tmp_path / "checkpoints"
+    result = samgeo_service._execute_worker(["python", "worker.py"], folder=workdir, checkpoint_dir=checkpoints)
+
+    assert result is not None
+    assert captured["cwd"] == str(workdir)
+    assert captured["timeout"] == 900
+    assert captured["stdin"] is samgeo_service.subprocess.DEVNULL
+    assert captured["env"]["HF_HUB_DISABLE_TELEMETRY"] == "1"
+    assert captured["capture_output"] is True
+
+
+def test_carbon_calibration_job_is_registered_before_worker_submission(monkeypatch):
+    submitted = []
+
+    class Executor:
+        def submit(self, function, *args):
+            submitted.append((function, args))
+
+    monkeypatch.setattr(carbon_calibration, "executor", Executor())
+    carbon_calibration.jobs.clear()
+
+    response = carbon_calibration._queue_dataset_job(
+        SimpleNamespace(id=17, dataset_id="field-set-17"), "extract",
+    )
+
+    job_id = response["job_id"]
+    assert response["status"] == "queued"
+    assert carbon_calibration.jobs[job_id] == {
+        "status": "queued",
+        "progress": 0,
+        "type": "extract",
+        "dataset_id": "field-set-17",
+    }
+    assert submitted == [(carbon_calibration._extract_dataset, (17, job_id))]

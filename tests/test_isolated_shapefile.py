@@ -70,3 +70,15 @@ def test_convert_shp_route_uses_isolated_parser(tmp_path):
     assert response.status_code == 200, response.text
     assert response.json()["feature_count"] == 1
     assert response.json()["name"] == "fixture"
+
+
+def test_convert_shp_rejects_text_field_where_upload_is_required():
+    app = FastAPI()
+    app.include_router(utils.router, prefix="/api")
+    app.dependency_overrides[get_current_app_viewer] = lambda: object()
+
+    with TestClient(app) as client:
+        response = client.post("/api/utils/convert_shp", files={"file": (None, "not-a-file")})
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Field file harus berupa unggahan berkas."

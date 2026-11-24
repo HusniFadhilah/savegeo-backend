@@ -26,7 +26,7 @@ from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.core.security import get_current_app_viewer
+from app.core.security import AppViewer, get_current_app_viewer
 from app.core.temporal import format_rfc3339, utc_now
 from app.core.version import get_product_version
 from app.core.viewer_features import ensure_job_feature_access
@@ -109,11 +109,11 @@ def _job_path(job_id: str) -> Path:
     return _jobs_dir() / f"{job_id}.json"
 
 
-def job_owner_key(viewer: object) -> str:
+def job_owner_key(viewer: AppViewer) -> str:
     return f"user:{viewer.id}" if isinstance(viewer, User) else f"admin:{viewer.id}"  # type: ignore[attr-defined]
 
 
-def viewer_owns_job(job_id: str, viewer: object, created_by_user_id: int | None = None) -> bool:
+def viewer_owns_job(job_id: str, viewer: AppViewer, created_by_user_id: int | None = None) -> bool:
     """Whether ``viewer`` submitted analysis ``job_id``.
 
     The job file records the submitting account for both users and admins.
@@ -463,7 +463,7 @@ def _complete_cached_job(
     payload: dict[str, Any],
     owner: str,
     result: dict[str, Any],
-    viewer: object,
+    viewer: AppViewer,
 ) -> dict[str, Any]:
     """Materialize a normal, pollable job from a cached result."""
     result = json.loads(json.dumps(result))
@@ -665,7 +665,7 @@ def _run_job(
 @router.post("/analysis-jobs", dependencies=[Depends(get_current_app_viewer)])
 async def create_analysis_job(
     request: Request,
-    viewer: object = Depends(get_current_app_viewer),
+    viewer: AppViewer = Depends(get_current_app_viewer),
     db: Session = Depends(get_db),
 ):
     data = await read_typed_json_object(request, AnalysisJobRequest)
@@ -673,7 +673,7 @@ async def create_analysis_job(
 
 
 @router.post("/analysis-jobs/preflight", dependencies=[Depends(get_current_app_viewer)])
-async def analysis_preflight(request: Request, viewer: object = Depends(get_current_app_viewer), db: Session = Depends(get_db)):
+async def analysis_preflight(request: Request, viewer: AppViewer = Depends(get_current_app_viewer), db: Session = Depends(get_db)):
     data = await read_typed_json_object(request, AnalysisJobRequest)
     job_type = data["type"]
     payload = data.get("payload")
@@ -694,7 +694,7 @@ async def analysis_preflight(request: Request, viewer: object = Depends(get_curr
     return result
 
 
-def _create_analysis_job_sync(request: Request, data: dict[str, Any], viewer: object, db: Session):
+def _create_analysis_job_sync(request: Request, data: dict[str, Any], viewer: AppViewer, db: Session):
     job_type = data["type"]
     payload = data.get("payload")
     if job_type not in _ALLOWED_JOB_TYPES:
@@ -814,7 +814,7 @@ def _create_analysis_job_sync(request: Request, data: dict[str, Any], viewer: ob
 @router.get("/analysis-jobs/{job_id}")
 def get_analysis_job(
     job_id: str,
-    viewer: object = Depends(get_current_app_viewer),
+    viewer: AppViewer = Depends(get_current_app_viewer),
     db: Session = Depends(get_db),
 ):
     job = _read_job(job_id)
@@ -836,7 +836,7 @@ def get_analysis_job(
 
 
 @router.post("/analysis-jobs/{job_id}/cancel")
-def cancel_analysis_job(job_id: str, viewer: object = Depends(get_current_app_viewer), db: Session = Depends(get_db)):
+def cancel_analysis_job(job_id: str, viewer: AppViewer = Depends(get_current_app_viewer), db: Session = Depends(get_db)):
     if not analysis_queue.enabled():
         raise HTTPException(501, "Cancellation requires the durable queue")
     return analysis_queue.cancel(db, job_id, job_owner_key(viewer))

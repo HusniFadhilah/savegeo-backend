@@ -1,6 +1,7 @@
 """Bounded SamGeo jobs; raster reads stay in the API environment, ML is isolated."""
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -24,6 +25,7 @@ from rio_tiler.io import Reader
 from app.services.gee_common import AnalysisError
 from app.services import imagery_service as imagery
 from app.services.local_imagery_tile_service import resolve_local_raster_path
+from app.core.model_worker import model_worker_environment
 
 ROOT = Path(__file__).resolve().parents[2]
 JOB_ROOT = ROOT / "var" / "samgeo"
@@ -44,11 +46,31 @@ def _python() -> str:
     return sys.executable
 
 
+def _worker_environment(checkpoint_dir: Path) -> dict[str, str]:
+    """Build a minimal environment for optional third-party model code."""
+    return model_worker_environment(checkpoint_dir)
+
+
+def _execute_worker(command: list[str], *, folder: Path, checkpoint_dir: Path) -> subprocess.CompletedProcess:
+    """Run the optional model worker with bounded time and no app secrets."""
+    return subprocess.run(
+        command,
+        cwd=str(folder),
+        env=_worker_environment(checkpoint_dir),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=900,
+        check=False,
+    )
+
+
 def capabilities() -> dict:
     try:
         result = subprocess.run(
             [_python(), "-c", "import importlib.util,json; print(json.dumps({m:bool(importlib.util.find_spec(m)) for m in ['samgeo','torch','transformers','torchvision','segment_anything']}))"],
-            capture_output=True, timeout=15,
+            capture_output=True, timeout=15, stdin=subprocess.DEVNULL,
+            cwd=str(ROOT), env=model_worker_environment(JOB_ROOT / "checkpoints"),
         )
         modules = json.loads(result.stdout) if result.returncode == 0 else {}
         ready = all(modules.get(m) for m in ("samgeo", "torch"))
@@ -148,8 +170,8 @@ def _run_job(folder: Path, data: dict) -> None:
     try:
         result = segment(data, folder)
         _write_json(folder / "status.json", {"job_id": folder.name, "status": "complete", "result": result})
-    except Exception:
-        logger.exception("SamGeo job failed")
+    except Exception as exc:  # avoid logging arbitrary third-party exception text
+        logger.error("SamGeo job failed exception_type=%s", type(exc).__name__)
         _write_json(folder / "status.json", {"job_id": folder.name, "status": "failed", "message": "Segmentasi gagal. Coba lagi atau hubungi administrator."})
     finally:
         for filename in ("input.tif", "mask.tif"):
@@ -199,11 +221,13 @@ def segment(data: dict, folder: Path) -> dict:
         command = [_python(), str(Path(__file__).with_name("samgeo_worker.py")), str(input_path), str(output_path),
                    str(JOB_ROOT / "checkpoints"), str(data.get("mode") or "automatic"),
                    str(data.get("prompt") or ""), str(data.get("confidence_threshold") if data.get("confidence_threshold") is not None else 0.5)]
-        completed = subprocess.run(command, capture_output=True, text=True, timeout=900)
+        checkpoint_dir = JOB_ROOT / "checkpoints"
+        completed = _execute_worker(command, folder=folder, checkpoint_dir=checkpoint_dir)
     except subprocess.TimeoutExpired as exc:
         raise AnalysisError("SamGeo melewati batas 15 menit. Coba AOI yang lebih kecil.", 504) from exc
     if completed.returncode:
-        logger.error("SamGeo worker: %s", completed.stderr[-4000:])
+        stderr_digest = hashlib.sha256((completed.stderr or "").encode("utf-8", errors="replace")).hexdigest()[:16]
+        logger.error("SamGeo worker failed exit_code=%s stderr_sha256=%s", completed.returncode, stderr_digest)
         raise AnalysisError("SamGeo gagal menjalankan model. Periksa instalasi, unduhan checkpoint, dan log backend.", 502)
     with rasterio.open(output_path) as dataset:
         labels = dataset.read(1).astype("int32")

@@ -98,3 +98,30 @@ def test_geo_boundaries_download_uses_shared_bounded_transport(monkeypatch):
     assert calls["url"] == "https://raw.githubusercontent.com/wmgeolab/geoBoundaries/main/data.geojson"
     assert calls["kwargs"]["max_bytes"] == 1024
     assert calls["kwargs"]["timeout"] == 60
+
+
+def test_geo_boundaries_maps_transport_errors_to_provider_unavailable(monkeypatch):
+    import requests
+
+    def fail_get(*_args, **_kwargs):
+        raise requests.ConnectionError("private transport detail")
+
+    monkeypatch.setattr(global_boundaries.requests, "get", fail_get)
+    try:
+        global_boundaries._download_json(
+            "https://raw.githubusercontent.com/wmgeolab/geoBoundaries/main/data.geojson",
+            max_bytes=1024,
+        )
+    except global_boundaries.BoundaryUnavailable:
+        pass
+    else:
+        raise AssertionError("transport failure was not normalized")
+
+
+def test_shared_transport_exposes_requests_compatible_exception_types():
+    import requests
+
+    transport = global_boundaries.requests
+    assert transport.RequestException is requests.RequestException
+    assert transport.Timeout is requests.Timeout
+    assert transport.ConnectionError is requests.ConnectionError

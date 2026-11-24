@@ -155,6 +155,8 @@ def test_granite_runtime_readiness_imports_the_actual_worker_entrypoint(monkeypa
     assert command[0] == "granite-python"
     assert "LightningInferenceModel" in command[2]
     assert kwargs["timeout"] == 60
+    assert kwargs["stdin"] is subprocess.DEVNULL
+    assert "DATABASE_URL" not in kwargs["env"]
 
     registry._runtime_has_granite.cache_clear()
     monkeypatch.setattr(
@@ -196,7 +198,11 @@ def test_granite_inference_uses_isolated_runtime_and_validates_worker_response(t
         str(output.with_suffix(".json")),
     ]
     assert options["timeout"] == 900
-    assert options["check"] is True
+    assert options["check"] is False
+    assert options["stdin"] is granite_biomass_service.subprocess.DEVNULL
+    assert options["cwd"] == str(output.parent)
+    assert "DATABASE_URL" not in options["env"]
+    assert options["env"]["HF_HUB_DISABLE_TELEMETRY"] == "1"
 
 
 def test_granite_input_raster_preserves_ibm_band_order_and_valid_mask(tmp_path):

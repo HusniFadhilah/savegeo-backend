@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeout
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeout
 from collections import OrderedDict
 from threading import Lock, BoundedSemaphore
 from pathlib import Path
@@ -399,7 +399,7 @@ def get_region_children_geometries(
         pending_items = iter(child_items)
         exhausted = False
         while not exhausted and time.monotonic() < deadline:
-            batch = []
+            batch: list[Future] = []
             while len(batch) < 8:
                 try:
                     name, code = next(pending_items)

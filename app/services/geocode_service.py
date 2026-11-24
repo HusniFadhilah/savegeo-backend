@@ -112,7 +112,7 @@ def _bbox(raw: dict[str, Any]) -> list[float] | None:
     if not isinstance(bb, (list, tuple)) or len(bb) != 4:
         return None
     south, north, west, east = (_finite_float(v) for v in bb)  # Nominatim order
-    if None in (south, north, west, east):
+    if south is None or north is None or west is None or east is None:
         return None
     if not (-90 <= south <= north <= 90 and -180 <= west <= east <= 180):
         return None

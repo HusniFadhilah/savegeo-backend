@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import logging
 import math
 import os
 import socket
@@ -20,6 +21,8 @@ from urllib.parse import urlencode, urlsplit, urlunsplit
 import certifi
 import requests
 import urllib3
+
+logger = logging.getLogger(__name__)
 
 _CIRCUIT_LOCK = threading.Lock()
 _CIRCUITS: dict[str, dict[str, float | int | bool]] = {}
@@ -110,6 +113,15 @@ class BoundedStreamingResponse:
 
 
 class PublicHTTPS:
+    # Call sites historically imported this shared transport as ``requests``
+    # and catch these exception classes. Expose the compatible exception types
+    # so upstream failures cannot turn into AttributeError while handling the
+    # original network error.
+    RequestException = requests.RequestException
+    Timeout = requests.Timeout
+    ConnectionError = requests.ConnectionError
+    Response = requests.Response
+
     @staticmethod
     def _validated_url(url: str):
         parsed = urlsplit(url)
@@ -196,7 +208,38 @@ class PublicHTTPS:
                 state["opened_until"] = time.monotonic() + _CIRCUIT_OPEN_SECONDS
             state["probe_in_flight"] = False
 
-    def request(self, method: str, url: str, *, params=None, data=None, json_body=None, raw_body=None, timeout=30,
+    def request(self, method: str, url: str, **kwargs):
+        """Emit one secret-free structured event for every bounded HTTP call."""
+        started = time.monotonic()
+        _, hostname = self._validated_url(url)
+        method = method.upper()
+        try:
+            response = self._request_bounded(method, url, **kwargs)
+        except Exception as exc:
+            logger.warning(
+                "outbound_http %s",
+                json.dumps({
+                    "provider": hostname,
+                    "method": method,
+                    "outcome": "error",
+                    "error_type": type(exc).__name__,
+                    "duration_ms": max(0, int((time.monotonic() - started) * 1000)),
+                }, sort_keys=True, separators=(",", ":")),
+            )
+            raise
+        logger.info(
+            "outbound_http %s",
+            json.dumps({
+                "provider": hostname,
+                "method": method,
+                "status": int(response.status_code),
+                "outcome": "success" if response.status_code < 400 else "http_error",
+                "duration_ms": max(0, int((time.monotonic() - started) * 1000)),
+            }, sort_keys=True, separators=(",", ":")),
+        )
+        return response
+
+    def _request_bounded(self, method: str, url: str, *, params=None, data=None, json_body=None, raw_body=None, timeout=30,
                 allow_redirects=False, allow_redirect_status=False,
                 max_bytes=16 * 1024 * 1024, max_request_bytes=16 * 1024 * 1024, headers=None,
                 max_timeout=60.0, read_timeout=10.0) -> requests.Response:

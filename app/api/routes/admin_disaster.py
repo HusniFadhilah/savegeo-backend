@@ -286,11 +286,15 @@ def admin_list_events(
     severity: str | None = None,
     year: int | None = None,
     search: str | None = None,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=25, ge=1, le=100),
     admin: AdminUser = Depends(require_permission("disaster.read")),
     db: Session = Depends(get_db),
 ):
-    events = disaster_repo.list_events(
+    events, total = disaster_repo.list_events_page(
         db,
+        page=page,
+        page_size=page_size,
         published_only=False,
         status=status,
         disaster_type=disaster_type,
@@ -298,7 +302,13 @@ def admin_list_events(
         year=year,
         search=search,
     )
-    return {"events": [e.to_dict() for e in events]}
+    return {
+        "events": [e.to_dict() for e in events],
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "has_more": page * page_size < total,
+    }
 
 
 @router.get("/disasters/models")

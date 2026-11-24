@@ -29,7 +29,7 @@ def cached_lookup(provider: str, params: dict, fetch, *, interval: float, ttl: f
     db = SessionLocal()
     acquired = False
     try:
-        if db.bind.dialect.name == "postgresql":
+        if db.get_bind().dialect.name == "postgresql":
             lock_id = int.from_bytes(hashlib.sha256(provider.encode()).digest()[:7], "big")
             if not db.execute(text("SELECT pg_try_advisory_xact_lock(:key)"), {"key": lock_id}).scalar():
                 raise HTTPException(429, "Layanan lokasi sedang sibuk. Coba lagi.", headers={"Retry-After": "2"})
@@ -90,7 +90,7 @@ def search_places(q: str, *, limit: int, polygon: bool = False):
             raise ValueError("Invalid geocoder response")
         return data[:limit]
 
-    return cached_lookup("nominatim", params, fetch, interval=1.1)
+    return cached_lookup("nominatim", params, fetch, interval=1.1, ttl=300)
 
 
 def imagery_date_metadata(lat: float, lng: float):

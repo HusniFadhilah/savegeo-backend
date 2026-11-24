@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from app.agentic import agentic_ai
 from app.core.chat_ownership import chat_session_owner_key
 from app.core.bounded_json import read_typed_json_object
-from app.core.security import get_current_app_viewer
+from app.core.security import AppViewer, get_current_app_viewer
 from app.core.viewer_features import viewer_feature_codes
 from app.db.session import get_db
 from app.services import agent_service
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 @router.get("/capabilities")
 def agent_capabilities(
     request: Request,
-    viewer: object = Depends(get_current_app_viewer),
+    viewer: AppViewer = Depends(get_current_app_viewer),
     db: Session = Depends(get_db),
 ):
     """Expose datasets, models, tools, and guardrails available to the agent."""
@@ -39,7 +39,7 @@ def agent_capabilities(
 @router.post("/analyze")
 async def agent_analyze(
     request: Request,
-    viewer: object = Depends(get_current_app_viewer),
+    viewer: AppViewer = Depends(get_current_app_viewer),
     db: Session = Depends(get_db),
 ):
     """
@@ -65,7 +65,7 @@ async def agent_analyze(
 @router.post("/control")
 async def agent_control(
     request: Request,
-    viewer: object = Depends(get_current_app_viewer),
+    viewer: AppViewer = Depends(get_current_app_viewer),
     db: Session = Depends(get_db),
 ):
     """
@@ -87,7 +87,7 @@ async def agent_control(
 
 
 @router.get("/providers")
-async def agent_providers(viewer: object = Depends(get_current_app_viewer)):
+async def agent_providers(viewer: AppViewer = Depends(get_current_app_viewer)):
     """Provider/model choices the signed-in user may select, with live status.
 
     No base URLs, keys or raw errors are returned.

@@ -13,7 +13,7 @@ from __future__ import annotations
 import datetime as dt
 import re
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.db.models.analysis_result import AnalysisResult
@@ -106,17 +106,15 @@ def delete_event(db: Session, event: DisasterEvent) -> None:
     db.commit()
 
 
-def list_events(
-    db: Session,
+def _events_query(
     *,
     published_only: bool,
     status: str | None = None,
     disaster_type: str | None = None,
-    province: str | None = None,
     severity: str | None = None,
     year: int | None = None,
     search: str | None = None,
-) -> list[DisasterEvent]:
+):
     stmt = select(DisasterEvent)
     if published_only:
         stmt = stmt.where(DisasterEvent.status == "published", DisasterEvent.is_public.is_(True))
@@ -134,11 +132,54 @@ def list_events(
     if search:
         like = f"%{search}%"
         stmt = stmt.where(DisasterEvent.name.ilike(like))
-    stmt = stmt.order_by(DisasterEvent.event_date.desc().nullslast(), DisasterEvent.created_at.desc())
+    return stmt
+
+
+def list_events(
+    db: Session,
+    *,
+    published_only: bool,
+    status: str | None = None,
+    disaster_type: str | None = None,
+    province: str | None = None,
+    severity: str | None = None,
+    year: int | None = None,
+    search: str | None = None,
+) -> list[DisasterEvent]:
+    stmt = _events_query(
+        published_only=published_only, status=status, disaster_type=disaster_type,
+        severity=severity, year=year, search=search,
+    ).order_by(DisasterEvent.event_date.desc().nullslast(), DisasterEvent.created_at.desc())
     events = list(db.execute(stmt).scalars().all())
     if province:
         events = [e for e in events if province in (e.province or [])]
     return events
+
+
+def list_events_page(
+    db: Session,
+    *,
+    page: int,
+    page_size: int,
+    published_only: bool,
+    status: str | None = None,
+    disaster_type: str | None = None,
+    severity: str | None = None,
+    year: int | None = None,
+    search: str | None = None,
+) -> tuple[list[DisasterEvent], int]:
+    """Return a stable, bounded event page and its filtered total."""
+    stmt = _events_query(
+        published_only=published_only, status=status, disaster_type=disaster_type,
+        severity=severity, year=year, search=search,
+    )
+    total = int(db.scalar(select(func.count()).select_from(stmt.order_by(None).subquery())) or 0)
+    rows = db.execute(
+        stmt.order_by(DisasterEvent.event_date.desc().nullslast(), DisasterEvent.created_at.desc(), DisasterEvent.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).scalars().all()
+    return list(rows), total
 
 
 def event_has_published_result(db: Session, event_id: int) -> bool:

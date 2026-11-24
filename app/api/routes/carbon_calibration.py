@@ -359,7 +359,7 @@ def _extract_dataset(dataset_pk: int, job_id: str) -> None:
 
 def _queue_dataset_job(dataset: CarbonCalibrationDataset, job_type: str) -> dict[str, str | int]:
     job_id = str(uuid.uuid4())
-    _job(job_id, job_id=job_id, status="queued", progress=0, type=job_type, dataset_id=dataset.dataset_id)
+    _job(job_id, status="queued", progress=0, type=job_type, dataset_id=dataset.dataset_id)
     executor.submit(_extract_dataset, dataset.id, job_id)
     return {"job_id": job_id, "status": "queued", "status_url": f"/admin/carbon-calibration/jobs/{job_id}"}
 

@@ -51,6 +51,28 @@ def test_enabled_budget_fails_closed_if_selected_model_rate_is_missing(monkeypat
     assert error.value.status_code == 503
 
 
+def test_zero_budget_blocks_paid_provider_before_any_counter_or_network_call(monkeypatch):
+    monkeypatch.setattr(cost_budget, "load_budget_config", lambda: (Decimal("0"), {}))
+    monkeypatch.setattr(
+        "app.core.shared_rate_limit.consume",
+        lambda *_args, **_kwargs: pytest.fail("no paid call may be reserved with a zero cap"),
+    )
+
+    with pytest.raises(cost_budget.AICostBudgetError) as error:
+        cost_budget.reserve_call("openai", "gpt-test", {"prompt": "x"})
+
+    assert error.value.status_code == 429
+    assert error.value.retry_after == 86400
+    assert "administrator" in str(error.value)
+
+
+@pytest.mark.parametrize("provider", ["ollama", "opencode"])
+def test_zero_budget_keeps_self_hosted_provider_available(provider, monkeypatch):
+    monkeypatch.setattr(cost_budget, "load_budget_config", lambda: (Decimal("0"), {}))
+
+    assert cost_budget.reserve_call(provider, "local-model", {"prompt": "x"}) == 0
+
+
 def test_budget_reserves_worst_case_units_in_shared_daily_bucket(monkeypatch):
     calls = {}
     monkeypatch.setattr(cost_budget, "load_budget_config", lambda: (Decimal("1"), PRICING))

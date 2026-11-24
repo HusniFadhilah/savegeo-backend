@@ -83,7 +83,7 @@ def register(payload: UserRegisterRequest, response: Response, db: Session = Dep
 def login(payload: UserLoginRequest, request: Request, response: Response, db: Session = Depends(get_db)):
     auth_throttle.ensure_login_allowed(request, "user", payload.username)
     user = db.query(User).filter_by(username=payload.username).first()
-    if not verify_login_password(payload.password, user):
+    if user is None or not verify_login_password(payload.password, user):
         auth_throttle.record_login_failure(request, "user", payload.username)
         raise HTTPException(status_code=401, detail="Invalid username or password")
     auth_throttle.record_login_success(request, "user", payload.username)
