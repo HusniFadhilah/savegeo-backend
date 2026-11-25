@@ -11,6 +11,7 @@ import re
 import tempfile
 import uuid
 import zipfile
+from typing import Any
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, Header, Query, Request, Response, UploadFile
@@ -73,7 +74,7 @@ def _snapshot_quality(inputs: dict, outputs: dict) -> dict:
         "season_window": {"season", "season_window", "seasonal_window"},
         "provider_scene_manifest": {"source_provenance", "provider_scene_manifest", "scene_manifest"},
     }
-    found = {}
+    found: dict[str, Any] = {}
     queue = [{**(inputs or {}), **(outputs or {})}]
     visited = 0
     while queue and visited < 3000:
@@ -162,7 +163,7 @@ async def import_registry_csv(
         headers = {str(item).strip().lower() for item in (reader.fieldnames or [])}
         if not required.issubset(headers):
             raise ValueError("Header wajib: " + ", ".join(sorted(required)))
-        rows = []
+        rows: list[dict[str, Any]] = []
         for row in reader:
             if len(rows) >= 1000:
                 raise ValueError("CSV maksimal berisi 1.000 baris.")
