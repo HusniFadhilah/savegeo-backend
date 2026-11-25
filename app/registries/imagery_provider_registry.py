@@ -610,7 +610,8 @@ def provider_capabilities(meta: dict[str, Any]) -> dict[str, Any]:
     """Normalize provider capabilities for the imagery catalog response."""
     source_kind = str(meta.get("source_kind") or "gee")
     visualization = str(meta.get("visualization") or "rgb")
-    declared = meta.get("capabilities") if isinstance(meta.get("capabilities"), dict) else {}
+    raw_capabilities = meta.get("capabilities")
+    declared: dict[str, Any] = raw_capabilities if isinstance(raw_capabilities, dict) else {}
     visualization_only = source_kind in {"esri_wayback", "google_basemap", "apple_basemap", "himawari"}
     commercial = source_kind in {
         "planet", "maxar", "commercial", "planet_stac", "vantor_stac", "iceye_stac",

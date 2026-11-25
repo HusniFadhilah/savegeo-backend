@@ -1024,7 +1024,7 @@ def _options(height_unit: str, plot_area_m2: str | None, area_basis: str | None,
     if height_unit not in ("m", "cm") or area_basis not in (None, "", "measured", "assumed") or (area is not None and area <= 0):
         raise DmrvError(422, "bad_options", "height_unit: m|cm; area_basis: measured|assumed; plot_area_m2 > 0.")
     return ImportOptions(
-        height_unit=height_unit, plot_area_m2=area, area_basis=area_basis or None, default_visit_year=year,  # type: ignore[arg-type]
+        height_unit=height_unit, plot_area_m2=area, area_basis=area_basis or None, default_visit_year=year,
     )
 
 

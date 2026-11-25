@@ -139,6 +139,8 @@ def _confirmed_plot_area(dataset: CarbonCalibrationDataset) -> tuple[float | Non
     if not manifest.get("plot_area_confirmed"):
         return None, None
     area_m2 = manifest.get("plot_area_m2")
+    if area_m2 is None:
+        return None, None
     try:
         area_m2 = float(area_m2)
     except (TypeError, ValueError):
@@ -672,7 +674,7 @@ async def import_carbon_sources(
         raise HTTPException(status_code=415, detail="dem must be a GeoTIFF file")
 
     base_id = dataset_id.removesuffix("_2026")
-    definitions = [
+    definitions: list[tuple[str, str, UploadFile, int | None, str, str]] = [
         (
             f"{base_id}_2026",
             "Bu Dessy revised carbon survey 2026",
@@ -836,16 +838,14 @@ def validate_dataset(dataset_id: str, db: Session = Depends(get_db)):
             or not (plot.geometry_original or plot.geometry_normalized)
             for plot in dataset.plots
         )
-        coordinates = {}
+        coordinates: dict[tuple[float, float], list[str]] = {}
         for plot in dataset.plots:
             geometry = plot.geometry_original or plot.geometry_normalized or {}
             values = geometry.get("coordinates") if geometry.get("type") == "Point" else None
             if values and len(values) >= 2:
                 key = (round(float(values[0]), 6), round(float(values[1]), 6))
                 coordinates.setdefault(key, []).append(plot.plot_id)
-        coordinate_review_count += sum(
-            len(plot_ids) for plot_ids in coordinates.values() if len(plot_ids) > 1
-        )
+        coordinate_review_count += sum(1 for plot_ids in coordinates.values() if len(plot_ids) > 1)
         if unresolved_area_count:
             errors.append({
                 "code": "plot_area_unconfirmed",

@@ -327,7 +327,7 @@ async def import_validation(
             "predicted",
         }:
             raise ValueError("Kolom CSV: point_id,lon,lat,observed,predicted")
-        pairs = []
+        pairs: list[dict[str, str]] = []
         for line in reader:
             if len(pairs) >= 2000:
                 raise ValueError("Maksimal 2000 titik per dataset.")

@@ -80,11 +80,11 @@ def arcgis_tile_proxy(
     lat_min = math.degrees(math.atan(math.sinh(math.pi * (1.0 - 2.0 * (y + 1) / n))))
 
     # AOI clip bbox - encoded by compute_arcgis_landcover_summary
-    clip_bbox = (
-        (clip_west, clip_south, clip_east, clip_north)
-        if all(v is not None for v in (clip_west, clip_south, clip_east, clip_north))
-        else None
-    )
+    clip_bbox = None
+    if all(value is not None for value in (clip_west, clip_south, clip_east, clip_north)):
+        # Explicit checks below make the tuple concrete for static analysis.
+        if clip_west is not None and clip_south is not None and clip_east is not None and clip_north is not None:
+            clip_bbox = (clip_west, clip_south, clip_east, clip_north)
 
     # Fast-reject: tile completely outside AOI bbox -> transparent 1x1
     if clip_bbox:
@@ -150,15 +150,16 @@ def arcgis_tile_proxy(
             "rings": [[[cw, cs], [ce, cs], [ce, cn], [cw, cn], [cw, cs]]],
             "spatialReference": {"wkid": 4326},
         }
-        clip_rule = {
+        clip_args: dict[str, object] = {
+            "ClippingType": 1,
+            "ClippingGeometry": clip_geom,
+        }
+        clip_rule: dict[str, object] = {
             "rasterFunction": "Clip",
-            "rasterFunctionArguments": {
-                "ClippingType": 1,
-                "ClippingGeometry": clip_geom,
-            },
+            "rasterFunctionArguments": clip_args,
         }
         if "renderingRule" in params:
-            clip_rule["rasterFunctionArguments"]["Raster"] = json.loads(params["renderingRule"])
+            clip_args["Raster"] = json.loads(params["renderingRule"])
         params["renderingRule"] = json.dumps(clip_rule)
 
     # Only send time filter for time-aware services

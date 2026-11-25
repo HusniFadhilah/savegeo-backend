@@ -110,7 +110,13 @@ class ExternalRasterProvider:
         raw_values = self.sample_carbon_labels(meta, points)
 
         transform = meta.get("transform", "none")
-        values = [_apply_transform(v, transform) for v in raw_values if v is not None]
+        values = [
+            transformed
+            for raw_value in raw_values
+            if raw_value is not None
+            for transformed in [_apply_transform(raw_value, transform)]
+            if transformed is not None
+        ]
 
         if len(values) < 5:
             raise RuntimeError(
@@ -284,13 +290,17 @@ def _soilgrids_components_point_detailed(
         stock = None
         rock_values = [cfvo_map.get(label) for label, _ in depths]
         if all(soc_map.get(label) is not None and bd_map.get(label) is not None for label, _ in depths):
-            stock_parts = []
+            stock_parts: list[float] = []
             for label, thickness in depths:
+                soc_value = soc_map.get(label)
+                bd_value = bd_map.get(label)
+                if soc_value is None or bd_value is None:
+                    continue
                 raw_cfvo = cfvo_map.get(label)
                 # SoilGrids cfvo is cm3/dm3, so /1000 is the occupied
                 # coarse-fragment volume fraction (0..1).
                 correction = 1.0 if raw_cfvo is None else max(0.0, 1.0 - min(float(raw_cfvo) / 1000.0, 0.95))
-                stock_parts.append((soc_map[label] / 10.0) * (bd_map[label] / 100.0) * thickness / 10.0 * correction)
+                stock_parts.append((soc_value / 10.0) * (bd_value / 100.0) * thickness / 10.0 * correction)
             stock = sum(stock_parts)
         valid_rock = [max(0.0, min(float(raw) / 1000.0, 0.95)) for raw in rock_values if raw is not None]
         rock_mean = sum(valid_rock) / len(valid_rock) if valid_rock else None
@@ -476,7 +486,7 @@ def _sample_cog_tiled(
         url = tile_url_template.format(lat_tile=lat_str, lon_tile=lon_str)
         lossyear_url = (
             lossyear_template.format(lat_tile=lat_str, lon_tile=lon_str)
-            if mask_lossyear else None
+            if mask_lossyear and lossyear_template is not None else None
         )
         raster_host = None
         try:
