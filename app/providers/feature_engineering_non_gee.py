@@ -16,6 +16,7 @@ import logging
 from dataclasses import dataclass, field
 
 import numpy as np
+from affine import Affine
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,7 @@ class NonGeeStack:
            the same grid (same transform/crs/shape).
     """
     bands: dict[str, np.ndarray]
-    transform: object  # affine.Affine
+    transform: Affine
     crs: object         # rasterio.crs.CRS
     shape: tuple[int, int]  # (H, W)
     provenance: dict = field(default_factory=dict)

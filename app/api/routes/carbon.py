@@ -62,14 +62,18 @@ def carbon_blue_carbon_catalog(db: Session = Depends(get_db)):
         and record.get("status") == "published"
         and not record.get("is_curated")
     ]
-    curated_ids = {record["id"] for record in BLUE_CARBON_OPEN_DATASETS}
+    curated_ids = {
+        str(record.get("id"))
+        for record in BLUE_CARBON_OPEN_DATASETS
+        if isinstance(record, dict) and record.get("id") is not None
+    }
     published = [record for record in published if record.get("id") not in curated_ids]
     return {"profiles": [*BLUE_CARBON_OPEN_DATASETS, *published]}
 
 
 @router.get("/carbon/green-rankings/latest")
 def latest_green_rankings_snapshot(
-    year: int = Query(ge=2015),
+    year: int = Query(ge=2000),
     start_month: int = Query(default=1, ge=1, le=12),
     end_month: int = Query(default=12, ge=1, le=12),
     level: str = Query(default="province", pattern="^(province|city|district|village)$"),
@@ -121,7 +125,7 @@ def green_rankings_page(
     search: str = Query(default="", max_length=100),
     sort_by: str = Query(default="rank", max_length=40),
     sort_dir: str = Query(default="asc", pattern="^(asc|desc)$"),
-    year: int | None = Query(default=None, ge=2015),
+    year: int | None = Query(default=None, ge=2000),
     start_month: int | None = Query(default=None, ge=1, le=12),
     end_month: int | None = Query(default=None, ge=1, le=12),
     level: str | None = Query(default=None, pattern="^(province|city|district|village)$"),
@@ -185,7 +189,7 @@ def green_rankings_page(
 @router.get("/carbon/green-rankings/{run_id}/export")
 def export_green_rankings(
     run_id: str,
-    year: int | None = Query(default=None, ge=2015),
+    year: int | None = Query(default=None, ge=2000),
     start_month: int | None = Query(default=None, ge=1, le=12),
     end_month: int | None = Query(default=None, ge=1, le=12),
     level: str | None = Query(default=None, pattern="^(province|city|district|village)$"),

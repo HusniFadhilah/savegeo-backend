@@ -56,9 +56,12 @@ async def report_completed_analysis_job(
         if isinstance(estimated.get("statistics"), dict):
             carbon_stats = dict(estimated["statistics"])
         if not carbon_stats and pools:
-            first = next((item for item in pools.values() if isinstance(item, dict)), {})
-            estimated = first.get("carbon_estimated") if isinstance(first.get("carbon_estimated"), dict) else {}
-            carbon_stats = dict(estimated.get("statistics") or {})
+            first = next((item for item in pools.values() if isinstance(item, dict)), None)
+            if isinstance(first, dict):
+                candidate = first.get("carbon_estimated")
+                estimated = candidate if isinstance(candidate, dict) else {}
+                statistics = estimated.get("statistics")
+                carbon_stats = dict(statistics) if isinstance(statistics, dict) else {}
         model_info = result.get("model_info") if isinstance(result.get("model_info"), dict) else {}
         analysis["carbon"] = {
             "statistics": carbon_stats,
@@ -72,11 +75,16 @@ async def report_completed_analysis_job(
     elif job_type == "vegetation":
         analysis["vegetation"] = result
 
-    manifest = (provenance.provenance or {}).get("inference_manifest") or {}
-    pinned_model = manifest.get("pinned_model") if isinstance(manifest.get("pinned_model"), dict) else {}
+    provenance_payload = provenance.provenance if isinstance(provenance.provenance, dict) else {}
+    manifest_value = provenance_payload.get("inference_manifest")
+    manifest = manifest_value if isinstance(manifest_value, dict) else {}
+    pinned_value = manifest.get("pinned_model")
+    pinned_model = pinned_value if isinstance(pinned_value, dict) else {}
+    model_value = manifest.get("model")
+    manifest_model = model_value if isinstance(model_value, dict) else {}
     model_entry = {
-        "name": pinned_model.get("name") or (manifest.get("model") or {}).get("model_name"),
-        "version": pinned_model.get("version") or (manifest.get("model") or {}).get("model_version"),
+        "name": pinned_model.get("name") or manifest_model.get("model_name"),
+        "version": pinned_model.get("version") or manifest_model.get("model_version"),
         "artifact_sha256": pinned_model.get("artifact_sha256"),
     }
     metadata = {

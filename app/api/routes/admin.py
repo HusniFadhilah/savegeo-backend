@@ -726,7 +726,7 @@ def admin_models_list(
             item["metadata_json"] = decode_json_value(item.get("metadata_json"), {})
             for date_field in ("uploaded_at", "updated_at"):
                 value = item.get(date_field)
-                item[date_field] = value.isoformat() if hasattr(value, "isoformat") else value
+                item[date_field] = value.isoformat() if value is not None and hasattr(value, "isoformat") else value
             item["lifecycle_state"] = "legacy_unmigrated"
             item["approved_by"] = None
             item["approved_at"] = None

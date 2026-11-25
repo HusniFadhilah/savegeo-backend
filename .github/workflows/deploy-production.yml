@@ -61,6 +61,7 @@ jobs:
           pip install --no-deps --no-build-isolation -e .
           ruff check . --ignore E501 --ignore B904 --ignore B905
           mypy app
+          mypy --config-file .github/mypy-surface.ini app/api/routes app/providers app/registries
           bash -n scripts/load_backup_environment.sh scripts/backup_offsite.sh scripts/restore_drill.sh scripts/restore_local_backup_drill.sh
           bandit -r app -lll
           for attempt in 1 2 3; do

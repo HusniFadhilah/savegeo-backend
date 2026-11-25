@@ -110,7 +110,7 @@ def _job_path(job_id: str) -> Path:
 
 
 def job_owner_key(viewer: AppViewer) -> str:
-    return f"user:{viewer.id}" if isinstance(viewer, User) else f"admin:{viewer.id}"  # type: ignore[attr-defined]
+    return f"user:{viewer.id}" if isinstance(viewer, User) else f"admin:{viewer.id}"
 
 
 def viewer_owns_job(job_id: str, viewer: AppViewer, created_by_user_id: int | None = None) -> bool:
