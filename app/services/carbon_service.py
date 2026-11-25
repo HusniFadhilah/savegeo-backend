@@ -989,6 +989,7 @@ def calculate_carbon_summary_for_year(
         "images_used": quality.images_used,
         "valid_pixel_pct": quality.valid_pixel_pct,
         "gap_filled": quality.gap_filled,
+        "source_provenance": list(quality.provider_scenes),
     }
 
 
@@ -1846,6 +1847,7 @@ def analyze_carbon(db: Session, data: dict) -> dict:
             "valid_pixel_pct": quality.valid_pixel_pct,
             "gap_filled": quality.gap_filled,
             "images_used": quality.images_used,
+            "source_provenance": list(quality.provider_scenes),
             "coefficient_of_variation_pct": _cv_pct,
             "model_r2": (model_info.get("cv_metrics") or {}).get("r2_mean"),
             "model_rmse": (model_info.get("cv_metrics") or {}).get("rmse_mean"),

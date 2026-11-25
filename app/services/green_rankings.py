@@ -364,6 +364,143 @@ def latest_snapshot(config, **page_options):
     raise missing_scope_error or AnalysisError("Snapshot peringkat wilayah tidak ditemukan.", 404)
 
 
+def historical_rankings(config, through_year, *, top_n=10):
+    """Return saved top regions per year and the selected cohort's annual trend."""
+    db: Session = SessionLocal()
+    try:
+        through_year = int(through_year)
+        requested_parents = {
+            key: str(config[key]) for key in LEVELS[:-1] if config.get(key)
+        }
+        snapshots = (
+            db.query(GreenRankingSnapshot)
+            .filter(
+                GreenRankingSnapshot.config["level"].astext == str(config["level"]),
+                GreenRankingSnapshot.config["start_month"].astext == str(config["start_month"]),
+                GreenRankingSnapshot.config["end_month"].astext == str(config["end_month"]),
+                GreenRankingSnapshot.config["scale"].astext == str(config["scale"]),
+                GreenRankingSnapshot.config["algorithm"].astext == str(config["algorithm"]),
+                GreenRankingSnapshot.config["year"].astext.cast(Integer) <= through_year,
+            )
+            .all()
+        )
+        by_year = {}
+        for snapshot in snapshots:
+            stored = snapshot.config or {}
+            try:
+                snapshot_year = int(stored.get("year"))
+            except (TypeError, ValueError):
+                continue
+            if snapshot_year > through_year:
+                continue
+            if any(
+                stored.get(key) != config.get(key)
+                for key in ("level", "start_month", "end_month", "scale", "algorithm")
+            ):
+                continue
+            # An ancestor snapshot can be narrowed to requested parents, but a
+            # snapshot scoped to another or smaller child region cannot be reused.
+            if any(
+                stored.get(key)
+                and (not requested_parents.get(key) or stored.get(key) != requested_parents[key])
+                for key in LEVELS[:-1]
+            ):
+                continue
+            specificity = sum(bool(stored.get(key)) for key in LEVELS[:-1])
+            current = by_year.get(snapshot_year)
+            candidate_order = (specificity, snapshot.refreshed_at)
+            if current is None or candidate_order > current[0]:
+                by_year[snapshot_year] = (candidate_order, snapshot)
+
+        def ranked_rows(snapshot, limit=None, codes=None):
+            query = db.query(GreenRankingSnapshotRow).filter(
+                GreenRankingSnapshotRow.scope_key == snapshot.scope_key,
+                GreenRankingSnapshotRow.eligible.is_(True),
+                GreenRankingSnapshotRow.green_percent.is_not(None),
+            )
+            for key, value in requested_parents.items():
+                query = query.filter(getattr(GreenRankingSnapshotRow, key) == value)
+            if codes is not None:
+                query = query.filter(GreenRankingSnapshotRow.code.in_(codes))
+            query = query.order_by(
+                GreenRankingSnapshotRow.green_percent.desc().nullslast(),
+                GreenRankingSnapshotRow.code.asc(),
+            )
+            if limit is not None:
+                query = query.limit(limit)
+            return query.all()
+
+        def eligible_count(snapshot):
+            query = db.query(func.count(GreenRankingSnapshotRow.code)).filter(
+                GreenRankingSnapshotRow.scope_key == snapshot.scope_key,
+                GreenRankingSnapshotRow.eligible.is_(True),
+                GreenRankingSnapshotRow.green_percent.is_not(None),
+            )
+            for key, value in requested_parents.items():
+                query = query.filter(getattr(GreenRankingSnapshotRow, key) == value)
+            return int(query.scalar() or 0)
+
+        annual = []
+        snapshots_by_year = {}
+        for snapshot_year in sorted(by_year):
+            snapshot = by_year[snapshot_year][1]
+            snapshots_by_year[snapshot_year] = snapshot
+            rows = ranked_rows(snapshot, limit=top_n)
+            annual.append({
+                "year": snapshot_year,
+                "snapshot_saved_at": snapshot.refreshed_at.isoformat(),
+                "eligible_regions": eligible_count(snapshot),
+                "top10": [
+                    {
+                        **(row.payload or {}),
+                        "rank": index,
+                        "code": row.code,
+                        "name": row.name,
+                        "green_percent": row.green_percent,
+                        "coverage_percent": row.coverage_percent,
+                    }
+                    for index, row in enumerate(rows, start=1)
+                ],
+            })
+
+        cohort_year = (
+            through_year
+            if through_year in snapshots_by_year
+            else (max(snapshots_by_year) if snapshots_by_year else None)
+        )
+        cohort_rows = ranked_rows(snapshots_by_year[cohort_year], limit=top_n) if cohort_year is not None else []
+        cohort_codes = [row.code for row in cohort_rows]
+        trend = []
+        if cohort_codes:
+            trend_by_code = {
+                row.code: {"code": row.code, "name": row.name, "points": []}
+                for row in cohort_rows
+            }
+            for snapshot_year, snapshot in snapshots_by_year.items():
+                rows = ranked_rows(snapshot, codes=cohort_codes)
+                for row in rows:
+                    trend_by_code[row.code]["points"].append({
+                        "year": snapshot_year,
+                        "green_percent": row.green_percent,
+                    })
+            trend = [trend_by_code[row.code] for row in cohort_rows]
+
+        return {
+            "selected_year": through_year,
+            "cohort_year": cohort_year,
+            "available_years": sorted(snapshots_by_year),
+            "years": annual,
+            "trend": trend,
+            "period": {
+                "start_month": config["start_month"],
+                "end_month": config["end_month"],
+                "level": config["level"],
+            },
+        }
+    finally:
+        db.close()
+
+
 def publish_snapshot(run, owner):
     """Atomically replace the saved annual result after a run completes."""
     with connection() as local_db:

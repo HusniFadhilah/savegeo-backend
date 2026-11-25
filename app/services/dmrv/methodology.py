@@ -13,20 +13,24 @@ from app.services.dmrv.errors import DmrvError
 VERRA_VM0047 = "https://verra.org/methodologies/vm0047-afforestation-reforestation-and-revegetation-v1-1/"
 VERRA_DSP = "https://verra.org/methodologies-main/application-for-listed-data-service-providers-under-vm0047/"
 VERRA_REVIEWER = "https://verra.org/verra-releases-new-resources-for-arr-projects/"
+VERRA_VMD0054 = "https://verra.org/methodologies/vmd0054-estimating-leakage-from-the-displacement-of-agricultural-activities-v1-1/"
 
 RULES = [
-    {"key": "approach", "title": "Approach and applicability", "description": "Record whether the project uses the area-based or census-based approach and document why it fits the activity.", "source": VERRA_VM0047, "required": True},
-    {"key": "activity_eligibility", "title": "ARR activity and land eligibility", "description": "Document the activity, land-use context, project start conditions, and eligibility checks for this project.", "source": VERRA_VM0047, "required": True},
-    {"key": "dynamic_performance_benchmark", "title": "Dynamic performance benchmark", "description": "For area-based projects, retain project/control plot inputs and the performance-benchmark method and outputs for each verification.", "source": VERRA_VM0047, "required": True, "approach": "area_based"},
-    {"key": "census_planting_records", "title": "Census and planting records", "description": "For census-based projects, retain the census protocol, planting-unit records, and project-method additionality evidence.", "source": VERRA_VM0047, "required": True, "approach": "census_based"},
-    {"key": "stocking_index_resolution", "title": "Stocking Index resolution", "description": "For the area-based approach's Stocking Index product, record final pixel size and specification. Verra's listed-provider requirements specify ≤30 m.", "source": VERRA_DSP, "required": True, "approach": "area_based"},
-    {"key": "stocking_index_annual", "title": "Annual Stocking Index coverage", "description": "For area-based projects, record annual availability for relevant baseline and monitoring years, including gaps.", "source": VERRA_DSP, "required": True, "approach": "area_based"},
-    {"key": "seasonality", "title": "Seasonal consistency", "description": "For optical imagery in the Stocking Index, document the consistent seasonal window and quality filters.", "source": VERRA_DSP, "required": True, "approach": "area_based"},
-    {"key": "agb_correlation", "title": "Stocking Index and AGB relationship", "description": "For area-based Stocking Index, retain evidence of correlation with AGB in the forest type or ecoregion and explain project-level assessment.", "source": VERRA_DSP, "required": True, "approach": "area_based"},
-    {"key": "leakage", "title": "Leakage applicability", "description": "For area-based projects, document leakage assessment under VMD0054 where applicable; for census-based projects, document the basis for the methodology's stated leakage treatment.", "source": VERRA_VM0047, "required": True},
-    {"key": "monitoring_and_calculation", "title": "Monitoring and quantification", "description": "Retain monitoring-period inputs, carbon-stock calculations, uncertainty treatment, and reproducible supporting data for reviewer assessment.", "source": VERRA_REVIEWER, "required": True},
+    {"key": "approach", "title": "Approach and applicability", "description": "Record the selected area-based or census-based approach, activity type, and evidence that the project meets that approach's applicability conditions.", "source": VERRA_VM0047, "required": True},
+    {"key": "project_boundary_and_start", "title": "Project boundary and start date", "description": "Retain the georeferenced project boundary, version history, start date, eligibility evidence, and boundary updates used for accounting.", "source": VERRA_VM0047, "required": True},
+    {"key": "land_eligibility_and_baseline", "title": "Land eligibility and baseline", "description": "Document prior land use, land eligibility, baseline scenario, historical evidence, and the basis for the selected reference period.", "source": VERRA_VM0047, "required": True},
+    {"key": "additionality", "title": "Additionality and regulatory surplus", "description": "Retain the applicable additionality assessment and evidence for regulatory surplus, investment/barrier, or performance benchmark routes as required by the project and method.", "source": VERRA_VM0047, "required": True},
+    {"key": "project_activities_and_monitoring", "title": "Project activities and monitoring plan", "description": "Record the activity schedule, implementation evidence, monitoring parameters, frequency, responsibilities, and changes from the validated plan.", "source": VERRA_VM0047, "required": True},
+    {"key": "pool_selection_and_accounting", "title": "Carbon pools and accounting", "description": "List included/excluded pools, measurement methods, stock-change data, uncertainty, project emissions, and reasons for permitted exclusions.", "source": VERRA_VM0047, "required": True},
+    {"key": "dynamic_performance_benchmark", "title": "Dynamic performance benchmark", "description": "For area-based projects, retain applicable control-plot design, matched project/control Stocking Index series, annual performance benchmark, and calculations for each monitoring/verification period.", "source": VERRA_VM0047, "required": True, "approach": "area_based"},
+    {"key": "stocking_index_specification", "title": "Stocking Index specification and resolution", "description": "Record product/provider, pixel size, calibration/validation relationship to AGB, and current Verra listed-provider requirements; resolution alone does not establish compliance.", "source": VERRA_DSP, "required": True, "approach": "area_based"},
+    {"key": "stocking_index_temporal_quality", "title": "Annual coverage, seasonality, and image quality", "description": "Record annual baseline/monitoring coverage, seasonal window, observation gaps, quality filters, sensor/product versions, and time-series comparability evidence.", "source": VERRA_DSP, "required": True, "approach": "area_based"},
+    {"key": "census_eligibility_and_records", "title": "Census eligibility and planting records", "description": "For census-based projects, retain evidence for census eligibility, unchanged land use, direct planting, census/plot protocol, planting-unit counts, survival, and initial stock where applicable.", "source": VERRA_VM0047, "required": True, "approach": "census_based"},
+    {"key": "emissions_and_uncertainty", "title": "Emission sources and uncertainty", "description": "Document applicable project GHG sources, measurement/model uncertainty, sampling and spatial design, correlation assumptions, and reproducible supporting calculations.", "source": VERRA_VM0047, "required": True},
+    {"key": "leakage", "title": "Leakage and VMD0054 applicability", "description": "For area-based projects, document leakage applicability and the VMD0054 pathway, historical production/reference window, mitigation, cross-commodity treatment, factors, evidence, and monitoring duration. Census-based projects must document the method's stated treatment.", "source": VERRA_VMD0054, "required": True},
+    {"key": "non_permanence_and_safeguards", "title": "Non-permanence and safeguards", "description": "Retain reversal-risk assessment/buffer evidence, safeguards, stakeholder engagement, grievance handling, and monitoring of identified risks where applicable.", "source": VERRA_VM0047, "required": True},
+    {"key": "verification_package", "title": "Verification package and independent review", "description": "Keep traceable versions of monitoring reports, calculations, source data, reviewer findings, corrective actions, and submitted evidence for the verification period.", "source": VERRA_REVIEWER, "required": True},
 ]
-
 
 def normalize(value: str | None) -> str:
     return "".join((value or "").lower().replace(" ", "").replace("_", "").split())
@@ -64,7 +68,7 @@ def get_checklist(db: Session, principal: Principal, project_id: str) -> dict:
         "methodology_version": project.methodology_version,
         "supported": supported,
         "pack_id": "verra-vm0047-v1.1-savegeo-review-aid" if supported else None,
-        "reviewed_on": "2026-11-21" if supported else None,
+        "reviewed_on": "2026-11-24" if supported else None,
         "approach": approach if supported else None,
         "approach_options": ["area_based", "census_based"] if supported else [],
         "items": rules,

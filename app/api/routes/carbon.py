@@ -110,6 +110,33 @@ def latest_green_rankings_snapshot(
         raise HTTPException(status_code=exc.status_code, detail=public_analysis_error(exc)) from exc
 
 
+@router.get("/carbon/green-rankings/history")
+def green_rankings_history(
+    year: int = Query(ge=2015),
+    start_month: int = Query(default=1, ge=1, le=12),
+    end_month: int = Query(default=12, ge=1, le=12),
+    level: str = Query(default="province", pattern="^(province|city|district|village)$"),
+    province: str | None = Query(default=None, max_length=40),
+    city: str | None = Query(default=None, max_length=40),
+    district: str | None = Query(default=None, max_length=40),
+    viewer: object = Depends(get_current_app_viewer),
+):
+    """Read annual top-ten snapshots and the current cohort's historical trend."""
+    from app.services.green_rankings import historical_rankings, ranking_config
+
+    _ = viewer
+    try:
+        config = ranking_config(
+            {"level": level, "province": province, "city": city, "district": district},
+            year,
+            start_month,
+            end_month,
+        )
+        return historical_rankings(config, year, top_n=10)
+    except AnalysisError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=public_analysis_error(exc)) from exc
+
+
 UPSTREAM_CONNECTION_ERROR = (
     "Koneksi ke layanan data eksternal terputus sebelum respons diterima. "
     "Coba jalankan ulang analisis; jika berulang, kecilkan AOI/rentang waktu "
