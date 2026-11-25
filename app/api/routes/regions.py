@@ -27,6 +27,7 @@ router = APIRouter(prefix="/regions", tags=["regions"])
 logger = logging.getLogger(__name__)
 
 GEO_STATIC_DIR = Path(__file__).resolve().parents[2] / "static" / "geo"
+PROVINCES_38_GEOJSON = GEO_STATIC_DIR / "indonesia_provinces_38.geojson"
 ISLANDS_GEO_DIR = GEO_STATIC_DIR / "islands"
 ISLAND_NAMES = ["Sumatra", "Kalimantan", "Jawa", "Sulawesi", "Bali_Nusa_Tenggara", "Maluku", "Papua"]
 ISLAND_LABELS = {
@@ -41,6 +42,19 @@ _REGION_DEADLINE_SECONDS = 25.0
 _REGION_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="regions")
 _REGION_SLOTS = BoundedSemaphore(24)
 _VALIDATED_BOUNDARY_PROVIDER = CachedBoundaryProvider(RegionBoundaryProvider(), ttl_seconds=86400)
+
+
+def _local_province_features() -> dict[str, dict]:
+    """Read the checked-in 38-province boundary set for provider gaps."""
+    try:
+        payload = json.loads(PROVINCES_38_GEOJSON.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return {
+        str(feature.get("properties", {}).get("KODE_PROV")): feature
+        for feature in payload.get("features", [])
+        if feature.get("properties", {}).get("KODE_PROV")
+    }
 
 
 def _swap_lat_lng(node):
@@ -111,21 +125,31 @@ def _classify_province_island(name: str) -> str:
 
 @router.get("/provinces")
 def get_provinces(island: str | None = None):
+    local_features = _local_province_features()
     try:
         r = requests.get(f"{_base_url()}/province", params={"is_for_dropdown": 1}, timeout=20, allow_redirects=False)
         r.raise_for_status()
         data = r.json()
-        if island:
-            if island not in ISLAND_NAMES:
-                raise HTTPException(status_code=400, detail=f"Unknown island {island!r}. Valid: {ISLAND_NAMES}")
-            if isinstance(data, dict):
-                data = {name: code for name, code in data.items() if _classify_province_island(name) == island}
-        return data
+        items = _extract_region_dropdown_items(data)
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("Region provider request failed")
-        raise HTTPException(status_code=502, detail="Region provider temporarily unavailable") from e
+        if not local_features:
+            logger.error("Region provider request failed")
+            raise HTTPException(status_code=502, detail="Region provider temporarily unavailable") from e
+        logger.warning("Using checked-in province list while the region provider is unavailable")
+        items = []
+    merged = {code: name for name, code in items}
+    for code, feature in local_features.items():
+        # The external provider still exposes old, unsplit Papua boundaries for
+        # some codes. Prefer the checked-in 38-province set for names as well as
+        # geometry so dropdown codes cannot combine old and new administrations.
+        merged[code] = str(feature.get("properties", {}).get("PROVINSI") or merged.get(code) or code)
+    if island:
+        if island not in ISLAND_NAMES:
+            raise HTTPException(status_code=400, detail=f"Unknown island {island!r}. Valid: {ISLAND_NAMES}")
+        merged = {code: name for code, name in merged.items() if _classify_province_island(name) == island}
+    return {name: code for code, name in sorted(merged.items(), key=lambda item: item[1])}
 
 
 @router.get("/cities")
@@ -204,17 +228,33 @@ def get_region_geometry(endpoint: str = "", code: str = Query(default="", min_le
         raise HTTPException(status_code=400, detail="endpoint and code are required")
     if endpoint not in {"province", "city", "district", "village"}:
         raise HTTPException(status_code=400, detail="Invalid region endpoint")
+    if endpoint == "province":
+        local = _local_province_features().get(code)
+        if local:
+            return local
     try:
         r = requests.get(f"{_base_url()}/{endpoint}", params={"code": code}, timeout=20, allow_redirects=False)
         r.raise_for_status()
         data = r.json()
         if data.get("meta", {}).get("code") == 200:
             region = data.get("data", {}).get("region")
+            if isinstance(region, dict) and region.get("type") == "FeatureCollection" and not region.get("features"):
+                local = _local_province_features().get(code) if endpoint == "province" else None
+                if local:
+                    logger.warning("Using checked-in province boundary for empty provider geometry code=%s", code)
+                    return local
             return _fix_geometry_coord_order(region, endpoint)
         raise HTTPException(status_code=404, detail="Region not found")
     except HTTPException:
+        local = _local_province_features().get(code) if endpoint == "province" else None
+        if local:
+            return local
         raise
     except Exception as e:
+        local = _local_province_features().get(code) if endpoint == "province" else None
+        if local:
+            logger.warning("Using checked-in province boundary for provider gap code=%s", code)
+            return local
         logger.error("Region provider request failed")
         raise HTTPException(status_code=502, detail="Region provider temporarily unavailable") from e
 

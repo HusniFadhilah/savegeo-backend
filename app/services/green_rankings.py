@@ -975,7 +975,7 @@ def run_batch(data):
                         continue
                     cached = (
                         None
-                        if config.get("force_refresh")
+                        if config.get("force_refresh") and not settings.get("reuse_cache")
                         else db.execute("SELECT payload FROM cache WHERE key=?", (key,)).fetchone()
                     )
                     if cached:
