@@ -2,7 +2,6 @@ import pytest
 
 from app.schemas.dmrv_carbon_features import (
     BlueCarbonMonitoringInput,
-    BlueCarbonPeriod,
     MethodologyCalculationInput,
     SamplingPlanInput,
     UncertaintyBudgetInput,

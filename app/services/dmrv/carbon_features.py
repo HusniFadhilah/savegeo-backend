@@ -387,7 +387,7 @@ def uncertainty_budget(data: UncertaintyBudgetInput) -> dict:
     upper_bound = draws[max(0, min(len(draws) - 1, int((1 - alpha) * len(draws)) - 1))]
     denominator = variance or 1.0
     ranked = []
-    for i, item in enumerate(data.components):
+    for i in range(len(data.components)):
         contribution = sum(covariance[i])
         ranked.append({**component_rows[i], "correlated_variance_contribution_tco2e2": contribution,
                        "variance_share_pct": contribution / denominator * 100 if variance else 0.0})

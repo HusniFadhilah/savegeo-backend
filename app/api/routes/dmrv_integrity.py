@@ -11,6 +11,7 @@ import re
 import tempfile
 import uuid
 import zipfile
+from typing import Any
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, Header, Query, Request, Response, UploadFile
@@ -22,6 +23,7 @@ from starlette.background import BackgroundTask
 
 from app.core.security import get_current_app_viewer
 from app.db.models.dmrv_advanced import DmrvCreditEvent, DmrvFieldCapture
+from app.db.models.dmrv_boundary import BoundaryVersion
 from app.db.models.dmrv_field import SurveyPlot
 from app.db.models.dmrv_integrity import DmrvIntegrityDocument, DmrvIntegrityRevision
 from app.db.models.dmrv_project import DmrvProject, ProjectMember
@@ -72,7 +74,7 @@ def _snapshot_quality(inputs: dict, outputs: dict) -> dict:
         "season_window": {"season", "season_window", "seasonal_window"},
         "provider_scene_manifest": {"source_provenance", "provider_scene_manifest", "scene_manifest"},
     }
-    found = {}
+    found: dict[str, Any] = {}
     queue = [{**(inputs or {}), **(outputs or {})}]
     visited = 0
     while queue and visited < 3000:
@@ -161,8 +163,8 @@ async def import_registry_csv(
         headers = {str(item).strip().lower() for item in (reader.fieldnames or [])}
         if not required.issubset(headers):
             raise ValueError("Header wajib: " + ", ".join(sorted(required)))
-        rows = []
-        for line, row in enumerate(reader, start=2):
+        rows: list[dict[str, Any]] = []
+        for row in reader:
             if len(rows) >= 1000:
                 raise ValueError("CSV maksimal berisi 1.000 baris.")
             normalized = {str(k).strip().lower(): (v or "").strip() for k, v in row.items() if k}
