@@ -123,15 +123,19 @@ def test_analysis_routes_reject_out_of_range_year_before_service(monkeypatch, pa
     assert response.json()["code"] == "validation_error"
 
 
-def test_region_provider_errors_do_not_expose_upstream_details(monkeypatch):
+def test_region_provider_outage_uses_checked_in_province_boundaries(monkeypatch):
     def fail(*_args, **_kwargs):
         raise RuntimeError("private-region-provider-url")
 
     monkeypatch.setattr(regions.requests, "get", fail)
-    with pytest.raises(HTTPException) as error:
-        regions.get_provinces()
-    assert error.value.status_code == 502
-    assert "private-region-provider-url" not in str(error.value.detail)
+    provinces = regions.get_provinces()
+    assert len(provinces) == 38
+    assert "private-region-provider-url" not in str(provinces)
+
+    local_code = next(iter(regions._local_province_features()))
+    geometry = regions.get_region_geometry(endpoint="province", code=local_code)
+    assert geometry["type"] == "Feature"
+    assert "private-region-provider-url" not in str(geometry)
 
 
 @pytest.mark.parametrize(
