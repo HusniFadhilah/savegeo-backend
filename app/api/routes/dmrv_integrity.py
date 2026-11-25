@@ -22,6 +22,7 @@ from starlette.background import BackgroundTask
 
 from app.core.security import get_current_app_viewer
 from app.db.models.dmrv_advanced import DmrvCreditEvent, DmrvFieldCapture
+from app.db.models.dmrv_boundary import BoundaryVersion
 from app.db.models.dmrv_field import SurveyPlot
 from app.db.models.dmrv_integrity import DmrvIntegrityDocument, DmrvIntegrityRevision
 from app.db.models.dmrv_project import DmrvProject, ProjectMember
@@ -162,7 +163,7 @@ async def import_registry_csv(
         if not required.issubset(headers):
             raise ValueError("Header wajib: " + ", ".join(sorted(required)))
         rows = []
-        for line, row in enumerate(reader, start=2):
+        for row in reader:
             if len(rows) >= 1000:
                 raise ValueError("CSV maksimal berisi 1.000 baris.")
             normalized = {str(k).strip().lower(): (v or "").strip() for k, v in row.items() if k}
