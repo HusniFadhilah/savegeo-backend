@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from threading import local
 from typing import ClassVar
@@ -37,6 +37,7 @@ class InferenceQuality:
     images_used: int | None
     valid_pixel_pct: float | None
     gap_filled: bool | None
+    provider_scenes: tuple[dict, ...]
 
 
 class CarbonInferenceEngine:
@@ -82,6 +83,7 @@ class CarbonInferenceEngine:
         self.last_valid_pixel_pct = None
         self.last_gap_filled = None
         self._s2_image_counts = []
+        self._scene_manifests = []
         # Data-quality signals for the last composite built (see _safe_s2_composite):
         # valid_pct = % of AOI covered by cloud-free pixels in the *primary* date-range
         # composite, before any gap-fill; gap_filled = whether the wider +/-90 day
@@ -101,6 +103,18 @@ class CarbonInferenceEngine:
     @_s2_image_counts.setter
     def _s2_image_counts(self, value: list[int]) -> None:
         self._quality_state.s2_image_counts = value
+
+    @property
+    def _scene_manifests(self) -> list[dict]:
+        manifests = getattr(self._quality_state, "scene_manifests", None)
+        if manifests is None:
+            manifests = []
+            self._quality_state.scene_manifests = manifests
+        return manifests
+
+    @_scene_manifests.setter
+    def _scene_manifests(self, value: list[dict]) -> None:
+        self._quality_state.scene_manifests = value
 
     @property
     def last_s2_image_count(self) -> int | None:
@@ -133,6 +147,7 @@ class CarbonInferenceEngine:
             images_used=self.last_s2_image_count,
             valid_pixel_pct=self.last_valid_pixel_pct,
             gap_filled=self.last_gap_filled,
+            provider_scenes=tuple(self._scene_manifests),
         )
 
     def _get_expected_features(self) -> list:
@@ -197,7 +212,8 @@ class CarbonInferenceEngine:
                 roi, s_date, e_date, threshold, technique=self.cloud_mask_technique,
             )
 
-        collection = _build_collection(cloud_threshold)
+        actual_cloud_threshold = cloud_threshold
+        collection = _build_collection(actual_cloud_threshold)
         size = collection.size().getInfo()
         logger.info(f"Found {size} Sentinel-2 images for {start_date} to {end_date} (threshold={cloud_threshold})")
 
@@ -206,7 +222,8 @@ class CarbonInferenceEngine:
             for fallback in [min(cloud_threshold + 30, 85), 90, 95]:
                 if fallback <= cloud_threshold:
                     continue
-                collection = _build_collection(fallback)
+                actual_cloud_threshold = fallback
+                collection = _build_collection(actual_cloud_threshold)
                 size = collection.size().getInfo()
                 logger.info(f"Fallback cloud_threshold={fallback}: found {size} images")
                 if size > 0:
@@ -220,6 +237,64 @@ class CarbonInferenceEngine:
 
         self._s2_image_counts.append(int(size))
         self.last_s2_image_count = sum(self._s2_image_counts)
+        # Preserve provider identifiers and acquisition metadata at the point
+        # where the actual collection is selected. This is more reliable than
+        # reconstructing a scene list from a later median composite snapshot.
+        manifest_arrays = ee.Dictionary({
+            "scene_ids": collection.aggregate_array("system:index").slice(0, 100),
+            "acquisition_times_ms": collection.aggregate_array("system:time_start").slice(0, 100),
+            "cloud_cover_pct": collection.aggregate_array("CLOUDY_PIXEL_PERCENTAGE").slice(0, 100),
+            "datastrip_ids": collection.aggregate_array("DATASTRIP_ID").slice(0, 100),
+            "datatake_ids": collection.aggregate_array("DATATAKE_IDENTIFIER").slice(0, 100),
+            "processing_baselines": collection.aggregate_array("PROCESSING_BASELINE").slice(0, 100),
+            "mgrs_tiles": collection.aggregate_array("MGRS_TILE").slice(0, 100),
+            "aot_retrieval_accuracy": collection.aggregate_array("AOT_RETRIEVAL_ACCURACY").slice(0, 100),
+            "cloudy_shadow_pct": collection.aggregate_array("CLOUDY_SHADOW_PERCENTAGE").slice(0, 100),
+            "mean_solar_zenith_angle": collection.aggregate_array("MEAN_SOLAR_ZENITH_ANGLE").slice(0, 100),
+            "mean_solar_azimuth_angle": collection.aggregate_array("MEAN_SOLAR_AZIMUTH_ANGLE").slice(0, 100),
+        }).getInfo()
+        scene_ids = manifest_arrays.get("scene_ids", []) if isinstance(manifest_arrays, dict) else []
+        acquisition_times = manifest_arrays.get("acquisition_times_ms", []) if isinstance(manifest_arrays, dict) else []
+        cloud_values = manifest_arrays.get("cloud_cover_pct", []) if isinstance(manifest_arrays, dict) else []
+        scene_properties = {
+            "datastrip_id": "datastrip_ids",
+            "datatake_identifier": "datatake_ids",
+            "processing_baseline": "processing_baselines",
+            "mgrs_tile": "mgrs_tiles",
+            "aot_retrieval_accuracy": "aot_retrieval_accuracy",
+            "cloudy_shadow_percentage": "cloudy_shadow_pct",
+            "mean_solar_zenith_angle": "mean_solar_zenith_angle",
+            "mean_solar_azimuth_angle": "mean_solar_azimuth_angle",
+        }
+        manifest = []
+        for index, scene_id in enumerate(scene_ids):
+            time_ms = acquisition_times[index] if index < len(acquisition_times) else None
+            cloud_pct = cloud_values[index] if index < len(cloud_values) else None
+            scene = {
+                "scene_id": str(scene_id),
+                "acquired_at_utc": (datetime.fromtimestamp(time_ms / 1000, tz=timezone.utc).isoformat() if isinstance(time_ms, (int, float)) else None),
+                "cloudy_pixel_percentage": float(cloud_pct) if isinstance(cloud_pct, (int, float)) else None,
+            }
+            for output_key, source_key in scene_properties.items():
+                values = manifest_arrays.get(source_key, []) if isinstance(manifest_arrays, dict) else []
+                value = values[index] if index < len(values) else None
+                if value is not None:
+                    scene[output_key] = value
+            manifest.append(scene)
+        self._scene_manifests.append({
+            "provider": "ESA/Copernicus via Google Earth Engine",
+            "collection_id": "COPERNICUS/S2_SR_HARMONIZED",
+            "start_date_inclusive": start_date,
+            "end_date_exclusive": end_date,
+            "cloud_threshold_pct_used": actual_cloud_threshold,
+            "scene_count": int(size),
+            "scene_manifest_truncated": int(size) > len(manifest),
+            "aot_band_available_in_source_product": True,
+            "aot_band_scale": 0.001,
+            "aot_applied_in_model": False,
+            "aerosol_handling": "Sentinel-2 Level-2A surface-reflectance product used; per-scene AOT retrieval accuracy is recorded where available. SaveGeo does not apply a separate AOT correction or aerosol-based exclusion.",
+            "scenes": manifest,
+        })
         # ImageCollection reducers return a composite with a generic default
         # projection (often EPSG:4326 at 1 degree). Keep the computation lazy,
         # but anchor the composite to Sentinel-2's native 10 m B8 grid so map
@@ -644,6 +719,7 @@ class CarbonInferenceEngine:
             f"{year}-{end_month:02d} at {scale} m resolution"
         )
         self._s2_image_counts = []
+        self._scene_manifests = []
         self.last_s2_image_count = None
         self.last_valid_pixel_pct = None
         self.last_gap_filled = None
@@ -912,6 +988,7 @@ class CarbonInferenceEngine:
         # loop) would accumulate _s2_image_counts cumulatively instead of
         # reporting each year's own scene count.
         self._s2_image_counts = []
+        self._scene_manifests = []
         self.last_s2_image_count = None
         self.last_valid_pixel_pct = None
         self.last_gap_filled = None
