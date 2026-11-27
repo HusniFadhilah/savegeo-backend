@@ -315,14 +315,14 @@ jobs:
             # A checkpointed ranking supervisor runs outside the API container.
             # Pause only its scheduling loop before touching the application;
             # already-running ranking workers remain alive in their own container.
-            docker compose -f docker-compose.prod.yml exec -T --user 0:0 api \
+            docker compose -f docker-compose.prod.yml exec -T api \
               python -c 'from pathlib import Path; p=Path("/app/var/uploads/green-rankings"); p.mkdir(parents=True, exist_ok=True); (p/"worker.pause").touch()'
             resume_green_rankings() {
               if docker compose -f docker-compose.prod.yml ps --status running green-ranking-worker | grep -q green-ranking-worker; then
-                docker compose -f docker-compose.prod.yml exec -T --user 0:0 green-ranking-worker \
+                docker compose -f docker-compose.prod.yml exec -T green-ranking-worker \
                   python -c 'from pathlib import Path; Path("/app/var/uploads/green-rankings/worker.pause").unlink(missing_ok=True)' >/dev/null 2>&1 || true
               elif docker compose -f docker-compose.prod.yml ps --status running api | grep -q api; then
-                docker compose -f docker-compose.prod.yml exec -T --user 0:0 api \
+                docker compose -f docker-compose.prod.yml exec -T api \
                   python -c 'from pathlib import Path; Path("/app/var/uploads/green-rankings/worker.pause").unlink(missing_ok=True)' >/dev/null 2>&1 || true
               fi
             }
@@ -427,7 +427,7 @@ jobs:
             # Enable scheduling only after the new API is ready. The worker
             # resumes each run_id from its persistent checkpoint and clears
             # leases only for those checkpointed runs after a container restart.
-            docker compose -f docker-compose.prod.yml exec -T --user 0:0 api \
+            docker compose -f docker-compose.prod.yml exec -T api \
               python -c 'from pathlib import Path; p=Path("/app/var/uploads/green-rankings"); p.mkdir(parents=True, exist_ok=True); (p/"worker.enable").touch(); (p/"worker.pause").unlink(missing_ok=True)'
             trap - EXIT
             # Check Ollama from inside the same API container that serves the
