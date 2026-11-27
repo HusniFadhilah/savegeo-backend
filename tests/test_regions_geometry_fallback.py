@@ -123,6 +123,64 @@ def test_missing_city_geometry_uses_exact_big_pum_code(monkeypatch):
     assert calls[0][1]["params"]["maxAllowableOffset"] == "0.0001"
 
 
+def test_missing_district_geometry_uses_exact_adm4_children(monkeypatch):
+    calls = []
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "type": "FeatureCollection",
+                "features": [
+                    {
+                        "type": "Feature",
+                        "properties": {"kdcpum": "11.01.10", "kdpkab": "11.01", "namobj": "Paya Ateuk"},
+                        "geometry": _polygon(),
+                    },
+                    {
+                        "type": "Feature",
+                        "properties": {"kdcpum": "11.01.10", "kdpkab": "11.01", "namobj": "Panton Bili"},
+                        "geometry": _polygon(),
+                    },
+                ],
+            }
+
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs))
+        return Response()
+
+    monkeypatch.setattr(regions.requests, "get", fake_get)
+
+    result = regions._fallback_district_geometry("110110")
+
+    assert len(result["features"]) == 2
+    assert result["meta"]["boundary_year"] == 2025
+    assert "agregasi geometri desa per kecamatan" in result["meta"]["boundary_source"]
+    assert calls[0][0] == regions._DISTRICT_BOUNDARY_FALLBACK_URL
+    assert calls[0][1]["params"]["where"] == "kdcbps='110110' OR kdcpum='11.01.10'"
+    assert float(calls[0][1]["params"]["maxAllowableOffset"]) == 0.00005
+
+
+def test_primary_district_feature_collection_without_polygon_uses_fallback(monkeypatch):
+    fallback = {
+        "type": "FeatureCollection",
+        "features": [{"type": "Feature", "geometry": _polygon(), "properties": {}}],
+    }
+    calls = []
+    monkeypatch.setattr(regions, "_fallback_district_geometry", lambda code: calls.append(code) or fallback)
+
+    result = regions._normalize_or_fallback_geometry(
+        {"type": "FeatureCollection", "features": [{"type": "Feature", "geometry": None, "properties": {}}]},
+        "district",
+        "110110",
+    )
+
+    assert result is fallback
+    assert calls == ["110110"]
+
+
 def test_primary_village_feature_collection_without_polygon_uses_fallback(monkeypatch):
     fallback = {
         "type": "FeatureCollection",

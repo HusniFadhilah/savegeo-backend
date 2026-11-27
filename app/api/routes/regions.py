@@ -48,6 +48,7 @@ _VILLAGE_BOUNDARY_FALLBACK_URL = (
     "https://geoportal.pertanian.go.id/arcgis/rest/services/Hosted/"
     "Batas_Administrasi_Desa/FeatureServer/0/query"
 )
+_DISTRICT_BOUNDARY_FALLBACK_URL = _VILLAGE_BOUNDARY_FALLBACK_URL
 _CITY_BOUNDARY_FALLBACK_URL = (
     "https://geoservices.big.go.id/rbi/rest/services/BATASWILAYAH/"
     "BATAS_WILAYAH/MapServer/13/query"
@@ -156,7 +157,15 @@ def _digits_only(value: object) -> str:
 
 
 def _pum_code(digits: str) -> str:
-    parts = (2, 2, 2, 4) if len(digits) == 10 else (2, 2) if len(digits) == 4 else ()
+    parts = (
+        (2, 2, 2, 4)
+        if len(digits) == 10
+        else (2, 2, 2)
+        if len(digits) == 6
+        else (2, 2)
+        if len(digits) == 4
+        else ()
+    )
     if not parts or sum(parts) != len(digits):
         return ""
     chunks = []
@@ -289,9 +298,30 @@ def _fallback_city_geometry(code: str) -> dict | None:
     )
 
 
+def _fallback_district_geometry(code: str) -> dict | None:
+    """Build a district outline from its checked 2025 village polygons."""
+    return _fallback_admin_geometry(
+        code,
+        url=_DISTRICT_BOUNDARY_FALLBACK_URL,
+        code_field="kdcbps",
+        pum_field="kdcpum",
+        parent_field="kdpkab",
+        parent_length=4,
+        boundary_source=(
+            "Kementerian Pertanian - Batas Desa/Kelurahan 2025 "
+            "(agregasi geometri desa per kecamatan)"
+        ),
+        boundary_year=2025,
+        timeout=30,
+        max_bytes=24 * 1024 * 1024,
+        max_allowable_offset=0.00005,
+        geometry_precision=5,
+    )
+
+
 def _normalize_or_fallback_geometry(region: dict, endpoint: str, code: str) -> dict:
     normalized = _fix_geometry_coord_order(region, endpoint)
-    if endpoint not in {"city", "village"}:
+    if endpoint not in {"city", "district", "village"}:
         return normalized
     geometries = _polygon_geometries(normalized)
     if geometries and all(_is_usable_polygon_geometry(geometry) for geometry in geometries):
@@ -306,6 +336,8 @@ def _normalize_or_fallback_geometry(region: dict, endpoint: str, code: str) -> d
 def _admin_polygon_fallback(endpoint: str, code: str) -> dict | None:
     if endpoint == "city":
         return _fallback_city_geometry(code)
+    if endpoint == "district":
+        return _fallback_district_geometry(code)
     if endpoint == "village":
         return _fallback_village_geometry(code)
     return None
