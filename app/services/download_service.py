@@ -154,6 +154,9 @@ def download_geotiff(db: Session, data: dict) -> dict:
 
         except AnalysisError:
             raise
+        except ee.EEException:
+            logger.exception("Earth Engine failed while preparing carbon GeoTIFF for AOI")
+            raise
         except Exception as e:
             logger.exception("Carbon inference failed")
             raise AnalysisError("Model karbon tidak dapat diproses untuk AOI atau parameter ini.", 422) from e
@@ -171,7 +174,12 @@ def download_geotiff(db: Session, data: dict) -> dict:
         return start_export(image, aoi, filename, scale, year, effective_year, data.get("_request_owner"))
     # Bound both uncompressed bytes and grid dimensions before requesting a
     # direct GEE download (32 MB / 10,000-pixel axis upstream limits).
-    width, height = _projected_aoi_dimensions(aoi)
+    # Estimate the projected extent from the original GeoJSON where possible.
+    # Asking Earth Engine for bounds here adds a synchronous EE request before
+    # getDownloadURL and can fail independently (or consume quota) for large or
+    # complex AOIs. The local estimate is deliberately conservative.
+    dimensions = _projected_dimensions_from_payload(aoi_spec)
+    width, height = dimensions or _projected_aoi_dimensions(aoi)
     bands = 3 if layer_type == "rgb" else 1
     safe_scale = max(scale, math.ceil(width / 9500), math.ceil(height / 9500), math.ceil(math.sqrt(width * height * bands * 8 / 24_000_000)))
     if safe_scale > scale:
@@ -187,6 +195,70 @@ def _projected_aoi_dimensions(aoi) -> tuple[float, float]:
     projected = aoi.bounds(maxError=100, proj=ee.Projection("EPSG:6933")).coordinates().getInfo()[0]
     width = max(point[0] for point in projected) - min(point[0] for point in projected)
     height = max(point[1] for point in projected) - min(point[1] for point in projected)
+    return width, height
+
+
+def _projected_dimensions_from_payload(aoi_spec: dict) -> tuple[float, float] | None:
+    """Estimate EPSG:6933 bounding dimensions without making an EE request."""
+    positions: list[tuple[float, float]] = []
+
+    def collect(node):
+        if isinstance(node, dict):
+            if "geojson" in node:
+                collect(node["geojson"])
+            elif node.get("type") == "FeatureCollection":
+                for feature in node.get("features", []):
+                    collect(feature)
+            elif node.get("type") == "Feature":
+                collect(node.get("geometry"))
+            elif node.get("type") == "GeometryCollection":
+                for geometry in node.get("geometries", []):
+                    collect(geometry)
+            elif "coordinates" in node:
+                collect(node["coordinates"])
+            elif {"west", "south", "east", "north"}.issubset(node):
+                west, south, east, north = (float(node[key]) for key in ("west", "south", "east", "north"))
+                positions.extend(((west, south), (west, north), (east, south), (east, north)))
+        elif isinstance(node, (list, tuple)):
+            if len(node) >= 2 and all(isinstance(value, (int, float)) and math.isfinite(value) for value in node[:2]):
+                positions.append((float(node[0]), float(node[1])))
+            else:
+                for child in node:
+                    collect(child)
+
+    try:
+        collect(aoi_spec)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+    if len(positions) < 2:
+        return None
+    longitudes = [point[0] for point in positions]
+    latitudes = [point[1] for point in positions]
+    west, east = min(longitudes), max(longitudes)
+    south, north = min(latitudes), max(latitudes)
+    # A simple bbox becomes ambiguous for antimeridian-spanning geometries;
+    # defer those uncommon cases to Earth Engine's geometry implementation.
+    if east - west > 180 or south < -86 or north > 86:
+        return None
+
+    # EPSG:6933 is a cylindrical equal-area projection with a 30-degree
+    # standard parallel. Use its spherical form for the export-size estimate;
+    # the small safety factor protects against ellipsoid and boundary rounding.
+    radius_m = 6_371_007.181
+    standard_parallel_cos = math.cos(math.radians(30))
+
+    def project(longitude, latitude):
+        return (
+            radius_m * standard_parallel_cos * math.radians(longitude),
+            radius_m * math.sin(math.radians(latitude)) / standard_parallel_cos,
+        )
+
+    projected = [project(lon, lat) for lon in (west, east) for lat in (south, north)]
+    width = (max(point[0] for point in projected) - min(point[0] for point in projected)) * 1.01
+    height = (max(point[1] for point in projected) - min(point[1] for point in projected)) * 1.01
+    if width <= 0 or height <= 0:
+        return None
     return width, height
 
 
@@ -248,7 +320,18 @@ def _download_image(image, aoi, filename, layer_type, scale, requested_scale, ef
         err = str(e)
         logger.error(f"getDownloadURL failed: {err}")
 
-        if "too large" in err.lower() or "pixel" in err.lower() or "request payload size" in err.lower():
+        lower_error = err.lower()
+        if any(token in lower_error for token in (
+            "429", "too many requests", "rate limit", "quota exceeded",
+            "too many concurrent aggregations",
+        )):
+            raise AnalysisError(
+                "Earth Engine sedang membatasi permintaan. Tunggu sebentar lalu ulangi ekspor.",
+                429,
+                extra={"suggestion": "Hindari menjalankan beberapa ekspor sekaligus."},
+            ) from e
+
+        if "too large" in lower_error or "pixel" in lower_error or "request payload size" in lower_error:
             raise AnalysisError(
                 "Area terlalu besar untuk download langsung.",
                 413,

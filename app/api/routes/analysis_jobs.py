@@ -605,9 +605,22 @@ def _run_job(
             error_code=f"analysis_{exc.status_code}",
             completed_at=datetime.now(UTC),
         )
-    except ee.EEException:
+    except ee.EEException as exc:
         if cache_key and owner:
             _upsert_carbon_cache(db, cache_key=cache_key, owner=owner, job_id=job_id, job_type=job_type, status="failed")
+        logger.exception("Analysis job %s (%s) failed in Earth Engine: %s", job_id, job_type, exc)
+        upstream_message = str(exc).lower()
+        if any(token in upstream_message for token in (
+            "429", "too many requests", "rate limit", "quota exceeded",
+            "too many concurrent aggregations",
+        )):
+            error_message = "Earth Engine sedang membatasi permintaan. Tunggu sebentar lalu ulangi ekspor."
+            status_code = 429
+            error_code = "earth_engine_rate_limited"
+        else:
+            error_message = "Earth Engine tidak dapat memproses ekspor ini. Periksa AOI dan parameter, lalu coba lagi."
+            status_code = 422
+            error_code = "earth_engine_error"
         _write_job(
             job_id,
             {
@@ -615,12 +628,12 @@ def _run_job(
                 "type": job_type,
                 "status": "failed",
                 "finished_at": _now(),
-                "error": "Earth Engine tidak dapat memproses analisis. Periksa AOI dan parameter lalu coba lagi.",
-                "status_code": 400,
+                "error": error_message,
+                "status_code": status_code,
             },
         )
         provenance_service.update_analysis_provenance(
-            db, job_id, status="failed", error_code="earth_engine_error", completed_at=datetime.now(UTC)
+            db, job_id, status="failed", error_code=error_code, completed_at=datetime.now(UTC)
         )
     except requests.RequestException as exc:
         if cache_key and owner:
