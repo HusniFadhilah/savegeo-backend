@@ -34,6 +34,7 @@ class _Image:
 def test_landcover_export_reports_effective_year_and_hides_upstream_error(monkeypatch, error):
     monkeypatch.setattr(download_service.config_service, "get_analysis_defaults", lambda _db: {"cloud_threshold": 20})
     monkeypatch.setattr(download_service, "create_geometry_from_payload", lambda _spec: _Aoi())
+    monkeypatch.setattr(download_service, "_projected_dimensions_from_payload", lambda _spec: None)
     monkeypatch.setattr(download_service, "_projected_aoi_dimensions", lambda _aoi: (50_000, 50_000))
     monkeypatch.setattr(
         download_service,
