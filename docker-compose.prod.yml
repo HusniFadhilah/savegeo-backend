@@ -229,7 +229,7 @@ services:
       MIGRATION_DATABASE_URL: ""
       UPLOAD_DIR: /app/var/uploads
       MODEL_DIR: /app/var/saved_models
-      GREEN_RANKING_API_READY_URL: http://api:8086/ready
+      GREEN_RANKING_API_READY_URL: http://api:8086/api/ready
       GREEN_RANKING_SUPERVISOR_POLL_SECONDS: ${GREEN_RANKING_SUPERVISOR_POLL_SECONDS:-30}
     volumes:
       - ./var:/app/var
