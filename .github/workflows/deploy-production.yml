@@ -365,8 +365,7 @@ jobs:
             # can continue while the application image is replaced.
             ranking_processes="$(docker top backend-api-1 -eo args 2>/dev/null || true)"
             if [ -n "$ranking_container" ]; then
-              ranking_processes="$ranking_processes
-$(docker top "$ranking_container" -eo args 2>/dev/null || true)"
+              ranking_processes="$ranking_processes $(docker top "$ranking_container" -eo args 2>/dev/null || true)"
             fi
             if printf '%s\n' "$ranking_processes" | grep -Eq 'current-recovery\.py|history-scheduler\.py|green-ranking-worker\.py'; then
               current_revisions="$(docker compose -f docker-compose.prod.yml run --rm --no-deps migrate python -m alembic current 2>/dev/null | awk 'NF {print $1}' | sort -u | tr '\n' ' ')"
