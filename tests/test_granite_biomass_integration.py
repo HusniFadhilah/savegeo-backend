@@ -85,13 +85,12 @@ def test_granite_model_listing_obeys_dataset_and_gee_filters(monkeypatch):
     assert gee_only["count"] == 0
 
 
-def test_active_model_compatibility_includes_granite_only_when_runtime_is_ready(monkeypatch):
+def test_active_model_compatibility_uses_registered_carbon_models(monkeypatch):
     model = {
         "name": registry.MODEL_NAME,
         "metadata_json": {"compatible_reference_datasets": [registry.TARGET_DATASET]},
     }
-    monkeypatch.setattr(carbon_service, "builtin_carbon_models", lambda **_kwargs: [])
-    monkeypatch.setattr(carbon_service, "granite_biomass_model", lambda: model)
+    monkeypatch.setattr(carbon_service, "list_carbon_models", lambda _db: [model])
     assert carbon_service.active_carbon_model_compatibility(EmptyDB()) == {
         registry.TARGET_DATASET: [registry.MODEL_NAME]
     }

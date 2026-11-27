@@ -5,6 +5,8 @@ from __future__ import annotations
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from app.core.http import problem_instance
+
 
 class DmrvError(Exception):
     def __init__(
@@ -39,7 +41,7 @@ def register_dmrv_error_handler(app: FastAPI) -> None:
                 "title": "Request error" if exc.status < 500 else "Service error",
                 "status": exc.status,
                 "detail": exc.message,
-                "instance": request.url.path,
+                "instance": problem_instance(request),
                 "code": exc.code,
                 "message": exc.message,
                 "request_id": getattr(request.state, "request_id", None),

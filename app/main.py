@@ -34,7 +34,7 @@ from app.core.config import get_settings
 from app.core.logging_security import install_secret_redaction
 from app.core.version import get_product_version
 from app.core.cors import setup_cors
-from app.core.http import SecurityHeadersMiddleware
+from app.core.http import SecurityHeadersMiddleware, problem_instance
 from app.db.session import SessionLocal
 from app.services import gee_service
 from app.services.arcgis_service import configure_arcgis_from_db
@@ -144,6 +144,7 @@ def _problem_response(
     headers: Mapping[str, str] | None = None,
 ):
     """Return RFC 9457-compatible JSON while retaining the legacy ``error`` key."""
+    instance = problem_instance(request)
     detail_text = detail if isinstance(detail, str) else "Request failed"
     code = {
         400: "bad_request",
@@ -174,7 +175,9 @@ def _problem_response(
         "title": "Request error" if status_code < 500 else "Internal server error",
         "status": status_code,
         "detail": detail_text,
-        "instance": request.url.path,
+        # Prefer the registered route template so a 404 does not reveal whether
+        # a private project identifier exists to the caller.
+        "instance": instance,
         "request_id": getattr(request.state, "request_id", None),
         # Existing frontend and integrations consume this field. Keep it as a
         # non-breaking extension while clients migrate to Problem Details.

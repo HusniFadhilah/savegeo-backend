@@ -31,6 +31,16 @@ DMRV_UPLOAD_LIMIT_BYTES = 11 * 1024 * 1024
 _SHP_CONVERT_PATH = re.compile(r"^/utils/convert_shp$")
 SHP_MULTIPART_BODY_LIMIT_BYTES = 51 * 1024 * 1024
 SHP_JSON_BODY_LIMIT_BYTES = 68 * 1024 * 1024
+_UUID_PATH_SEGMENT = re.compile(
+    r"(?i)(?<=/)[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}(?=/|$)"
+)
+
+
+def problem_instance(request: Request) -> str:
+    """Return a stable error path that does not expose resource UUIDs."""
+    route_path = getattr(request.scope.get("route"), "path", None)
+    path = route_path if isinstance(route_path, str) else request.url.path
+    return _UUID_PATH_SEGMENT.sub("{id}", path)
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -53,7 +63,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
                 "title": "Request error" if status_code < 500 else "Service error",
                 "status": status_code,
                 "detail": detail,
-                "instance": request.url.path,
+                "instance": problem_instance(request),
                 "request_id": getattr(request.state, "request_id", None),
                 "error": detail,
                 "code": {
