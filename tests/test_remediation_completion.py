@@ -135,9 +135,13 @@ def test_imagery_proxy_coarsens_coordinates_before_egress(monkeypatch):
         captured.update(params)
         return {"results": []}
     monkeypatch.setattr(locations, "cached_lookup", fake_cache)
-    locations.imagery_date_metadata(-6.9781234567, 110.412345678)
+    result = locations.imagery_date_metadata(-6.9781234567, 110.412345678)
     assert captured["geometry"] == "110.41,-6.98"
     assert "110.412345678" not in str(captured)
+    disclosure = result["data_sharing_notice"]
+    assert disclosure["provider"] == "Esri World Imagery"
+    assert disclosure["coordinate_precision_degrees"] == 0.01
+    assert "0,01 derajat" in disclosure["notice"]["id"]
 
 
 def test_place_search_response_cache_expires_after_five_minutes(monkeypatch):

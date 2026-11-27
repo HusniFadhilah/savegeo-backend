@@ -33,7 +33,7 @@ import re
 import secrets
 import threading
 from functools import lru_cache
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote, urljoin, urlparse
 from importlib.util import find_spec
 from datetime import UTC, date, datetime, timedelta
@@ -913,9 +913,10 @@ def _list_big_ctsrt_scenes(data: dict) -> dict:
 
         service_meta = _big_ctsrt_service_meta(service_name)
         extent = service_meta.get("fullExtent") or service_meta.get("extent") or {}
-        bbox_value = [extent.get("xmin"), extent.get("ymin"), extent.get("xmax"), extent.get("ymax")]
-        if not all(isinstance(value, (int, float)) for value in bbox_value):
+        raw_bbox = [extent.get("xmin"), extent.get("ymin"), extent.get("xmax"), extent.get("ymax")]
+        if not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in raw_bbox):
             continue
+        bbox_value = [cast(float, value) for value in raw_bbox]
         if not _bbox_intersects(bbox_value, bbox):
             continue
 
@@ -1789,7 +1790,7 @@ def open_commercial_asset_stream(
     timeout = max(5, (settings or get_settings()).commercial_imagery_timeout_seconds)
     parsed_asset = urlparse(href)
     asset_host = (parsed_asset.hostname or "").lower()
-    catalog_host = (urlparse(catalog_origin).hostname or "").lower()
+    catalog_host = (catalog_origin[1] or "").lower()
     if parsed_asset.scheme != "https" or not asset_host or parsed_asset.username or parsed_asset.password:
         raise AnalysisError("URL asset commercial tidak valid", 400)
     headers = commercial_request_headers(provider_key, settings) if asset_host == catalog_host else {"User-Agent": "SAVEGEO/1.0"}
@@ -1897,9 +1898,9 @@ def raster_toolbox(data: dict) -> dict:
         stats = {"min": float(result.min()), "mean": float(result.mean()), "max": float(result.max())}
         output = result.filled(np.nan).astype("float32")
     else:
-        low, high = np.percentile(values, [2, 98])
+        low, high = float(np.quantile(values, 0.02)), float(np.quantile(values, 0.98))
         output = clipped[0].astype("float32")
-        stats = {"min": float(low), "mean": float(np.mean(values)), "max": float(high)}
+        stats = {"min": low, "mean": float(np.mean(values)), "max": high}
     histogram, edges = np.histogram(values, bins=32)
     result = {"operation": operation, "bands": selected, "stats": stats,
               "histogram": histogram.astype(int).tolist(), "bins": edges.astype(float).tolist(),

@@ -21,6 +21,8 @@ from app.db.models.provider_cache import ProviderCache
 from app.db.session import SessionLocal
 
 _local_lock = Lock()
+_IMAGERY_COORDINATE_DECIMALS = 2
+_IMAGERY_EXTENT_PADDING_DEGREES = 0.01
 
 
 def cached_lookup(provider: str, params: dict, fetch, *, interval: float, ttl: float = 86400):
@@ -94,11 +96,14 @@ def search_places(q: str, *, limit: int, polygon: bool = False):
 
 
 def imagery_date_metadata(lat: float, lng: float):
-    # 0.01 degree precision (~1 km) is adequate for decorative attribution;
-    # precise cursor coordinates and AOI polygons never leave this endpoint.
-    lat, lng = round(lat, 2), round(lng, 2)
+    # A 0.01-degree grid keeps the center to roughly kilometer precision.
+    # The identify extent is also deliberately coarse. Exact cursor coordinates
+    # and AOI polygons are not sent to Esri by this lookup.
+    lat = round(lat, _IMAGERY_COORDINATE_DECIMALS)
+    lng = round(lng, _IMAGERY_COORDINATE_DECIMALS)
+    extent = _IMAGERY_EXTENT_PADDING_DEGREES
     params = {"f": "json", "geometry": f"{lng},{lat}", "geometryType": "esriGeometryPoint",
-        "sr": "4326", "tolerance": "2", "mapExtent": f"{lng-.01},{lat-.01},{lng+.01},{lat+.01}",
+        "sr": "4326", "tolerance": "2", "mapExtent": f"{lng-extent},{lat-extent},{lng+extent},{lat+extent}",
         "imageDisplay": "400,400,96", "layers": "all", "returnGeometry": "false"}
 
     def fetch():
@@ -111,4 +116,17 @@ def imagery_date_metadata(lat: float, lng: float):
         return {"results": [{"attributes": {k: v for k, v in item.get("attributes", {}).items() if k in keys}}
             for item in data.get("results", [])[:100] if isinstance(item, dict)]}
 
-    return cached_lookup("esri-imagery-date", params, fetch, interval=.2)
+    result = cached_lookup("esri-imagery-date", params, fetch, interval=.2)
+    return {
+        **result,
+        "data_sharing_notice": {
+            "provider": "Esri World Imagery",
+            "purpose": "look up imagery-date metadata for the map location",
+            "coordinate_precision_degrees": 10 ** -_IMAGERY_COORDINATE_DECIMALS,
+            "extent_padding_degrees": extent,
+            "notice": {
+                "id": "Pusat lokasi dibulatkan ke grid 0,01 derajat (kurang lebih 1 km). Titik dan cakupan pencarian sekitar 0,01 derajat di tiap sisi dikirim ke Esri untuk memperoleh metadata tanggal citra.",
+                "en": "The map center is rounded to a 0.01-degree grid (roughly 1 km). The point and a search extent about 0.01 degrees on each side are sent to Esri to look up imagery-date metadata.",
+            },
+        },
+    }

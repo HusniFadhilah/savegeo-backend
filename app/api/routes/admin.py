@@ -32,7 +32,7 @@ from sqlalchemy.orm import Session
 from app.core import auth_throttle
 from app.core.public_http import public_http, requests as safe_requests
 from app.core.config import get_settings
-from app.core.bounded_json import read_bounded_json_object
+from app.core.bounded_json import read_typed_json_object
 from app.core.default_configs import is_sensitive_config_key
 from app.core.security import (
     admin_has_permission,
@@ -70,7 +70,14 @@ from app.schemas.admin import (
     AdminProfileUpdateRequest,
     AdminUserCreateRequest,
     AdminUserUpdateRequest,
+    ArcGISConfigUpdateRequest,
     ChangePasswordRequest,
+    CompanyBoundaryCreateRequest,
+    CompanyBoundaryUpdateRequest,
+    CompanyOSMImportRequest,
+    ConfigBulkUpdateRequest,
+    ImageryProviderConnectionRequest,
+    ImageryProviderUpdateRequest,
     LoginRequest,
     ModelUpdateRequest,
     ModelReviewRequest,
@@ -442,9 +449,7 @@ async def update_arcgis_config(
     db: Session = Depends(get_db),
 ):
     """Save ArcGIS connection options and an optional write-only API key."""
-    body = await read_bounded_json_object(request)
-    if not isinstance(body, dict):
-        raise HTTPException(status_code=400, detail="ArcGIS settings must be a JSON object")
+    body = await read_typed_json_object(request, ArcGISConfigUpdateRequest)
 
     enabled = body.get("enabled")
     if not isinstance(enabled, bool):
@@ -524,7 +529,7 @@ def config_by_category(category: str, admin: AdminUser = Depends(require_permiss
 
 @router.put("/config")
 async def config_update(request: Request, admin: AdminUser = Depends(require_permission("config.write")), db: Session = Depends(get_db)):
-    body = await read_bounded_json_object(request)
+    body = await read_typed_json_object(request, ConfigBulkUpdateRequest)
     if isinstance(body, dict) and "updates" in body and isinstance(body["updates"], list):
         items = [(u["key"], u.get("value")) for u in body["updates"]]
     else:
@@ -1590,7 +1595,7 @@ async def admin_company_create(
         elif form.get("geojson_text"):
             geojson_raw = str(form.get("geojson_text"))
     else:
-        data = await read_bounded_json_object(request)
+        data = await read_typed_json_object(request, CompanyBoundaryCreateRequest)
         name = str(data.get("name") or "").strip()
         industry_type = str(data.get("industry_type") or "").strip()
         company_name = str(data.get("company_name") or "").strip()
@@ -1652,7 +1657,7 @@ async def admin_company_update(
     company = db.get(CompanyBoundary, cid)
     if not company:
         raise HTTPException(status_code=404, detail="Company not found")
-    data = await read_bounded_json_object(request)
+    data = await read_typed_json_object(request, CompanyBoundaryUpdateRequest, exclude_none=False)
     for field in ("name", "company_name", "industry_type", "sub_type", "province", "district", "description"):
         if field in data:
             setattr(company, field, data[field])
@@ -1891,7 +1896,7 @@ async def admin_companies_import_osm(
 ):
     """Queue an OSM import so Overpass latency cannot hold open the gateway request."""
     try:
-        data = await read_bounded_json_object(request)
+        data = await read_typed_json_object(request, CompanyOSMImportRequest)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Body JSON tidak valid") from exc
     if not isinstance(data, dict):
@@ -2049,9 +2054,7 @@ async def admin_imagery_provider_update(
 ):
     if key not in imagery_provider_repo.provider_catalog():
         raise HTTPException(status_code=404, detail="Provider citra tidak ditemukan")
-    payload = await read_bounded_json_object(request)
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=422, detail="Payload harus berupa objek")
+    payload = await read_typed_json_object(request, ImageryProviderUpdateRequest)
     allowed = {
         "name", "provider", "group", "description", "resolution_m", "revisit_days", "start_year",
         "gee_collection", "cloud_property", "is_active", "display_order",
@@ -2090,9 +2093,7 @@ async def admin_imagery_provider_connection_update(
 ):
     if key not in COMMERCIAL_PROVIDER_KEYS:
         raise HTTPException(status_code=404, detail="Provider ini tidak memiliki konfigurasi koneksi komersial")
-    payload = await read_bounded_json_object(request)
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=422, detail="Payload harus berupa objek")
+    payload = await read_typed_json_object(request, ImageryProviderConnectionRequest)
     if (payload.get("credential") or payload.get("clear_credential")) and not admin_has_permission(admin, "secret.write"):
         raise HTTPException(status_code=403, detail="Perubahan credential hanya dapat dilakukan administrator dengan secret.write")
     updated = save_connection(db, key, payload, admin.id)

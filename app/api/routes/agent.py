@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
@@ -83,6 +83,17 @@ async def agent_control(
         owner_key=chat_session_owner_key(viewer),
         allowed_features=viewer_feature_codes(db, viewer),
     )
+    if status_code >= 400:
+        result = dict(result)
+        legacy_message = result.pop("error", None)
+        if not isinstance(result.get("message"), str):
+            result["message"] = legacy_message if isinstance(legacy_message, str) else "Permintaan chatbot gagal."
+        result["code"] = {
+            400: "agent_invalid_request",
+            404: "agent_session_not_found",
+            429: "agent_rate_limited",
+        }.get(status_code, "agent_provider_error")
+        raise HTTPException(status_code=status_code, detail=result, headers=headers)
     return JSONResponse(content=result, status_code=status_code, headers=headers)
 
 

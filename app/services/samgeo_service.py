@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import time
+from typing import Any
 from uuid import UUID, uuid4
 from pyproj import Geod
 from shapely.geometry import shape
@@ -205,9 +206,18 @@ def segment(data: dict, folder: Path) -> dict:
     if not valid.any():
         raise AnalysisError("Tidak ada piksel scene yang valid di dalam AOI", 400)
     ranges = imagery._parse_cog_rescale(data.get("rescale"), pixels.shape[0])
+    raw_threshold = data.get("confidence_threshold")
+    confidence_threshold = float(raw_threshold) if isinstance(raw_threshold, (int, float)) and not isinstance(raw_threshold, bool) else 0.5
+    if not math.isfinite(confidence_threshold) or not 0 <= confidence_threshold <= 1:
+        raise AnalysisError("Ambang keyakinan harus berada pada rentang 0-1", 400)
     rgb = np.zeros(pixels.shape, dtype="uint8")
     for index, band in enumerate(pixels):
-        low, high = ranges[index] if ranges else ((0, 255) if pixels.dtype == np.uint8 else np.percentile(band[valid], [2, 98]))
+        if ranges:
+            low, high = ranges[index]
+        elif pixels.dtype == np.uint8:
+            low, high = 0.0, 255.0
+        else:
+            low, high = float(np.quantile(band[valid], 0.02)), float(np.quantile(band[valid], 0.98))
         rgb[index] = np.clip((band.astype("float32") - low) * 255 / max(float(high - low), 1), 0, 255).astype("uint8")
     rgb[:, ~valid] = 0
     if rgb.shape[0] == 1:
@@ -220,7 +230,7 @@ def segment(data: dict, folder: Path) -> dict:
     try:
         command = [_python(), str(Path(__file__).with_name("samgeo_worker.py")), str(input_path), str(output_path),
                    str(JOB_ROOT / "checkpoints"), str(data.get("mode") or "automatic"),
-                   str(data.get("prompt") or ""), str(data.get("confidence_threshold") if data.get("confidence_threshold") is not None else 0.5)]
+                    str(data.get("prompt") or ""), str(confidence_threshold)]
         checkpoint_dir = JOB_ROOT / "checkpoints"
         completed = _execute_worker(command, folder=folder, checkpoint_dir=checkpoint_dir)
     except subprocess.TimeoutExpired as exc:
@@ -258,7 +268,7 @@ def segment(data: dict, folder: Path) -> dict:
         selected_labels = np.asarray(sorted(selected_ids), dtype="int32")
         selected_mask = np.isin(labels, selected_labels) if selected_ids else np.zeros(labels.shape, dtype=bool)
 
-    features = []
+    features: list[dict[str, Any]] = []
     vertex_count = 0
     for geometry, label in shapes(labels, mask=selected_mask, transform=image.transform):
         vertex_count += sum(len(ring) for ring in geometry["coordinates"])
@@ -267,7 +277,7 @@ def segment(data: dict, folder: Path) -> dict:
         features.append({"type": "Feature", "geometry": transform_geom(image.crs, "EPSG:4326", geometry),
                          "properties": {"segment_id": int(label), "model": "SAM ViT-B",
                                         "class_label": data.get("class_label") or data.get("prompt"),
-                                        "detection_threshold": float(data.get("confidence_threshold") if data.get("confidence_threshold") is not None else 0.5),
+                                         "detection_threshold": confidence_threshold,
                                         "seeded_by": "MODIS FireMask" if seed_points else "automatic"}})
     area_ha = sum(abs(Geod(ellps="WGS84").geometry_area_perimeter(shape(feature["geometry"]))[0])/10000 for feature in features)
     effective_resolution = abs(image.transform.a)*math.cos(math.radians((bounds[1]+bounds[3])/2))
@@ -280,6 +290,6 @@ def segment(data: dict, folder: Path) -> dict:
                          "seed_count": len(seed_points),
                          "selection_method": "MODIS-seeded SAM" if seed_points else str(data.get("mode") or "automatic"),
                          "prompt": data.get("prompt") or data.get("class_label"),
-                         "confidence_threshold": float(data.get("confidence_threshold") if data.get("confidence_threshold") is not None else 0.5),
+                          "confidence_threshold": confidence_threshold,
                          "validation_status": "review_required",
                          "semantics": "building_footprint_candidate" if str(data.get("class_label") or data.get("prompt") or "").casefold() == "building" else "candidate_object"}}

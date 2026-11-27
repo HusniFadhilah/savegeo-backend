@@ -311,7 +311,71 @@ jobs:
             } > "$manifest_tmp"
             mv "$manifest_tmp" "$backup_prefix.manifest"
             export DOCKER_BUILDKIT=1
-            docker compose -f docker-compose.prod.yml build api dmrv-worker analysis-worker field-prediction-worker migrate
+            docker compose -f docker-compose.prod.yml build api dmrv-worker analysis-worker field-prediction-worker green-ranking-worker migrate
+            # A checkpointed ranking supervisor runs outside the API container.
+            # Pause only its scheduling loop before touching the application;
+            # already-running ranking workers remain alive in their own container.
+            docker compose -f docker-compose.prod.yml exec -T --user 0:0 api \
+              python -c 'from pathlib import Path; p=Path("/app/var/uploads/green-rankings"); p.mkdir(parents=True, exist_ok=True); (p/"worker.pause").touch()'
+            resume_green_rankings() {
+              if docker compose -f docker-compose.prod.yml ps --status running green-ranking-worker | grep -q green-ranking-worker; then
+                docker compose -f docker-compose.prod.yml exec -T --user 0:0 green-ranking-worker \
+                  python -c 'from pathlib import Path; Path("/app/var/uploads/green-rankings/worker.pause").unlink(missing_ok=True)' >/dev/null 2>&1 || true
+              elif docker compose -f docker-compose.prod.yml ps --status running api | grep -q api; then
+                docker compose -f docker-compose.prod.yml exec -T --user 0:0 api \
+                  python -c 'from pathlib import Path; Path("/app/var/uploads/green-rankings/worker.pause").unlink(missing_ok=True)' >/dev/null 2>&1 || true
+              fi
+            }
+            trap resume_green_rankings EXIT
+            ranking_container="$(docker compose -f docker-compose.prod.yml ps -q green-ranking-worker || true)"
+            if [ -n "$ranking_container" ] && [ "$(docker inspect --format '{{.State.Running}}' "$ranking_container")" = true ]; then
+              ranking_health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' "$ranking_container")"
+              if [ "$ranking_health" != healthy ]; then
+                echo "Green-ranking worker exists but is not healthy; refusing to interrupt or replace it." >&2
+                exit 1
+              fi
+              ranking_worker_processes="$(docker top "$ranking_container" -eo args 2>/dev/null || true)"
+              if printf '%s\n' "$ranking_worker_processes" | grep -Eq 'current-recovery\.py|history-scheduler\.py|green-ranking-worker\.py|green-ranking-failure-retry\.py'; then
+                echo "Keeping the active green-ranking worker container unchanged."
+              else
+                echo "Refreshing the idle green-ranking supervisor container."
+                docker compose -f docker-compose.prod.yml up -d --no-deps green-ranking-worker
+              fi
+            else
+              docker compose -f docker-compose.prod.yml up -d --no-deps green-ranking-worker
+            fi
+            ranking_container="$(docker compose -f docker-compose.prod.yml ps -q green-ranking-worker)"
+            ranking_healthy=0
+            for i in $(seq 1 30); do
+              ranking_state="$(docker inspect --format '{{.State.Status}}' "$ranking_container")"
+              ranking_health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' "$ranking_container")"
+              if [ "$ranking_state" = running ] && [ "$ranking_health" = healthy ]; then
+                ranking_healthy=1
+                break
+              fi
+              sleep 2
+            done
+            if [ "$ranking_healthy" -ne 1 ]; then
+              docker compose -f docker-compose.prod.yml logs --tail=100 green-ranking-worker
+              echo "Checkpointed ranking worker did not become healthy; refusing API deployment." >&2
+              exit 1
+            fi
+            # Do not apply schema changes while any checkpointed ranking worker
+            # is active. This release has no pending migration, so the workers
+            # can continue while the application image is replaced.
+            ranking_processes="$(docker top backend-api-1 -eo args 2>/dev/null || true)"
+            if [ -n "$ranking_container" ]; then
+              ranking_processes="$ranking_processes
+$(docker top "$ranking_container" -eo args 2>/dev/null || true)"
+            fi
+            if printf '%s\n' "$ranking_processes" | grep -Eq 'current-recovery\.py|history-scheduler\.py|green-ranking-worker\.py'; then
+              current_revisions="$(docker compose -f docker-compose.prod.yml run --rm --no-deps migrate python -m alembic current 2>/dev/null | awk 'NF {print $1}' | sort -u | tr '\n' ' ')"
+              target_revisions="$(docker compose -f docker-compose.prod.yml run --rm --no-deps migrate python -m alembic heads 2>/dev/null | awk 'NF {print $1}' | sort -u | tr '\n' ' ')"
+              if [ "$current_revisions" != "$target_revisions" ]; then
+                echo "Pending database migrations would run while green-ranking calculations are active; deployment paused safely." >&2
+                exit 1
+              fi
+            fi
             # Keep exact row-count evidence on the production host with mode
             # 0600/0700. Only the pass/fail status and opaque checksum reach
             # the public GitHub Actions log; no production counts are exposed.
@@ -346,7 +410,9 @@ jobs:
             docker compose -f docker-compose.prod.yml run --rm --no-deps \
               --volume "$BACKEND_REMOTE_DIR/../frontend/dist:/frontend-assets:ro" \
               api python -m scripts.check_auth_secret --frontend-dist /frontend-assets
-            docker compose -f docker-compose.prod.yml up -d --no-build
+            # Leave green-ranking-worker out of this update; it owns the
+            # long-running checkpointed calculations and survives API releases.
+            docker compose -f docker-compose.prod.yml up -d --no-build api dmrv-worker analysis-worker field-prediction-worker
             healthy=0
             for i in $(seq 1 30); do
               if curl --fail --silent "${BACKEND_HEALTH_URL%/health}/ready" >/dev/null; then
@@ -359,6 +425,12 @@ jobs:
               docker compose -f docker-compose.prod.yml logs --tail=150 api
               exit 1
             fi
+            # Enable scheduling only after the new API is ready. The worker
+            # resumes each run_id from its persistent checkpoint and clears
+            # leases only for those checkpointed runs after a container restart.
+            docker compose -f docker-compose.prod.yml exec -T --user 0:0 api \
+              python -c 'from pathlib import Path; p=Path("/app/var/uploads/green-rankings"); p.mkdir(parents=True, exist_ok=True); (p/"worker.enable").touch(); (p/"worker.pause").unlink(missing_ok=True)'
+            trap - EXIT
             # Check Ollama from inside the same API container that serves the
             # chatbot. The script is a no-op when another AI provider is set.
             docker compose -f docker-compose.prod.yml exec -T api \

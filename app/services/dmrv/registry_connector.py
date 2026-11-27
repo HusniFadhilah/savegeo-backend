@@ -7,13 +7,10 @@ write operation from this adapter.
 """
 from __future__ import annotations
 
-import ipaddress
-import json
 import os
-import socket
 from urllib.parse import urlparse
 
-import requests
+from app.core.public_http import public_http
 
 from app.schemas.dmrv_carbon_features import RegistryReconciliationInput
 from app.services.dmrv.errors import DmrvError
@@ -56,14 +53,6 @@ def status() -> dict:
     }
 
 
-def _public_host(host: str) -> bool:
-    try:
-        addresses = {item[4][0] for item in socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)}
-    except OSError:
-        return False
-    return bool(addresses) and all(ipaddress.ip_address(address).is_global for address in addresses)
-
-
 def fetch(registry: str, external_project_id: str) -> RegistryReconciliationInput:
     endpoint, token, provider, hosts = _settings()
     configured = status()["configured"]
@@ -71,37 +60,34 @@ def fetch(registry: str, external_project_id: str) -> RegistryReconciliationInpu
         raise DmrvError(503, "registry_connector_not_configured", "Konfigurasi API resmi registry belum lengkap di server.")
     parsed = urlparse(endpoint)
     host = (parsed.hostname or "").lower().rstrip(".")
-    if parsed.username or parsed.password or parsed.port not in {None, 443} or host not in hosts or not _public_host(host):
+    if parsed.scheme != "https" or parsed.username or parsed.password or parsed.port not in {None, 443} or host not in hosts:
         raise DmrvError(503, "registry_endpoint_rejected", "Endpoint registry harus HTTPS, host publik, port 443, dan ada di allowlist deployment.")
+    try:
+        # The transport resolves and pins the public IP used by the actual
+        # connection. A separate DNS preflight here would permit rebinding
+        # between validation and connect.
+        public_http.validate_public_destination(endpoint)
+    except (OSError, ValueError):
+        raise DmrvError(503, "registry_endpoint_rejected", "Endpoint registry harus HTTPS, host publik, port 443, dan ada di allowlist deployment.") from None
     if registry.casefold() not in {"verra registry", "unfccc article 6.4 registry"}:
         raise DmrvError(422, "unsupported_registry", "Konektor resmi hanya mengizinkan Verra Registry atau UNFCCC Article 6.4.")
     if (provider == "verra_gateway") != (registry.casefold() == "verra registry"):
         raise DmrvError(422, "registry_provider_mismatch", "Nama registry tidak sesuai konfigurasi konektor server.")
     try:
-        response = requests.get(
+        response = public_http.get(
             endpoint,
             params={"external_project_id": external_project_id},
             headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-            timeout=(4, 20), allow_redirects=False, stream=True,
+            timeout=(4, 20), max_bytes=MAX_RESPONSE_BYTES,
         )
         if response.is_redirect:
             raise DmrvError(502, "registry_redirect_blocked", "Endpoint registry mengalihkan request; redirect diblokir demi keamanan.")
         if response.status_code >= 400:
             raise DmrvError(502, "registry_api_error", f"API registry mengembalikan HTTP {response.status_code}.")
-        length = int(response.headers.get("Content-Length", "0") or 0)
-        if length > MAX_RESPONSE_BYTES:
-            raise DmrvError(502, "registry_response_too_large", "Respons registry melebihi 5 MB.")
-        chunks = []
-        total = 0
-        for chunk in response.iter_content(64 * 1024):
-            total += len(chunk)
-            if total > MAX_RESPONSE_BYTES:
-                raise DmrvError(502, "registry_response_too_large", "Respons registry melebihi 5 MB.")
-            chunks.append(chunk)
-        body = json.loads(b"".join(chunks))
+        body = response.json()
     except DmrvError:
         raise
-    except (requests.RequestException, ValueError, TypeError):
+    except (public_http.RequestException, ValueError, TypeError):
         raise DmrvError(502, "registry_api_unavailable", "Koneksi/API registry tidak tersedia atau mengembalikan JSON tidak valid.") from None
     if not isinstance(body, dict) or not isinstance(body.get("rows"), list) or not body["rows"] or len(body["rows"]) > 1000:
         raise DmrvError(502, "registry_response_contract", "Respons API harus memiliki 1–1.000 baris pada properti rows.")

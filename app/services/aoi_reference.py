@@ -57,6 +57,8 @@ def resolve_region_aoi(
     if scoped_geometry is not None:
         append_geometry(scoped_geometry)
     else:
+        if not isinstance(codes, list):
+            raise AnalysisError("Kode wilayah AOI tidak valid.", 422)
         for code in dict.fromkeys(codes):
             append_geometry(load_geometry(reference["level"], code))
     if not polygons:

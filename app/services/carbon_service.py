@@ -14,6 +14,7 @@ import logging
 import os
 import time
 from datetime import UTC, datetime
+from typing import Any
 
 import ee
 import requests
@@ -26,8 +27,8 @@ from app.inference.carbon_inference import CarbonInferenceEngine
 from app.inference.carbon_inference_local import LocalCarbonInferenceEngine
 from app.providers.external_carbon_provider import ExternalRasterProvider
 from app.registries import model_compatibility
-from app.registries.carbon_pool_models import builtin_carbon_models, get_builtin_carbon_model
-from app.registries.granite_biomass_registry import MODEL_NAME as GRANITE_BIOMASS_MODEL_NAME, granite_biomass_model
+from app.registries.carbon_pool_models import get_builtin_carbon_model
+from app.registries.granite_biomass_registry import MODEL_NAME as GRANITE_BIOMASS_MODEL_NAME
 from app.registries.carbon_dataset_registry import (
     CARBON_ARCGIS_REGISTRY,
     CARBON_DATASET_REGISTRY,
@@ -44,6 +45,7 @@ from app.registries.carbon_dataset_registry import (
 from app.repositories import dataset_repo
 from app.repositories.uploaded_model_repo import get_active_model_path
 from app.services import config_service
+from app.services.model_catalog_service import list_carbon_models
 from app.services.arcgis_helpers import (
     _arcgis_carbon_reference_stats,
     _estimated_carbon_vis_params,
@@ -242,25 +244,13 @@ def get_direct_carbon_reference_layer(
 def active_carbon_model_compatibility(db: Session) -> dict[str, list[str]]:
     """Return active carbon model names grouped by compatible reference dataset key."""
     grouped: dict[str, list[str]] = {}
-    models = db.query(UploadedModel).filter_by(model_type="carbon", is_active=True, lifecycle_state="active").all()
-    for model in models:
-        meta = model.metadata_json or {}
-        meta = model_compatibility.backfill_legacy_metadata(meta, model.name)
+    for model in list_carbon_models(db):
+        meta = model.get("metadata_json") or {}
         for dataset_key in model_compatibility.get_compatible_datasets(meta):
             names = grouped.setdefault(dataset_key, [])
-            if model.name not in names:
-                names.append(model.name)
-    for model in builtin_carbon_models(db=db):
-        for dataset_key in model["metadata_json"]["compatible_reference_datasets"]:
-            names = grouped.setdefault(dataset_key, [])
-            if model["name"] not in names:
-                names.append(model["name"])
-    granite_model = granite_biomass_model()
-    if granite_model:
-        for dataset_key in granite_model["metadata_json"]["compatible_reference_datasets"]:
-            names = grouped.setdefault(dataset_key, [])
-            if granite_model["name"] not in names:
-                names.append(granite_model["name"])
+            name = model.get("name")
+            if isinstance(name, str) and name not in names:
+                names.append(name)
     return grouped
 
 
@@ -410,6 +400,7 @@ def get_cached_external_dataset_health(key: str) -> dict:
 
 
 def check_external_dataset_health(key: str, refresh: bool = False) -> dict:
+    result: dict[str, Any]
     """Check a public reference endpoint with a short, cached request."""
     from app.core.config import get_settings
 
@@ -1311,7 +1302,7 @@ def analyze_carbon(db: Session, data: dict) -> dict:
         max_carbon = float(reference_stats_raw.get("agb_max") or 0)
         total_carbon_tons = mean_carbon * calculation_area if "g/kg" not in dataset_info.get("unit", "") else None
         co2_factor = config_service.get_analysis_defaults(db)["carbon_co2_factor"]
-        stats_out = {
+        stats_out: dict[str, Any] = {
             "mean": round(mean_carbon, 2),
             "std_dev": round(std_carbon, 2),
             "min": round(min_carbon, 2),
@@ -1727,8 +1718,10 @@ def analyze_carbon(db: Session, data: dict) -> dict:
                         "pixel_count": len(sample_values),
                         "sampled": True,
                     }
-                    sampled_percentiles = np.percentile(sample_values, [25, 50, 75])
-                    percentiles = stats_out.get("percentiles") or {}
+                    sampled_percentiles = [
+                        float(np.quantile(sample_values, quantile)) for quantile in (0.25, 0.5, 0.75)
+                    ]
+                    percentiles: dict[str, Any] = dict(stats_out.get("percentiles") or {})
                     percentiles.update({
                         key: round(float(value), 2) if percentiles.get(key) is None else percentiles[key]
                         for key, value in zip(("p25", "median", "p75"), sampled_percentiles, strict=True)

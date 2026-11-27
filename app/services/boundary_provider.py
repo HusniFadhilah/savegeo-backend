@@ -163,7 +163,7 @@ class RegionBoundaryProvider:
     def dropdown(self, level: str, parent_code: str | None = None) -> dict:
         if level not in {"province", "city"}:
             raise ValueError("unsupported boundary level")
-        params = {"is_for_dropdown": 1}
+        params: dict[str, int | str] = {"is_for_dropdown": 1}
         if parent_code:
             params["parent_code"] = parent_code
         response = public_http.get(

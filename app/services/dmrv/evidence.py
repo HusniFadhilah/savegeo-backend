@@ -99,7 +99,8 @@ def _build_archive(snapshot: DmrvSnapshot) -> tuple[bytes, dict, list[str]]:
         "uncertainty_report": "uncertainty/report.json",
         "spatial_artifacts": "spatial/artifacts.json",
     }
-    components = outputs.get("evidence_components") if isinstance(outputs.get("evidence_components"), dict) else {}
+    raw_components = outputs.get("evidence_components")
+    components: dict[str, Any] = raw_components if isinstance(raw_components, dict) else {}
     for component, filename in optional.items():
         entry = components.get(component)
         if isinstance(entry, dict) and entry.get("status") == "provided" and isinstance(entry.get("artifact"), (dict, list, str)):

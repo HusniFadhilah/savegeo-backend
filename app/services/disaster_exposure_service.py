@@ -25,9 +25,10 @@ _BUILDING_CLASSES = ("low_overlap", "medium_overlap", "high_overlap")
 def _geometry(value: dict[str, Any] | None):
     if not value:
         raise AnalysisError("Geometri GeoJSON tidak tersedia", 422)
-    geojson = value
+    geojson: dict[str, Any] | None = value
     if value.get("type") == "Feature":
-        geojson = value.get("geometry")
+        candidate = value.get("geometry")
+        geojson = candidate if isinstance(candidate, dict) else None
     elif value.get("type") == "FeatureCollection":
         return unary_union([_geometry(feature) for feature in value.get("features", [])])
     if not geojson or not geojson.get("type"):

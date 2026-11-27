@@ -52,14 +52,20 @@ async def read_bounded_json_object(request: Request, *, max_bytes: int = 10 * 10
     return payload
 
 
-async def read_typed_json_object(request: Request, schema: type[T], *, max_bytes: int = 10 * 1024 * 1024) -> dict:
+async def read_typed_json_object(
+    request: Request,
+    schema: type[T],
+    *,
+    max_bytes: int = 10 * 1024 * 1024,
+    exclude_none: bool = True,
+) -> dict:
     payload = await read_bounded_json_object(request, max_bytes=max_bytes)
-    return validate_typed_json_object(payload, schema)
+    return validate_typed_json_object(payload, schema, exclude_none=exclude_none)
 
 
-def validate_typed_json_object(payload: dict, schema: type[T]) -> dict:
+def validate_typed_json_object(payload: dict, schema: type[T], *, exclude_none: bool = True) -> dict:
     try:
         parsed = schema.model_validate(payload)
     except ValidationError as exc:
         raise RequestValidationError(exc.errors()) from exc
-    return parsed.model_dump(exclude_unset=True, exclude_none=True)
+    return parsed.model_dump(exclude_unset=True, exclude_none=exclude_none)

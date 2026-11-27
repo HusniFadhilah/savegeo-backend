@@ -9,6 +9,7 @@ from __future__ import annotations
 import math
 import random
 from statistics import NormalDist, mean, stdev
+from typing import Any
 
 from app.schemas.dmrv_carbon_features import (
     BlueCarbonMonitoringInput,
@@ -267,6 +268,12 @@ def methodology_calculation(data: MethodologyCalculationInput) -> dict:
     net_screening = gross_tco2e - data.project_emissions_tco2e - data.leakage_tco2e if gross_tco2e is not None else None
     if not data.assessment_evidence_complete:
         warnings.append("methodology_eligibility_evidence_checklist_incomplete")
+    benchmark_period_change = 0.0
+    if data.approach != "area_based":
+        raw_period_change = benchmark_result.get("estimated_period_stock_change_mg_c")
+        if isinstance(raw_period_change, (int, float)) and not isinstance(raw_period_change, bool):
+            benchmark_period_change = float(raw_period_change)
+
     return {
         "algorithm": "savegeo_vm0047_v1_1_weighted_trend_period_change_screening_v2",
         "methodology": {"id": data.methodology_id, "version": data.methodology_version, "approach": data.approach},
@@ -284,12 +291,13 @@ def methodology_calculation(data: MethodologyCalculationInput) -> dict:
         "current_census_stock_tco2e": census_current_stock_mg_c * 44 / 12 if census_current_stock_mg_c is not None else None,
         "net_screening_tco2e": net_screening,
         "measurement_standard_uncertainty_tco2e": standard_uncertainty_tco2e,
-        "measurement_interval_90_tco2e": [gross_tco2e - interval_half_width_tco2e, gross_tco2e + interval_half_width_tco2e] if interval_half_width_tco2e is not None else None,
+        "measurement_interval_90_tco2e": [gross_tco2e - interval_half_width_tco2e, gross_tco2e + interval_half_width_tco2e]
+        if gross_tco2e is not None and interval_half_width_tco2e is not None else None,
         "project_emissions_tco2e": data.project_emissions_tco2e,
         "leakage_tco2e": data.leakage_tco2e,
         "leakage_assessment_basis": data.leakage_assessment_basis,
         "uncertainty_basis": methodology_uncertainty_basis,
-        "period_stock_change_before_benchmark_tco2e": period_delta_c * 44 / 12 if data.approach == "area_based" else (benchmark_result.get("estimated_period_stock_change_mg_c", 0) or 0) * 44 / 12,
+        "period_stock_change_before_benchmark_tco2e": period_delta_c * 44 / 12 if data.approach == "area_based" else benchmark_period_change * 44 / 12,
         "calculation_status": "review_required" if warnings else "screening_complete",
         "warnings": warnings,
         "qualification": "SaveGeo screening calculation, not the Verra Digitalized Methodology. Inputs remain project-reported; formula implementation, pool eligibility, census criteria, leakage, and uncertainty must be checked against the current controlled methodology by a qualified VVB before any claim or issuance.",
@@ -300,7 +308,7 @@ def methodology_calculation(data: MethodologyCalculationInput) -> dict:
 def uncertainty_budget(data: UncertaintyBudgetInput) -> dict:
     sources = [item.source for item in data.components]
     uncertainties = []
-    component_rows = []
+    component_rows: list[dict[str, Any]] = []
     residual_vectors: dict[str, list[float]] = {}
     residual_ids: dict[str, dict[str, float]] = {}
     for item in data.components:
@@ -386,7 +394,7 @@ def uncertainty_budget(data: UncertaintyBudgetInput) -> dict:
     lower_bound = draws[max(0, min(len(draws) - 1, int(alpha * len(draws))))]
     upper_bound = draws[max(0, min(len(draws) - 1, int((1 - alpha) * len(draws)) - 1))]
     denominator = variance or 1.0
-    ranked = []
+    ranked: list[dict[str, Any]] = []
     for i in range(len(data.components)):
         contribution = sum(covariance[i])
         ranked.append({**component_rows[i], "correlated_variance_contribution_tco2e2": contribution,
@@ -501,7 +509,7 @@ def vmd0054_leakage(data: VMD0054LeakageInput) -> dict:
 
 
 def blue_carbon_monitoring(data: BlueCarbonMonitoringInput) -> dict:
-    rows = []
+    rows: list[dict[str, Any]] = []
     for period in data.periods:
         biomass = period.biomass_mg_c_ha * period.habitat_area_ha
         sediment = period.sediment_soc_mg_c_ha * period.habitat_area_ha
@@ -680,7 +688,7 @@ def _sample_points(stratum, count: int, seed: int) -> list[dict] | None:
     projected = transform(forward, geom)
     minx, miny, maxx, maxy = projected.bounds
     rng = random.Random(seed)
-    points = []
+    points: list[dict[str, float]] = []
     attempts = max(10000, count * 2000)
     for _ in range(attempts):
         if len(points) >= count:

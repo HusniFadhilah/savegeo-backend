@@ -1001,7 +1001,7 @@ def analyze_landcover_change_map(data: dict) -> dict:
 
     settings = get_settings()
     dataset = data.get("dataset", "Dynamic_World")
-    if dataset not in LAND_COVER_LEGENDS:
+    if not isinstance(dataset, str) or dataset not in LAND_COVER_LEGENDS:
         raise AnalysisError(f"Unknown dataset: {dataset}", 400)
 
     ds_opts_cm = LAND_COVER_DATASET_OPTIONS.get(dataset, {})
@@ -1012,8 +1012,11 @@ def analyze_landcover_change_map(data: dict) -> dict:
             extra={"dataset": dataset, "supports_transition": False},
         )
 
-    from_year = int(data.get("from_year"))
-    to_year = int(data.get("to_year"))
+    try:
+        from_year = int(data["from_year"])
+        to_year = int(data["to_year"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise AnalysisError("from_year dan to_year wajib berupa tahun yang valid.", 400) from exc
     start_month = int(data.get("start_month", 1))
     end_month = int(data.get("end_month", 12))
     dw_probability_threshold = data.get("dw_probability_threshold")
@@ -1116,18 +1119,12 @@ def analyze_landcover_change_map(data: dict) -> dict:
         {"min": 1, "max": 1, "palette": ["ff1744"]},
         "Changed area",
     )
-    destination_tile = get_tile_url(
-        *landcover_visual_image(dataset, display_destination),
-        "Changed pixels by destination class",
-    )
-    from_tile = get_tile_url(
-        *landcover_visual_image(dataset, display_from.clip(aoi)),
-        "Land cover from year",
-    )
-    to_tile = get_tile_url(
-        *landcover_visual_image(dataset, display_to.clip(aoi)),
-        "Land cover to year",
-    )
+    destination_image, destination_vis = landcover_visual_image(dataset, display_destination)
+    from_image, from_vis = landcover_visual_image(dataset, display_from.clip(aoi))
+    to_image, to_vis = landcover_visual_image(dataset, display_to.clip(aoi))
+    destination_tile = get_tile_url(destination_image, destination_vis, "Changed pixels by destination class")
+    from_tile = get_tile_url(from_image, from_vis, "Land cover from year")
+    to_tile = get_tile_url(to_image, to_vis, "Land cover to year")
 
     total_ha = float((area_stats or {}).get("valid_area_ha", 0) or 0)
     changed_ha = float((area_stats or {}).get("changed_area_ha", 0) or 0)
@@ -1165,7 +1162,7 @@ _TRANSITION_CODE_MULTIPLIER = 1000
 def identify_landcover_point(data: dict) -> dict:
     """Identify the class at a clicked point and its share of the AOI."""
     dataset = data.get("dataset")
-    if dataset not in LAND_COVER_LEGENDS:
+    if not isinstance(dataset, str) or dataset not in LAND_COVER_LEGENDS:
         raise AnalysisError(f"Dataset land cover tidak didukung: {dataset}", 400)
 
     try:
@@ -1265,7 +1262,7 @@ def analyze_landcover_hotspots(data: dict) -> dict:
 
     settings = get_settings()
     dataset = data.get("dataset", "Dynamic_World")
-    if dataset not in LAND_COVER_LEGENDS:
+    if not isinstance(dataset, str) or dataset not in LAND_COVER_LEGENDS:
         raise AnalysisError(f"Unknown dataset: {dataset}", 400)
 
     ds_opts = LAND_COVER_DATASET_OPTIONS.get(dataset, {})
@@ -1276,8 +1273,11 @@ def analyze_landcover_hotspots(data: dict) -> dict:
             extra={"dataset": dataset, "supports_transition": False},
         )
 
-    from_year = int(data.get("from_year"))
-    to_year = int(data.get("to_year"))
+    try:
+        from_year = int(data["from_year"])
+        to_year = int(data["to_year"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise AnalysisError("from_year dan to_year wajib berupa tahun yang valid.", 400) from exc
     start_month = int(data.get("start_month", 1))
     end_month = int(data.get("end_month", 12))
     dw_probability_threshold = data.get("dw_probability_threshold")

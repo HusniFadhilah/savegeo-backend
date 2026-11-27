@@ -53,7 +53,7 @@ def plot_density(
         blockers.append("biomass_incomplete")
 
     biomass_density = carbon_density = None
-    if not blockers:
+    if not blockers and area is not None:
         biomass_density = sum(values, Decimal(0)) / _KG_PER_MG / (area / _M2_PER_HA)
         carbon_density = biomass_density * carbon_fraction
     return PlotDensity(

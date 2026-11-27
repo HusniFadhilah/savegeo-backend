@@ -60,7 +60,7 @@ def _aoi_payload(aoi) -> dict:
 def _primary_burn_product(products: list[dict]) -> dict:
     """Choose one canonical product; independent products must never be added."""
     priority = {"mcd64a1": 0, "vnp64a1": 1}
-    return min(products, key=lambda product: priority.get(product.get("id"), 99))
+    return min(products, key=lambda product: priority.get(str(product.get("id") or ""), 99))
 
 
 def _burn_product_comparison(products: list[dict]) -> dict | None:

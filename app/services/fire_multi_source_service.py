@@ -259,7 +259,7 @@ def merge_observations(features: list[dict]) -> list[dict]:
     groups = []
     # Kalimantan is near the equator. A 0.01-degree cell exceeds 500m;
     # adjacent cells cover all possible matches without a quadratic scan.
-    buckets = defaultdict(list)
+    buckets: defaultdict[tuple[int, int], list[dict]] = defaultdict(list)
     for feature in features:
         props = feature.get("properties") or {}
         timestamp = _timestamp(props.get("acquired_at"))

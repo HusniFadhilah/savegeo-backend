@@ -376,9 +376,12 @@ def _is_biomass_carbon_vis_compatible(dataset_info: dict, vis_params: dict) -> b
     if not isinstance(vis_params, dict):
         return False
 
+    min_value, max_value = vis_params.get("min"), vis_params.get("max")
+    if min_value is None or max_value is None:
+        return False
     try:
-        vis_min = float(vis_params.get("min"))
-        vis_max = float(vis_params.get("max"))
+        vis_min = float(min_value)
+        vis_max = float(max_value)
     except (TypeError, ValueError):
         return False
 

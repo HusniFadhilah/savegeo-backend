@@ -84,7 +84,7 @@ def register_action_outputs(db: Session, action_id: str, result: Any = None) -> 
         geojson = {"type": "FeatureCollection", "features": result["features"]}
     if isinstance(geojson, dict) and geojson.get("type") in {"Feature", "FeatureCollection"}:
         features = geojson.get("features", [geojson]) if geojson.get("type") == "FeatureCollection" else [geojson]
-        geojson_metadata = {"crs": "EPSG:4326", "coordinate_order": "longitude,latitude"}
+        geojson_metadata: dict[str, Any] = {"crs": "EPSG:4326", "coordinate_order": "longitude,latitude"}
         # Keep small synchronous results directly addressable. Large results
         # must be streamed from object storage rather than copied into JSONB.
         if len(json.dumps(geojson, separators=(",", ":"), ensure_ascii=False).encode("utf-8")) <= 2_000_000:

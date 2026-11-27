@@ -204,6 +204,53 @@ services:
       - --poll-interval
       - ${FIELD_PREDICTION_WORKER_POLL_INTERVAL:-2}
 
+  green-ranking-worker:
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SAVEGEO_PRODUCT_VERSION: ${SAVEGEO_PRODUCT_VERSION:-}
+        SAVEGEO_COMMIT_SHA: ${SAVEGEO_COMMIT_SHA:-}
+        SAVEGEO_BUILD_NUMBER: ${SAVEGEO_BUILD_NUMBER:-}
+    restart: unless-stopped
+    mem_limit: 8g
+    pids_limit: 256
+    cpus: 4
+    env_file:
+      - .env
+    environment:
+      APP_ENV: production
+      DEBUG: "false"
+      DATABASE_URL: ${RUNTIME_DATABASE_URL:?Run scripts/prepare_runtime_database.py before deploying}
+      POSTGRES_PASSWORD: ""
+      MIGRATION_DATABASE_URL: ""
+      UPLOAD_DIR: /app/var/uploads
+      MODEL_DIR: /app/var/saved_models
+      GREEN_RANKING_API_READY_URL: http://api:8086/ready
+      GREEN_RANKING_SUPERVISOR_POLL_SECONDS: ${GREEN_RANKING_SUPERVISOR_POLL_SECONDS:-30}
+    volumes:
+      - ./var:/app/var
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import sys; from pathlib import Path; cmd = Path('/proc/1/cmdline').read_bytes(); sys.exit(0 if b'app.workers.green_rankings_supervisor' in cmd else 1)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      db:
+        condition: service_healthy
+    command:
+      - python
+      - -m
+      - app.workers.green_rankings_supervisor
+
   migrate:
     build:
       context: .

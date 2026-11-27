@@ -62,6 +62,7 @@ import os
 import tempfile
 from datetime import date, timedelta
 from threading import RLock
+from typing import Any
 
 import ee
 
@@ -470,7 +471,7 @@ def sar_water_pair(aoi, pre_date: date, post_date: date):
         raise AnalysisError("Tidak ada pasangan citra radar dengan arah lintasan dan orbit relatif yang sama pada tanggal sebelum dan sesudah kejadian", 404)
     # the shared orbit with the most acquisitions in both windows
     counts = {k: sum(1 for x in keys["pre"] if tuple(x) == k) + sum(1 for x in keys["post"] if tuple(x) == k) for k in shared}
-    direction, orbit = max(counts, key=counts.get)
+    direction, orbit = max(counts, key=lambda key: counts[key])
 
     def water(col):
         one = col.filter(ee.Filter.eq("orbitProperties_pass", direction)).filter(ee.Filter.eq("relativeOrbitNumber_start", orbit)).select("VV")
@@ -505,7 +506,7 @@ def _mean(image, aoi, scale: int):
     )
 
 
-def _route_summary(groups: list[dict]) -> dict:
+def _route_summary(groups: list[dict[str, Any]]) -> dict:
     areas = {name: 0.0 for name in ROUTES.values()}
     for group in groups or []:
         areas[ROUTES.get(int(group["route"]), "no_data")] += float(group.get("sum") or 0)
@@ -624,12 +625,14 @@ def analyze_landcover_fusion(data: dict) -> dict:
         "confidence_t0": _mean(f0["confidence"], aoi, scale).get("confidence"),
         "confidence_t1": _mean(f1["confidence"], aoi, scale).get("confidence"),
     }]
-    stats = {}
+    stats: dict[str, Any] = {}
     for batch in stats_batches:
         stats.update(ee.Dictionary(batch).getInfo() or {})
 
     legend = {str(code): MAPBIOMAS_DETAIL_LEGEND[str(code)] for code in MAPBIOMAS_CLASS_CODES}
-    flows, gains, losses = [], {}, {}
+    flows: list[dict[str, Any]] = []
+    gains: dict[str, float] = {}
+    losses: dict[str, float] = {}
     for group in stats.get("transitions") or []:
         code = int(float(group["transition"]))
         before, after = divmod(code, 1000)
@@ -653,11 +656,12 @@ def analyze_landcover_fusion(data: dict) -> dict:
     changed_ha = float(areas.get("changed") or 0)
     aoi_ha = float(stats.get("aoi_area_ha") or 0)
     labels_all = {**{class_label: 0 for class_label in gains}, **{class_label: 0 for class_label in losses}}
-    net_changes = sorted(
-        ({"class": label, "gain": round(gains.get(label, 0), 2), "loss": round(losses.get(label, 0), 2),
-          "net": round(gains.get(label, 0) - losses.get(label, 0), 2)} for label in labels_all),
-        key=lambda item: abs(item["net"]), reverse=True,
-    )
+    net_changes: list[dict[str, Any]] = [
+        {"class": label, "gain": round(gains.get(label, 0), 2), "loss": round(losses.get(label, 0), 2),
+         "net": round(gains.get(label, 0) - losses.get(label, 0), 2)}
+        for label in labels_all
+    ]
+    net_changes.sort(key=lambda item: abs(float(item["net"])), reverse=True)
 
     lc_vis = {"min": 0, "max": len(MAPBIOMAS_CLASS_CODES) - 1, "palette": _LC_PALETTE}
     route_vis = {"min": 1, "max": 3, "palette": [item["color"] for item in ROUTE_LEGEND]}
@@ -690,7 +694,7 @@ def analyze_landcover_fusion(data: dict) -> dict:
             "mean_q_o": round(float(quality.get("Q_o") or 0), 4),
             "mean_q_s": round(float(quality.get("Q_s") or 0), 4),
             "mean_confidence": round(float(stats.get(f"confidence_{key}") or 0), 4),
-            "routes": _route_summary(stats.get(f"routes_{key}")),
+            "routes": _route_summary(stats.get(f"routes_{key}") or []),
         }
 
     return {
@@ -719,7 +723,7 @@ def analyze_landcover_fusion(data: dict) -> dict:
             "route_switch_area_ha": round(float((stats.get("reference_areas") or {}).get("route_switch") or 0), 2),
             "route_switch_changed_area_ha": round(float((stats.get("reference_areas") or {}).get("route_switch_changed") or 0), 2),
         },
-        "common_path": _route_summary(stats.get("common_paths")),
+        "common_path": _route_summary(stats.get("common_paths") or []),
         "event": _event_report(params["event"], stats, legend),
         "flows": flows,
         "net_changes": net_changes,

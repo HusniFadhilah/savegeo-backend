@@ -4,7 +4,17 @@ from __future__ import annotations
 import re
 from typing import Any
 
-_ACTIONS = [
+ActionEntry = tuple[
+    str,
+    str,
+    str,
+    str | tuple[str, ...] | None,
+    dict[str, Any],
+    list[str],
+    list[str],
+]
+
+_ACTIONS: list[ActionEntry] = [
     ("aoi", "select_aoi", "aoi.active", None, {"query": {"type": "string", "minLength": 3, "maxLength": 200}}, ["query"], ["valid polygon", "map"]),
     ("aoi_active", "use_active_aoi", "aoi.active", None, {}, [], ["an AOI is already selected"]),
     ("scenes", "search_scenes", "scenes.searchRequest", "app.feature.satellite_exploration", {}, [], ["aoi", "configured provider", "date range"]),
@@ -101,7 +111,7 @@ _ACTIONS += [
 ]
 
 UI_ACTION_TARGETS: dict[str, set[str]] = {}
-for _, action, target, *_ in _ACTIONS:
+for _key, action, target, _feature, _properties, _required, _prerequisites in _ACTIONS:
     UI_ACTION_TARGETS.setdefault(action, set()).add(target)
 
 

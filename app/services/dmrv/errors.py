@@ -35,10 +35,18 @@ def register_dmrv_error_handler(app: FastAPI) -> None:
         return JSONResponse(
             status_code=exc.status,
             content={
+                "type": f"urn:savegeo:problem:{exc.status}",
+                "title": "Request error" if exc.status < 500 else "Service error",
+                "status": exc.status,
+                "detail": exc.message,
+                "instance": request.url.path,
                 "code": exc.code,
                 "message": exc.message,
                 "request_id": getattr(request.state, "request_id", None),
                 "retryable": exc.retryable,
                 "details": exc.details,
+                # Kept for older clients while the API adopts Problem Details.
+                "error": exc.message,
             },
+            media_type="application/problem+json",
         )

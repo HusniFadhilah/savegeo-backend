@@ -197,7 +197,8 @@ def filter_direct_reference_layers(layers: Any, allowed_features: set[str]) -> l
     for layer in layers:
         if not isinstance(layer, dict):
             continue
-        feature = DIRECT_REFERENCE_FEATURES.get(layer.get("analysis_kind"))
+        analysis_kind = layer.get("analysis_kind")
+        feature = DIRECT_REFERENCE_FEATURES.get(analysis_kind) if isinstance(analysis_kind, str) else None
         if feature is None or feature not in allowed_features:
             continue
         visible.append({key: value for key, value in layer.items() if key in DIRECT_REFERENCE_CONTEXT_FIELDS})

@@ -352,7 +352,7 @@ Contoh perilaku:
 """.strip()
 
 
-WORKFLOW_DEFAULTS = {
+WORKFLOW_DEFAULTS: dict[str, dict[str, Any]] = {
     "carbon": {
         "year": 2024,
         "dataset_year": 2020,
@@ -967,7 +967,7 @@ def _build_execution_report(plan: dict[str, Any], results: list[dict[str, Any]])
     for result in ok_results:
         tool = result.get("tool")
         data = result.get("result")
-        if isinstance(data, dict):
+        if isinstance(tool, str) and isinstance(data, dict):
             layer = _extract_map_layer(tool, data)
             if layer:
                 map_layers.append(layer)
@@ -2637,8 +2637,9 @@ def validate_geoai_actions(
         # and values still pass the exact same fail-closed validation below.
         if "action" not in action and isinstance(action.get("type"), str) and action["type"] in _GEOAI_UI_TARGETS:
             name = action["type"]
-        params = action.get("parameters") or {}
-        value = params.get("value") if isinstance(params, dict) else None
+        params_value = action.get("parameters")
+        params: dict[str, Any] = params_value if isinstance(params_value, dict) else {}
+        value = params.get("value")
         if allowed_features is not None:
             required: set[str] = set()
             if name == "open_module":
@@ -2660,7 +2661,7 @@ def validate_geoai_actions(
                     "vegetation": {"app.feature.vegetation_indices"},
                     "combined": {"app.feature.carbon_stock", "app.feature.land_cover", "app.feature.vegetation_indices"},
                 }
-                required = type_features.get(value, {"invalid"})
+                required = type_features.get(value, {"invalid"}) if isinstance(value, str) else {"invalid"}
             elif target == "lc_change.analysis" or str(target).startswith("lc_change."):
                 required = {"app.feature.land_cover_change"}
             elif target == "crop.analysis" or str(target).startswith("crop."):
@@ -2669,7 +2670,7 @@ def validate_geoai_actions(
                 required = {"app.feature.disaster_mapping"}
             elif str(target).startswith("scenes.") or name in {"set_provider", "search_scenes", "show_scene", "clear_scenes"}:
                 required = {"app.feature.satellite_exploration"}
-            elif target in SHARED_CARBON_PARAMETERS:
+            elif isinstance(target, str) and target in SHARED_CARBON_PARAMETERS:
                 if not SHARED_CARBON_PARAMETERS[target].intersection(allowed_features):
                     warnings.append("Perintah tidak diizinkan oleh pengaturan fitur Viewer.")
                     continue
@@ -2678,8 +2679,12 @@ def validate_geoai_actions(
             elif str(target).startswith("carbon.landcover"):
                 required = {"app.feature.land_cover"}
             elif target == "carbon.analysis":
+                current_ui = page_state.get("ui")
+                current_ui = current_ui if isinstance(current_ui, dict) else {}
+                carbon_ui = current_ui.get("carbon")
+                carbon_ui = carbon_ui if isinstance(carbon_ui, dict) else {}
                 selected_type = next((a["parameters"]["value"] for a in reversed(valid) if a.get("action") == "set_analysis_type"),
-                                     ((page_state.get("ui") or {}).get("carbon") or {}).get("analysisType", "carbon"))
+                                     carbon_ui.get("analysisType", "carbon"))
                 required = {"carbon": {"app.feature.carbon_stock"}, "vegetation": {"app.feature.vegetation_indices"},
                             "landcover": {"app.feature.land_cover"}, "combined": {"app.feature.carbon_stock", "app.feature.land_cover", "app.feature.vegetation_indices"}}.get(selected_type, {"invalid"})
             elif str(target).startswith("carbon."):
@@ -2725,9 +2730,11 @@ def validate_geoai_actions(
             warnings.append(f"Parameter {name} tidak valid.")
             continue
         value = params.get("value")
-        ui_state = page_state.get("ui") if isinstance(page_state.get("ui"), dict) else {}
-        scene_state = ui_state.get("scenes") if isinstance(ui_state.get("scenes"), dict) else {}
-        crop_state = ui_state.get("crop") if isinstance(ui_state.get("crop"), dict) else {}
+        ui_value = page_state.get("ui")
+        ui_state: dict[str, Any] = ui_value if isinstance(ui_value, dict) else {}
+        scene_value, crop_value = ui_state.get("scenes"), ui_state.get("crop")
+        scene_state: dict[str, Any] = scene_value if isinstance(scene_value, dict) else {}
+        crop_state: dict[str, Any] = crop_value if isinstance(crop_value, dict) else {}
         if name == "select_aoi" and (not isinstance(params.get("query"), str) or not 3 <= len(params["query"].strip()) <= 200):
             warnings.append("Nama AOI harus 3-200 karakter.")
             continue
@@ -2824,13 +2831,15 @@ def validate_geoai_actions(
                           "lc_change.startMonth", "lc_change.endMonth"} and type(value) is not int:
                 warnings.append(f"Nilai {target} harus tahun/bulan/ambang berupa integer.")
                 continue
-            if target in {"carbon.startMonth", "carbon.endMonth", "carbon.vegetationStartMonth", "carbon.vegetationEndMonth", "lc_change.startMonth", "lc_change.endMonth"} and not 1 <= value <= 12:
+            month_targets = {"carbon.startMonth", "carbon.endMonth", "carbon.vegetationStartMonth", "carbon.vegetationEndMonth", "lc_change.startMonth", "lc_change.endMonth"}
+            if target in month_targets and (type(value) is not int or not 1 <= value <= 12):
                 warnings.append(f"Bulan pada {target} di luar rentang 1-12.")
                 continue
-            if target in {"carbon.cloudThreshold", "carbon.vegetationCloudThreshold"} and not 0 <= value <= 100:
+            if target in {"carbon.cloudThreshold", "carbon.vegetationCloudThreshold"} and (type(value) is not int or not 0 <= value <= 100):
                 warnings.append("Ambang awan di luar rentang 0-100.")
                 continue
-            if target in {"carbon.analysisYear", "carbon.datasetYear", "lc_change.fromYear", "lc_change.toYear"} and not 1900 <= value <= 2100:
+            year_targets = {"carbon.analysisYear", "carbon.datasetYear", "lc_change.fromYear", "lc_change.toYear"}
+            if target in year_targets and (type(value) is not int or not 1900 <= value <= 2100):
                 warnings.append(f"Tahun pada {target} di luar rentang wajar.")
                 continue
             if target == "carbon.clipMode" and (not isinstance(value, str) or value not in {"clipped", "full"}):
@@ -2845,25 +2854,28 @@ def validate_geoai_actions(
             if target == "carbon.referenceDataset" and page_state.get("available_carbon_datasets") and value not in page_state["available_carbon_datasets"]:
                 warnings.append("Dataset karbon tidak ada dalam state aplikasi.")
                 continue
-            if target == "carbon.landcoverDatasets" and page_state.get("available_landcover_datasets") and any(v not in page_state["available_landcover_datasets"] for v in value):
+            available_landcover = page_state.get("available_landcover_datasets")
+            if target == "carbon.landcoverDatasets" and isinstance(available_landcover, list) and isinstance(value, list) and any(v not in available_landcover for v in value):
                 warnings.append("Dataset land cover tidak ada dalam state aplikasi.")
                 continue
-            if target == "lc_change.dataset" and page_state.get("available_landcover_datasets") and value not in page_state["available_landcover_datasets"]:
+            if target == "lc_change.dataset" and isinstance(available_landcover, list) and value not in available_landcover:
                 warnings.append("Dataset perubahan tutupan lahan tidak ada dalam state aplikasi.")
                 continue
         if name == "run_analysis":
             if target == "crop.analysis" and not (crop_state.get("fieldId") or any(a.get("action") == "select_field" for a in valid)):
                 warnings.append("Field tanaman belum dipilih; analisis tidak dijalankan.")
                 continue
-            disaster_state = ui_state.get("disaster") if isinstance(ui_state.get("disaster"), dict) else {}
+            disaster_value = ui_state.get("disaster")
+            disaster_state: dict[str, Any] = disaster_value if isinstance(disaster_value, dict) else {}
             if target in {"disaster.dem", "disaster.event"} and not (has_planned_aoi or context.get("aoi") or page_state.get("has_aoi") or disaster_state.get("aoiExists")):
                 warnings.append("AOI bencana belum tersedia; analisis DEM tidak dijalankan.")
                 continue
-            carbon_state = ui_state.get("carbon") if isinstance(ui_state.get("carbon"), dict) else {}
+            carbon_value = ui_state.get("carbon")
+            carbon_state: dict[str, Any] = carbon_value if isinstance(carbon_value, dict) else {}
             direct_carbon = target == "carbon.analysis" and (
                 carbon_state.get("directGlobal") is True or any(
                     accepted.get("target") == "carbon.directGlobal" and
-                    accepted.get("parameters", {}).get("value") is True
+                    isinstance(accepted.get("parameters"), dict) and accepted["parameters"].get("value") is True
                     for accepted in valid
                 )
             )
@@ -3007,9 +3019,11 @@ def geoai_with_ai(message: str, context: dict, db, history: list[dict] | None = 
         }
         validation_context = dict(context or {})
         validation_context["_server_hotspot_features"] = {
-            hotspot_id: hotspot_feature_codes.get(hotspot.get("metric"))
+            hotspot_id: hotspot_feature_codes[hotspot["metric"]]
             for hotspot_id, hotspot in tool_ctx["last_hotspots"].items()
-            if isinstance(hotspot, dict) and hotspot.get("metric") in hotspot_feature_codes
+            if isinstance(hotspot, dict)
+            and isinstance(hotspot.get("metric"), str)
+            and hotspot["metric"] in hotspot_feature_codes
         }
         result["actions"], action_warnings = validate_geoai_actions(
             result.get("actions"), page_state or {}, validation_context, allowed_features

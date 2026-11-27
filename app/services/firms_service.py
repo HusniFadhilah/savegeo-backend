@@ -12,6 +12,7 @@ import math
 import threading
 import time
 from collections import Counter
+from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
 from urllib.parse import urlparse
 
@@ -86,7 +87,7 @@ def validate_bbox(bbox: tuple[float, float, float, float]) -> tuple[float, float
         raise FirmsRequestError("Bounding box terlalu luas; zoom ke area analisis terlebih dahulu", 400)
     if (east - west) * (north - south) > MAX_BBOX_AREA:
         raise FirmsRequestError("Luas bounding box terlalu besar untuk query FIRMS", 400)
-    return tuple(round(value, 5) for value in values)
+    return round(west, 5), round(south, 5), round(east, 5), round(north, 5)
 
 
 def validate_query(
@@ -147,8 +148,8 @@ def _confidence(value: object) -> tuple[int | float | str | None, float | None, 
         normalized = int(numeric) if numeric.is_integer() else numeric
         label = "high" if numeric >= 80 else "nominal" if numeric >= 50 else "low"
         return normalized, numeric, label
-    label = {"h": "high", "high": "high", "n": "nominal", "nominal": "nominal", "l": "low", "low": "low"}.get(raw.casefold())
-    return raw, None, label
+    normalized_label = {"h": "high", "high": "high", "n": "nominal", "nominal": "nominal", "l": "low", "low": "low"}.get(raw.casefold())
+    return raw, None, normalized_label
 
 
 def _acquisition_datetime(acq_date: object, acq_time: object) -> str | None:
@@ -315,7 +316,12 @@ def _summary(features: list[dict]) -> dict:
     high = [feature for feature in features if (feature.get("properties") or {}).get("confidence_label") == "high"]
     nominal = [feature for feature in features if (feature.get("properties") or {}).get("confidence_label") == "nominal"]
     low = [feature for feature in features if (feature.get("properties") or {}).get("confidence_label") == "low"]
-    frps = [float((feature.get("properties") or {}).get("frp")) for feature in features if (feature.get("properties") or {}).get("frp") is not None]
+    frps: list[float] = []
+    for feature in features:
+        raw_frp = (feature.get("properties") or {}).get("frp")
+        numeric_frp = _number(raw_frp)
+        if numeric_frp is not None:
+            frps.append(numeric_frp)
     dates = [str((feature.get("properties") or {}).get("acq_date")) for feature in features if (feature.get("properties") or {}).get("acq_date")]
     source_counts = Counter((feature.get("properties") or {}).get("source") for feature in features)
     by_day = Counter(dates)
@@ -327,7 +333,10 @@ def _summary(features: list[dict]) -> dict:
         "total_frp": round(sum(frps), 3),
         "average_frp": round(sum(frps) / len(frps), 3) if frps else None,
         "max_frp": round(max(frps), 3) if frps else 0,
-        "latest_detection_utc": max(((feature.get("properties") or {}).get("acq_datetime_utc") for feature in features), default=None),
+        "latest_detection_utc": max(
+            (value for feature in features if isinstance((value := (feature.get("properties") or {}).get("acq_datetime_utc")), str)),
+            default=None,
+        ),
         "by_day": [{"date": day, "count": count} for day, count in sorted(by_day.items())],
         "by_source": [{"source": source, "count": count} for source, count in sorted(source_counts.items())],
     }
@@ -345,7 +354,7 @@ def _date_chunks(start: date, end: date, max_days: int = 5) -> list[tuple[date, 
 
 def _collect_fires(
     source: str,
-    requests_to_make: list[tuple[date | None, int]],
+    requests_to_make: Sequence[tuple[date | None, int]],
     bbox: tuple[float, float, float, float],
     confidence: float | None,
     min_frp: float | None,
@@ -366,7 +375,7 @@ def _collect_fires(
         [
             source_id
             for source_id, definition in FIRMS_SOURCE_CATALOG.items()
-            if not sensor or definition["sensor"].casefold() == sensor.casefold()
+            if not sensor or str(definition.get("sensor") or "").casefold() == sensor.casefold()
         ]
         if source == "ALL"
         else [source]

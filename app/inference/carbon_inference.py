@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from threading import local
+from typing import Any
 from typing import ClassVar
 
 import ee
@@ -67,6 +68,8 @@ class CarbonInferenceEngine:
         self._quality_state = local()
         
         if model_name is None:
+            if self.registry is None:
+                raise ValueError("Model name is required when loading from an explicit model path")
             model_name = self.registry.registry.get('default')
             if model_name is None:
                 raise ValueError("No default model found. Train a model first.")
@@ -76,6 +79,8 @@ class CarbonInferenceEngine:
         
         # Load model
         if model_path is None:
+            if self.registry is None:
+                raise ValueError("Model registry is unavailable for the requested model")
             model_path = self.registry.get_model_path(model_name)
         self.model_path = str(Path(model_path).resolve())
         self.model = CarbonEstimationModel.load(model_path)
@@ -1058,7 +1063,7 @@ class CarbonInferenceEngine:
             },
         }
 
-    def _create_linear_surrogate(self) -> list:
+    def _create_linear_surrogate(self) -> tuple[list[Any], float]:
         """
         Create a linear surrogate model for non-linear models.
         This is used for GEE deployment when the original model is not linear.

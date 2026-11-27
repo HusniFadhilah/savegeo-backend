@@ -87,6 +87,35 @@ def test_commercial_scene_exposes_only_opaque_id_and_proxy_asset(monkeypatch):
         imagery._resolve_commercial_item(provider_key, "https://attacker.example/item")
 
 
+def test_commercial_asset_proxy_uses_origin_tuple_without_leaking_provider_secret(monkeypatch):
+    settings = Settings(commercial_imagery_timeout_seconds=10)
+    response = SimpleNamespace(
+        status_code=200,
+        headers={"content-type": "image/tiff"},
+        iter_bytes=lambda: iter([b"raster"]),
+        close=lambda: None,
+    )
+    calls = {}
+    monkeypatch.setattr(
+        imagery,
+        "commercial_configuration",
+        lambda _key, _settings=None: {"catalog_url": "https://catalog.example/stac", "configured": True},
+    )
+    monkeypatch.setattr(imagery, "_stac_asset_href", lambda *_args: "https://catalog.example/assets/a.tif")
+    monkeypatch.setattr(imagery, "commercial_request_headers", lambda *_args: {"Authorization": "Bearer provider-secret"})
+    monkeypatch.setattr(imagery, "public_http", SimpleNamespace(open_stream=lambda *args, **kwargs: calls.update(kwargs) or response))
+
+    stream, media_type, filename = imagery.open_commercial_asset_stream(
+        "planet_commercial", "scene-1", "analytic", settings=settings
+    )
+
+    assert b"".join(stream) == b"raster"
+    assert media_type == "image/tiff"
+    assert filename == "planet_commercial-analytic"
+    assert calls["headers"] == {"Authorization": "Bearer provider-secret"}
+    assert "catalog.example" in calls["allowed_redirect_hosts"]
+
+
 def test_blacksky_is_visible_but_search_and_preview_are_blocked():
     with pytest.raises(AnalysisError) as error:
         imagery.list_scenes({"satellite": "blacksky_spectra"})

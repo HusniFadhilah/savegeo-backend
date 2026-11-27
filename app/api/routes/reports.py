@@ -10,12 +10,13 @@ from starlette.concurrency import run_in_threadpool
 
 from app.reporting.executive_summary import build_executive_summary_docx
 from app.core.security import get_current_app_viewer
-from app.core.bounded_json import read_bounded_json_object
+from app.core.bounded_json import read_typed_json_object
 from app.core.viewer_features import ensure_feature_access
 from app.db.models.admin_user import AdminUser
 from app.db.models.user import User
 from app.db.models.analysis_provenance import AnalysisProvenance
 from app.db.session import get_db
+from app.schemas.reports import ExecutiveSummaryRequest
 from app.core.viewer_features import ensure_job_feature_access
 from app.api.routes.analysis_jobs import _read_job, viewer_owns_job
 from app.core.temporal import format_temporal
@@ -136,7 +137,7 @@ async def executive_summary_docx(
     viewer: AdminUser | User = Depends(get_current_app_viewer),
     db: Session = Depends(get_db),
 ):
-    payload = await read_bounded_json_object(request)
+    payload = await read_typed_json_object(request, ExecutiveSummaryRequest)
     result = payload.get("results") if isinstance(payload.get("results"), dict) else {}
     included = {
         "carbon": "app.feature.carbon_stock",

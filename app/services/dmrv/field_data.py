@@ -215,7 +215,7 @@ def commit_import(
         }
         batch.status, batch.summary = status, summary
         result = {"batch_id": batch.id, "status": status, "mode": mode, **summary}
-        if storage_key:
+        if storage_key is not None and request_hash is not None:
             db.add(DmrvIdempotencyKey(
                 principal_key=principal.key, key=storage_key, request_hash=request_hash,
                 response_status=201, response_body=result,
@@ -228,7 +228,11 @@ def commit_import(
         db.commit()
     except IntegrityError:
         db.rollback()
-        concurrent = _replay(db, principal, storage_key, request_hash) if storage_key else None
+        concurrent = (
+            _replay(db, principal, storage_key, request_hash)
+            if storage_key is not None and request_hash is not None
+            else None
+        )
         if concurrent is None:
             raise DmrvError(
                 409, "conflict", "Data bentrok dengan impor lain yang berjalan bersamaan; periksa hasilnya lalu coba lagi.",

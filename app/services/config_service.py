@@ -215,7 +215,10 @@ def validate_carbon_pool_visualization_updates(db: Session, updates: dict) -> di
 
     errors: dict[str, str] = {}
     for key, value in matched.items():
-        field = _CARBON_POOL_STYLE_KEY.fullmatch(key).group(2)
+        match = _CARBON_POOL_STYLE_KEY.fullmatch(key)
+        if match is None:
+            continue
+        field = match.group(2)
         if field in {"vis_min", "vis_max"}:
             try:
                 number = float(value)
@@ -234,7 +237,10 @@ def validate_carbon_pool_visualization_updates(db: Session, updates: dict) -> di
         if min_key not in matched and max_key not in matched:
             continue
         try:
-            low, high = float(candidates[min_key]), float(candidates[max_key])
+            low_value, high_value = candidates[min_key], candidates[max_key]
+            if low_value is None or high_value is None:
+                continue
+            low, high = float(low_value), float(high_value)
             if math.isfinite(low) and math.isfinite(high) and low >= high:
                 for key in (min_key, max_key):
                     if key in matched and key not in errors:

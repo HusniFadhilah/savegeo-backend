@@ -8,12 +8,13 @@ import tempfile
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
 
 from app.core.isolated_process import run_isolated
 from app.core.http import SHP_JSON_BODY_LIMIT_BYTES
+from app.core.bounded_json import validate_typed_json_object
 from app.core.shapefile_limits import SHP_MAX_MEMBER_BYTES
 from app.core.security import get_current_app_viewer
 from app.services import geocode_service
@@ -98,15 +99,32 @@ def geocode_search(q: str = Query(default="", max_length=200), limit: int = Quer
     return {"results": geocode_service.rank_candidates(normalized, q)}
 
 
-@router.get("/imagery-date")
+@router.get(
+    "/imagery-date",
+    description=(
+        "Looks up Esri imagery-date metadata. Before calling this endpoint, "
+        "tell the user that the map center is rounded to about 0.01 degrees "
+        "(roughly 1 km) and that this point plus an approximately 2 km extent "
+        "is sent to Esri. The response repeats this notice in data_sharing_notice."
+    ),
+)
 def imagery_date(lat: float = Query(ge=-90, le=90, allow_inf_nan=False),
                  lng: float = Query(ge=-180, le=180, allow_inf_nan=False)):
     return imagery_date_metadata(lat, lng)
 
 
 class ParseAoiRequest(BaseModel):
-    text: str = ""
-    name: str | None = "Custom AOI"
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(default="", max_length=2_000_000)
+    name: str | None = Field(default="Custom AOI", max_length=160)
+
+
+class ShapefileConversionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    zip_b64: str = Field(min_length=1, max_length=70_000_000)
+    name: str = Field(default="shapefile", max_length=255)
 
 
 @router.post("/parse_aoi")
@@ -177,11 +195,10 @@ async def convert_shp(request: Request):
             raise HTTPException(status_code=400, detail="JSON permintaan tidak valid.") from exc
         if not isinstance(data, dict):
             raise HTTPException(status_code=400, detail="Badan permintaan harus berupa objek JSON.")
-        b64 = data.get("zip_b64") or ""
-        if not b64:
-            raise HTTPException(status_code=400, detail="zip_b64 wajib diisi.")
+        data = validate_typed_json_object(data, ShapefileConversionRequest)
+        b64 = data["zip_b64"]
         submitted_name = data.get("name", "shapefile")
-        original_name = submitted_name[:255] if isinstance(submitted_name, str) else "shapefile"
+        original_name = submitted_name[:255]
         try:
             zip_bytes = base64.b64decode(b64, validate=True)
         except Exception as exc:

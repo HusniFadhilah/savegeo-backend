@@ -486,7 +486,8 @@ def _calculated(db: Session, project_id: str, category: str, data) -> dict:
             warnings.append("high_cloud_cover_review_recommended")
         if data.observation_count is not None and data.observation_count < 3:
             warnings.append("few_observations_review_recommended")
-        if isinstance(found.get("valid_aoi_pixel_pct"), (int, float)) and found["valid_aoi_pixel_pct"] < 70:
+        valid_pixel_pct = found.get("valid_aoi_pixel_pct")
+        if isinstance(valid_pixel_pct, (int, float)) and valid_pixel_pct < 70:
             warnings.append("low_valid_aoi_pixel_coverage_review_recommended")
         if found.get("gap_filled") is True:
             warnings.append("temporal_gap_filling_in_analysis_review_recommended")
@@ -989,7 +990,7 @@ def portfolio(
         .where(BoundaryVersion.project_id.in_(ids))
         .order_by(BoundaryVersion.version.desc())
     ).all()
-    areas = {}
+    areas: dict[int, float] = {}
     for row in bounds:
         areas.setdefault(row.project_id, row.area_ha)
     today = dt.datetime.now(dt.UTC).date()

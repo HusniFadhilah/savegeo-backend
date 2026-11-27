@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import math
+from typing import Any
 
 import numpy as np
 from pydantic import ValidationError
@@ -267,7 +268,7 @@ def _evaluate_validation(rows: list[dict]) -> dict:
 
 
 def assess(observations: list[dict], request: FieldAssessmentRequest) -> dict:
-    paired = {"calibration": [], "validation": []}
+    paired: dict[str, list[dict[str, Any]]] = {"calibration": [], "validation": []}
     exclusions = []
     reference_types = set()
     for observation in observations:

@@ -3,6 +3,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.services import landcover_service as service
+from app.services.gee_common import AnalysisError
 
 
 @pytest.mark.parametrize("operation", [service.analyze_landcover_transition, service.analyze_landcover_change_map])
@@ -50,3 +51,11 @@ def test_statistics_force_the_grid_but_map_tiles_use_a_flexible_pyramid(monkeypa
         else:
             image.reproject.assert_not_called()
             image.setDefaultProjection.assert_called_once()
+
+
+def test_change_map_missing_years_returns_controlled_client_error():
+    with pytest.raises(AnalysisError) as error:
+        service.analyze_landcover_change_map({"aoi": {"geojson": {}}, "dataset": "Dynamic_World"})
+
+    assert error.value.status_code == 400
+    assert "from_year dan to_year" in str(error.value)

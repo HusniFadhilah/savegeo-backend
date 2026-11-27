@@ -11,7 +11,8 @@ from io import BytesIO
 from typing import Any
 
 from docx import Document
-from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.document import Document as DocumentType
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_PARAGRAPH_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, RGBColor
@@ -59,9 +60,9 @@ def _set_font(run, size_pt: float, bold: bool = False, italic: bool = False,
         run.font.color.rgb = color
 
 
-def _para(doc: Document, text: str = "", size_pt: float = 9.5,
+def _para(doc: DocumentType, text: str = "", size_pt: float = 9.5,
           bold: bool = False, color: RGBColor | None = None,
-          align: int | None = None,
+          align: WD_PARAGRAPH_ALIGNMENT | None = None,
           space_before: float = 0, space_after: float = 3) -> Any:
     p = doc.add_paragraph()
     p.paragraph_format.space_before = Pt(space_before)
@@ -74,7 +75,7 @@ def _para(doc: Document, text: str = "", size_pt: float = 9.5,
     return p
 
 
-def _heading(doc: Document, text: str, size_pt: float = 10,
+def _heading(doc: DocumentType, text: str, size_pt: float = 10,
              color: RGBColor = _C_BLUE, border_hex: str = _HEX_BLUE,
              space_before: float = 6) -> Any:
     p = doc.add_paragraph()
@@ -95,7 +96,7 @@ def _heading(doc: Document, text: str, size_pt: float = 10,
     return p
 
 
-def _bullet(doc: Document, text: str, size_pt: float = 9.5,
+def _bullet(doc: DocumentType, text: str, size_pt: float = 9.5,
             color: RGBColor | None = None) -> Any:
     p = doc.add_paragraph()
     p.paragraph_format.space_before = Pt(0)
@@ -489,7 +490,7 @@ def normalize_report_payload(payload: dict) -> dict:
 
 # ── Section builders ───────────────────────────────────────────────────────────
 
-def _add_compact_header(doc: Document, n: dict) -> None:
+def _add_compact_header(doc: DocumentType, n: dict) -> None:
     # Title
     p = doc.add_paragraph()
     p.paragraph_format.space_before = Pt(0)
@@ -522,7 +523,7 @@ def _add_compact_header(doc: Document, n: dict) -> None:
     pPr.append(pBdr)
 
 
-def _add_business_summary(doc: Document, n: dict) -> None:
+def _add_business_summary(doc: DocumentType, n: dict) -> None:
     _heading(doc, "Business Summary")
 
     summary = (n["audience_summary"] or "").strip()
@@ -583,13 +584,13 @@ def _add_business_summary(doc: Document, n: dict) -> None:
                   size_pt=9.5, space_after=3)
 
 
-def _add_strategic_key_findings(doc: Document, n: dict) -> None:
+def _add_strategic_key_findings(doc: DocumentType, n: dict) -> None:
     _heading(doc, "Strategic Key Findings")
     for f in n["findings"]:
         _bullet(doc, f)
 
 
-def _add_business_metrics_table(doc: Document, n: dict) -> None:
+def _add_business_metrics_table(doc: DocumentType, n: dict) -> None:
     _heading(doc, "Business-Relevant Metrics")
     metrics = n["metrics"]
     if not metrics:
@@ -612,7 +613,7 @@ def _add_business_metrics_table(doc: Document, n: dict) -> None:
     _para(doc, "", space_before=2, space_after=2)
 
 
-def _add_business_interpretation(doc: Document, n: dict) -> None:
+def _add_business_interpretation(doc: DocumentType, n: dict) -> None:
     _heading(doc, "Business Interpretation by Theme")
 
     lc, veg, carbon, tr = n["lc_rows"], n["veg_stats"], n["carbon"], n["tr_rows"]
@@ -675,7 +676,7 @@ def _add_business_interpretation(doc: Document, n: dict) -> None:
               size_pt=9, color=_C_GRAY)
 
 
-def _add_decision_considerations(doc: Document, n: dict) -> None:
+def _add_decision_considerations(doc: DocumentType, n: dict) -> None:
     _heading(doc, "Decision Considerations")
     lims = n["limitations"] or [
         "Validasi lapangan diperlukan sebelum pengambilan keputusan operasional.",
@@ -688,13 +689,13 @@ def _add_decision_considerations(doc: Document, n: dict) -> None:
         _bullet(doc, lim)
 
 
-def _add_recommended_next_actions(doc: Document, n: dict) -> None:
+def _add_recommended_next_actions(doc: DocumentType, n: dict) -> None:
     _heading(doc, "Recommended Next Actions")
     for rec in n["final_recs"]:
         _bullet(doc, rec)
 
 
-def _add_technical_notes(doc: Document, n: dict) -> None:
+def _add_technical_notes(doc: DocumentType, n: dict) -> None:
     _heading(doc, "Technical Notes", size_pt=8.5, color=_C_GRAY, border_hex="757575",
              space_before=4)
 

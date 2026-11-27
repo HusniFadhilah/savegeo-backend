@@ -305,30 +305,30 @@ class CarbonEstimationModel:
     def save(self, filepath: str):
         """Export a data-only estimator and JSON preprocessing state."""
         from app.inference.safe_model import export_estimator
-        filepath = Path(filepath)
-        filepath.parent.mkdir(parents=True, exist_ok=True)
+        target_path = Path(filepath)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
         if not self.feature_names:
             raise ValueError("Train the model before exporting")
-        export_estimator(self.model, filepath.with_suffix('.onnx'), len(self.feature_names))
+        export_estimator(self.model, target_path.with_suffix('.onnx'), len(self.feature_names))
         metadata = self.metadata.copy()
         metadata['format'] = 'onnx'
-        metadata['artifact_sha256'] = hashlib.sha256(filepath.with_suffix('.onnx').read_bytes()).hexdigest()
+        metadata['artifact_sha256'] = hashlib.sha256(target_path.with_suffix('.onnx').read_bytes()).hexdigest()
         if hasattr(self.scaler, 'mean_'):
             metadata['scaler'] = {k: np.asarray(getattr(self.scaler, k)).tolist()
                                   for k in ('mean_', 'scale_', 'var_')}
         if hasattr(self.model, 'coef_') and np.asarray(self.model.coef_).ndim == 1:
             metadata['linear_parameters'] = {'coef': self.model.coef_.tolist(),
                                               'intercept': float(self.model.intercept_)}
-        filepath.with_suffix('.json').write_text(json.dumps(metadata, indent=2), encoding='utf8')
+        target_path.with_suffix('.json').write_text(json.dumps(metadata, indent=2), encoding='utf8')
 
     @classmethod
     def load(cls, filepath: str) -> 'CarbonEstimationModel':
         """Load ONNX + JSON only. Legacy pickle conversion is an offline operation."""
-        filepath = Path(filepath)
-        model_path = filepath.with_suffix('.onnx')
+        target_path = Path(filepath)
+        model_path = target_path.with_suffix('.onnx')
         if not model_path.is_file() or model_path.is_symlink():
             raise ValueError("Model requires a verified ONNX export before it can be used")
-        metadata_path = filepath.with_suffix('.json')
+        metadata_path = target_path.with_suffix('.json')
         if metadata_path.is_symlink():
             raise ValueError("Model metadata must be a regular file")
         metadata = json.loads(metadata_path.read_text(encoding='utf8'))

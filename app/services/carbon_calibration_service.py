@@ -75,7 +75,7 @@ def reconcile_tree_record(record: dict[str, Any]) -> dict[str, Any]:
     """Recalculate a report row without silently replacing its values."""
     dbh = float(record.get("dbh_cm") or 0)
     expected = tree_carbon_from_dbh(dbh)
-    result = {"tree_id": record.get("tree_id"), "expected": expected, "reported": {}}
+    result: dict[str, Any] = {"tree_id": record.get("tree_id"), "expected": expected, "reported": {}}
     for key in expected:
         if record.get(key) is not None:
             reported = float(record[key])
@@ -100,7 +100,12 @@ def _segments_intersect(
 def build_plot_polygon(
     plot_id: str, corners: Iterable[Iterable[float]], crs: str = "EPSG:32748"
 ) -> dict[str, Any]:
-    points = [(float(item[0]), float(item[1])) for item in corners]
+    points: list[tuple[float, float]] = []
+    for item in corners:
+        coordinates = list(item)
+        if len(coordinates) != 2:
+            raise ValueError("Each plot corner must contain exactly two coordinates")
+        points.append((float(coordinates[0]), float(coordinates[1])))
     if len(points) != 4 or len({point for point in points}) != 4:
         raise ValueError("A plot requires four unique corner coordinates")
     for i in range(4):
@@ -171,7 +176,8 @@ def lopo_linear_calibration(rows: list[dict[str, float]], *, clip_min: float | N
             "status": "not_computed",
             "reason": "LOPO linear calibration requires at least three independent plots",
         }
-    results = []
+    results: list[dict[str, Any]] = []
+    metric_rows: list[dict[str, float]] = []
     for index, held_out in enumerate(rows):
         train = [row for offset, row in enumerate(rows) if offset != index]
         x = np.asarray([row["predicted"] for row in train], dtype=float)
@@ -183,16 +189,17 @@ def lopo_linear_calibration(rows: list[dict[str, float]], *, clip_min: float | N
         prediction = float(intercept + slope * held_out["predicted"])
         if clip_min is not None:
             prediction = max(clip_min, prediction)
-        results.append(
-            {
-                "plot_id": held_out.get("plot_id"),
-                "observed": held_out["observed"],
-                "predicted": prediction,
-                "intercept": float(intercept),
-                "slope": float(slope),
-            }
-        )
-    metrics = evaluate_predictions(results)
+        row = {
+            "plot_id": held_out.get("plot_id"),
+            "observed": held_out["observed"],
+            "predicted": prediction,
+            "intercept": float(intercept),
+            "slope": float(slope),
+        }
+        results.append(row)
+        metric_rows.append({"observed": float(held_out["observed"]), "predicted": prediction})
+    metrics = evaluate_predictions(metric_rows)
+    metrics["rows"] = results
     metrics["validation_method"] = "leave_one_plot_out"
     # Out-of-fold predictions evaluate the method; deployment fits all calibration plots.
     x = np.asarray([row["predicted"] for row in rows], dtype=float)

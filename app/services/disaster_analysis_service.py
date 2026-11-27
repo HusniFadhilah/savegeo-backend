@@ -590,10 +590,16 @@ def run_analysis(db: Session, run_id: int, force: bool = False) -> dict:
                     db, event, aoi_row, pre_img, post_img, run.model_id, parameters
             )
         elif run.model_id == "dynamic_world_v1":
+            if pre_date is None or post_date is None:
+                raise AnalysisError("Tanggal akuisisi citra pre dan post wajib tersedia.", 422)
             output = compute_segmentation(aoi, pre_date, post_date, pre_scene_id=getattr(pre_img, "scene_id", None), post_scene_id=getattr(post_img, "scene_id", None))
         elif run.model_id == "flood_change_v1":
+            if pre_date is None or post_date is None:
+                raise AnalysisError("Tanggal akuisisi citra pre dan post wajib tersedia.", 422)
             output = _compute_flood_change(aoi, pre_date, post_date)
         elif run.model_id == "flood_change_v2":
+            if pre_date is None or post_date is None:
+                raise AnalysisError("Tanggal akuisisi citra pre dan post wajib tersedia.", 422)
             output = _compute_flood_change_v2(aoi, pre_date, post_date, pre_image=pre_img, post_image=post_img)
         elif run.model_id == "water_segmentation_v1":
             output = _compute_water_segmentation(aoi, pre_date, post_date)
@@ -613,6 +619,8 @@ def run_analysis(db: Session, run_id: int, force: bool = False) -> dict:
             else:
                 raise AnalysisError("Dampak tutupan lahan banjir memerlukan landcover_features dan geometri genangan bersumber; gunakan Dynamic World untuk perubahan kelas", 422)
         elif run.model_id == "forest_change_v1":
+            if pre_date is None or post_date is None:
+                raise AnalysisError("Tanggal akuisisi citra pre dan post wajib tersedia.", 422)
             output = _compute_forest_change(aoi, pre_date, post_date)
         else:
             raise AnalysisError("Model belum memiliki implementasi", 400)

@@ -14,6 +14,7 @@ Metadata-only helpers (catalog, narrative generation) live in
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 import ee
 
@@ -378,7 +379,7 @@ def analyze_vegetation(db, data: dict) -> dict:
         classification = None
         if want_classify:
             try:
-                classification = summarize_vegetation_classes(index_image, idx, aoi, index_scale)
+                classification = summarize_vegetation_classes(index_image, idx, aoi, int(round(index_scale)))
                 if classification:
                     classification["tile_url"] = vegetation_classification_tile(index_image, idx, idx)
             except Exception as exc:  # noqa: BLE001
@@ -386,7 +387,10 @@ def analyze_vegetation(db, data: dict) -> dict:
 
         histogram = None
         if want_histogram:
-            histogram = compute_index_histogram(index_image, aoi, index_scale, VEGETATION_INDICES[idx]["range"][0], VEGETATION_INDICES[idx]["range"][1])
+            histogram = compute_index_histogram(
+                index_image, aoi, int(round(index_scale)),
+                VEGETATION_INDICES[idx]["range"][0], VEGETATION_INDICES[idx]["range"][1],
+            )
 
         results["indices"][idx] = {
             "native_scale_m": native_scale,
@@ -522,7 +526,7 @@ def analyze_timeseries(db, data: dict) -> dict:
 
     months = list(range(start_month, end_month + 1))
     metric_names = [*indices, *bands]
-    series = {
+    series: dict[str, dict[str, Any]] = {
         name: {
             "kind": "index" if name in indices else "band",
             "unit": "index" if name in indices else "surface_reflectance",

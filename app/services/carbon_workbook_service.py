@@ -200,8 +200,8 @@ def _find_text(values: list[Any], needle: str) -> str | None:
 
 
 def _carbon_fraction(rows: list[tuple[int, list[Any], list[Any]]]) -> float:
-    labeled_fractions = []
-    fallback_fractions = []
+    labeled_fractions: list[float] = []
+    fallback_fractions: list[float] = []
     for _, formulas, _ in rows:
         text = " ".join(str(value) for value in formulas if value is not None)
         for match in re.findall(r"\*\s*(0\.\d+)", text):

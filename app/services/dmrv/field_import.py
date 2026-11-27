@@ -112,10 +112,10 @@ def suggest_mapping(headers: list[str]) -> dict[str, str]:
     mapping: dict[str, str] = {}
     for canonical in CANONICAL_FIELDS:
         for alias in COLUMN_ALIASES[canonical]:
-            header = by_normal.get(alias)
-            if header is not None and header not in used:
-                mapping[canonical] = header
-                used.add(header)
+            candidate_header = by_normal.get(alias)
+            if candidate_header is not None and candidate_header not in used:
+                mapping[canonical] = candidate_header
+                used.add(candidate_header)
                 break
     return mapping
 
@@ -332,19 +332,26 @@ def validate_rows(rows: list[dict[str, str]], mapping: dict[str, str], options: 
         if status not in ALLOWED_STATUS:
             error("bad_status", f"Status tidak dikenal: {status!r}.")
 
-        area, basis = number("plot_area_m2"), "measured"
+        area: float | None = number("plot_area_m2")
+        basis: str | None = "measured"
         if area is not None and area <= 0:
             error("bad_number", "Luas plot harus lebih dari nol.")
         if area is None:
             area, basis = (options.plot_area_m2, options.area_basis or "assumed") if options.plot_area_m2 else (None, None)
 
-        key = (plot_code, visit_date, tree_code)
-        if visit_date is not None and plot_code and key in seen:
-            error("duplicate_row", f"Pohon {tree_code} pada plot {plot_code} tanggal {visit_date} muncul lebih dari sekali.")
+        if visit_date is not None and plot_code:
+            key = (plot_code, visit_date, tree_code)
+            if key in seen:
+                error("duplicate_row", f"Pohon {tree_code} pada plot {plot_code} tanggal {visit_date} muncul lebih dari sekali.")
 
         issues.extend(row_issues)
         if any(issue.level == "error" for issue in row_issues):
             continue
+        if visit_date is None:
+            # Invalid/missing dates are reported above; never construct a tree
+            # record that would violate the persisted visit-date contract.
+            continue
+        key = (plot_code, visit_date, tree_code)
         seen.add(key)
         trees.append(ParsedTree(
             row=index, plot_code=plot_code, visit_date=visit_date, date_precision=precision, tree_code=tree_code,

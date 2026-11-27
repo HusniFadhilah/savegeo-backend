@@ -36,11 +36,15 @@ class LocalCarbonInferenceEngine:
     def __init__(self, model_name: str | None = None, model_path: str | None = None):
         self.registry = ModelRegistry() if model_path is None else None
         if model_name is None:
+            if self.registry is None:
+                raise ValueError("Model name is required when loading from an explicit model path")
             model_name = self.registry.registry.get("default")
             if model_name is None:
                 raise ValueError("No default model found. Train a model first.")
         self.model_name = model_name
         if model_path is None:
+            if self.registry is None:
+                raise ValueError("Model registry is unavailable for the requested model")
             model_path = self.registry.get_model_path(model_name)
         self.model = CarbonEstimationModel.load(model_path)
 

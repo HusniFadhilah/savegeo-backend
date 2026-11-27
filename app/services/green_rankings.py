@@ -1158,10 +1158,14 @@ def run_batch(data):
                 else:
                     collection = (
                         ee.ImageCollection("GOOGLE/DYNAMICWORLD/V1")
-                        .filterBounds(ee.FeatureCollection(features).geometry())
+                        # Bounds keep complex island municipalities from creating
+                        # oversized Earth Engine filter geometries. Pixel
+                        # statistics are still reduced against the exact feature
+                        # polygons below.
+                        .filterBounds(ee.FeatureCollection(features).geometry().bounds())
                         .filterDate(start, end)
                     )
-                    if not collection.size().getInfo():
+                    if not collection.limit(1).size().getInfo():
                         raise AnalysisError("Tidak ada Dynamic World untuk batch dan periode ini.", 404)
                     labels = collection.select("label").mode()
                     valid_labels = labels.mask()

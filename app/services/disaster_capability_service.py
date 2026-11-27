@@ -16,7 +16,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
-from app.registries.disaster_model_registry import get_model
+from app.registries.disaster_model_registry import get_model, list_models
 
 
 @dataclass(frozen=True)
@@ -88,7 +88,7 @@ def check_inputs(
         reasons.append(f"Model tidak mendukung jenis bencana {disaster_type}")
     if aoi is None or not getattr(aoi, "geojson", None):
         reasons.append("AOI belum tersedia atau kosong")
-    elif getattr(event, "id", None) is not None and getattr(aoi, "event_id", None) not in (None, event.id):
+    elif getattr(event, "id", None) is not None and getattr(aoi, "event_id", None) not in (None, getattr(event, "id", None)):
         reasons.append("AOI berasal dari event lain")
 
     required_phases = []
@@ -103,7 +103,7 @@ def check_inputs(
             continue
         if getattr(image, "phase", None) != phase:
             reasons.append(f"Imagery {phase} berasal dari fase yang salah")
-        if getattr(event, "id", None) is not None and getattr(image, "event_id", None) not in (None, event.id):
+        if getattr(event, "id", None) is not None and getattr(image, "event_id", None) not in (None, getattr(event, "id", None)):
             reasons.append(f"Imagery {phase} berasal dari event lain")
         source_kind = _source_kind(image)
         if source_kind not in {str(v).casefold() for v in model.get("accepted_source_kind", [])}:
@@ -123,7 +123,7 @@ def check_inputs(
         image_resolution = getattr(image, "resolution_m", None)
         if resolution is not None and image_resolution is None:
             reasons.append(f"Metadata resolusi imagery {phase} belum tersedia; model memerlukan {resolution} m")
-        elif resolution is not None and float(image_resolution) != float(resolution):
+        elif resolution is not None and image_resolution is not None and float(image_resolution) != float(resolution):
             reasons.append(f"Resolusi imagery {phase} harus {resolution} m")
 
     if pre_imagery is not None and post_imagery is not None:
@@ -190,7 +190,11 @@ def build_provenance(
 ) -> dict[str, Any]:
     images = [image for image in (pre_imagery, post_imagery) if image is not None]
     params = parameters or {}
-    resolutions = [getattr(image, "resolution_m", None) for image in images if getattr(image, "resolution_m", None) is not None]
+    resolutions: list[float] = []
+    for image in images:
+        resolution_value = getattr(image, "resolution_m", None)
+        if isinstance(resolution_value, (int, float)) and not isinstance(resolution_value, bool):
+            resolutions.append(float(resolution_value))
     acquisition_dates = {
         getattr(image, "phase", "image"): getattr(getattr(image, "acquisition_date", None), "isoformat", lambda: None)()
         for image in images
@@ -284,9 +288,12 @@ def validate_persisted_result(
     from app.repositories import disaster_repo
 
     if current_inputs is None:
-        aoi = disaster_repo.get_aoi(db, run.aoi_id)
-        pre = disaster_repo.get_imagery(db, run.pre_imagery_id) if run.pre_imagery_id else None
-        post = disaster_repo.get_imagery(db, run.post_imagery_id) if run.post_imagery_id else None
+        aoi_id = getattr(run, "aoi_id", None)
+        pre_id = getattr(run, "pre_imagery_id", None)
+        post_id = getattr(run, "post_imagery_id", None)
+        aoi = disaster_repo.get_aoi(db, aoi_id) if isinstance(aoi_id, int) else None
+        pre = disaster_repo.get_imagery(db, pre_id) if isinstance(pre_id, int) else None
+        post = disaster_repo.get_imagery(db, post_id) if isinstance(post_id, int) else None
     else:
         aoi, pre, post = current_inputs
     inputs = check_inputs(model["model_id"], event, aoi, pre, post)
@@ -316,34 +323,35 @@ def event_publication_check(db, event: object) -> CapabilityCheck:
         # publication gate would make valid monitoring events unpublishable.
         from app.services import wildfire_hotspot_service
 
-        reasons: list[str] = []
+        wildfire_reasons: list[str] = []
         if not getattr(event, "name", None) or not getattr(event, "disaster_type", None):
-            reasons.append("Metadata kejadian belum lengkap")
+            wildfire_reasons.append("Metadata kejadian belum lengkap")
         if not getattr(event, "source", None) and not getattr(event, "source_ids", None):
-            reasons.append("Sumber resmi kejadian belum tersedia")
+            wildfire_reasons.append("Sumber resmi kejadian belum tersedia")
         if not getattr(event, "slug", None):
-            reasons.append("Slug kejadian karhutla belum tersedia")
+            wildfire_reasons.append("Slug kejadian karhutla belum tersedia")
         if not (getattr(event, "start_date", None) or getattr(event, "monitoring_from", None)):
-            reasons.append("Periode pemantauan kejadian belum tersedia")
+            wildfire_reasons.append("Periode pemantauan kejadian belum tersedia")
 
         provinces = getattr(event, "province", None) or []
         province_codes = getattr(event, "province_codes", None) or []
         if not provinces or not province_codes or len(provinces) != len(province_codes):
-            reasons.append("Cakupan provinsi dan kode batas wilayah belum lengkap")
+            wildfire_reasons.append("Cakupan provinsi dan kode batas wilayah belum lengkap")
         if not getattr(event, "boundary_source", None):
-            reasons.append("Sumber batas administrasi belum tersedia")
+            wildfire_reasons.append("Sumber batas administrasi belum tersedia")
         if not getattr(event, "methodology", None):
-            reasons.append("Metodologi pemantauan belum tersedia")
+            wildfire_reasons.append("Metodologi pemantauan belum tersedia")
         if not (
             getattr(event, "last_data_at", None)
             or getattr(event, "hotspot_last_synced_at", None)
         ):
-            reasons.append("Waktu pembaruan hotspot belum tersedia")
-        if not wildfire_hotspot_service.has_event_rows(db, getattr(event, "id", None)):
-            reasons.append("Data hotspot terverifikasi belum tersedia")
+            wildfire_reasons.append("Waktu pembaruan hotspot belum tersedia")
+        event_id = getattr(event, "id", None)
+        if not isinstance(event_id, int) or not wildfire_hotspot_service.has_event_rows(db, event_id):
+            wildfire_reasons.append("Data hotspot terverifikasi belum tersedia")
 
-        if reasons:
-            return CapabilityCheck(False, "not_available", tuple(reasons))
+        if wildfire_reasons:
+            return CapabilityCheck(False, "not_available", tuple(wildfire_reasons))
         return CapabilityCheck(True, "validated", ())
 
     reasons: list[str] = []
@@ -351,14 +359,18 @@ def event_publication_check(db, event: object) -> CapabilityCheck:
         reasons.append("Metadata kejadian belum lengkap")
     if not getattr(event, "source", None) and not getattr(event, "source_ids", None):
         reasons.append("Sumber resmi kejadian belum tersedia")
-    aoi = disaster_repo.get_active_aoi(db, event.id)
+    event_id = getattr(event, "id", None)
+    if not isinstance(event_id, int):
+        return CapabilityCheck(False, "not_available", ("ID event tidak valid",))
+    aoi = disaster_repo.get_active_aoi(db, event_id)
     if aoi is None or not aoi.geojson:
         reasons.append("AOI belum tersedia")
     published_or_completed = False
-    for run in disaster_repo.list_runs_for_event(db, event.id):
-        if run.status not in {"completed", "review_required", "published"}:
+    for run in disaster_repo.list_runs_for_event(db, event_id):
+        if getattr(run, "status", None) not in {"completed", "review_required", "published"}:
             continue
-        result = disaster_repo.get_result_for_run(db, run.id)
+        run_id = getattr(run, "id", None)
+        result = disaster_repo.get_result_for_run(db, run_id) if isinstance(run_id, int) else None
         if result and result.statistics and (result.tile_url or result.features):
             result_check = validate_persisted_result(db, event, run, result, require_published=False)
             if not result_check.allowed:
@@ -376,14 +388,20 @@ def event_publication_check(db, event: object) -> CapabilityCheck:
 def readiness_matrix(db, event: object) -> dict[str, dict[str, Any]]:
     from app.repositories import disaster_repo
 
-    aoi = disaster_repo.get_active_aoi(db, event.id)
-    pre = disaster_repo.get_primary_imagery(db, event.id, "pre")
-    post = disaster_repo.get_primary_imagery(db, event.id, "post")
-    runs = disaster_repo.list_runs_for_event(db, event.id)
+    event_id = getattr(event, "id", None)
+    if not isinstance(event_id, int):
+        return {
+            model["model_id"]: {"status": "not_available", "allowed": False, "reasons": ["ID event tidak valid"]}
+            for model in list_models()
+        }
+    aoi = disaster_repo.get_active_aoi(db, event_id)
+    pre = disaster_repo.get_primary_imagery(db, event_id, "pre")
+    post = disaster_repo.get_primary_imagery(db, event_id, "post")
+    runs = disaster_repo.list_runs_for_event(db, event_id)
     compatible = []
     reasons: list[str] = []
     for model in (
-        get_model(run.model_id) for run in runs
+        get_model(getattr(run, "model_id", "")) for run in runs
     ):
         if model:
             check = check_inputs(model["model_id"], event, aoi, pre, post)

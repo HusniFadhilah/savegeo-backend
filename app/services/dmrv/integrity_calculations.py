@@ -6,6 +6,8 @@ methodology rules remain visible in the input snapshot for independent review.
 
 from __future__ import annotations
 
+from typing import Any
+
 from decimal import Decimal, localcontext
 
 import numpy as np
@@ -105,7 +107,7 @@ def _bootstrap(y: np.ndarray, pred: np.ndarray, groups: np.ndarray) -> dict:
     rng = np.random.default_rng(20261113)
     blocks = np.unique(groups)
     indices = [np.flatnonzero(groups == block) for block in blocks]
-    values = {key: [] for key in ("r2", "rmse", "mae", "bias")}
+    values: dict[str, list[float]] = {key: [] for key in ("r2", "rmse", "mae", "bias")}
     if len(blocks) < 3:
         return {"status": "insufficient_blocks", "replicates": 0, "ci95": {}}
     for _ in range(300):
@@ -117,7 +119,7 @@ def _bootstrap(y: np.ndarray, pred: np.ndarray, groups: np.ndarray) -> dict:
         "status": "conditional_fixed_predictions",
         "replicates": 300,
         "ci95": {
-            key: [float(x) for x in np.quantile(vals, [0.025, 0.975])] if vals else None
+            key: [float(np.quantile(vals, 0.025)), float(np.quantile(vals, 0.975))] if vals else None
             for key, vals in values.items()
         },
     }
@@ -139,7 +141,7 @@ def spatial_validation(data: ValidationInput) -> dict:
     if nblocks >= 3 and len(y) >= 15:
         for fold, (train, test) in enumerate(GroupKFold(3).split(pred, y, groups)):
             kept = _near_test(lon, lat, train, test, data.buffer_km)
-            entry = {
+            entry: dict[str, Any] = {
                 "fold": fold,
                 "test_n": len(test),
                 "train_before_buffer": len(train),

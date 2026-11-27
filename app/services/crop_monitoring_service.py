@@ -46,6 +46,8 @@ common.py`):
 """
 from __future__ import annotations
 
+from typing import Any
+
 import datetime as dt
 import logging
 import math
@@ -484,6 +486,8 @@ def _productivity_zones(db, aoi, period_list: list[tuple[int, int, int]], cloud_
         weights_out[name] = round(norm_w, 3)
         term = img.multiply(norm_w)
         score = term if score is None else score.add(term)
+    if score is None:
+        raise AnalysisError("Tidak ada band yang tersedia untuk menghitung skor produktivitas.", 422)
     score = score.rename("productivity_score")
 
     high_mask, med_mask, low_mask = score.gte(0.66).selfMask(), score.gte(0.33).And(score.lt(0.66)).selfMask(), score.lt(0.33).selfMask()
@@ -641,7 +645,10 @@ def _run_crop_monitoring(db: Session, data: dict, owner_key: str) -> dict:
                       cloud_threshold=cloud_threshold, cloud_mask_technique=cloud_mask_technique,
                       weather_source=weather_source, timeseries_index=data.get("timeseries_index", "NDVI"),
                       historical_years=int(data.get("historical_years", 3)), data_sources=data.get("data_sources") or {"sentinel1": True})
-    results, skipped, timings, cache_hits = {}, [], {}, []
+    results: dict[str, Any] = {}
+    skipped: list[dict[str, Any]] = []
+    timings: dict[str, float] = {}
+    cache_hits: list[str] = []
     weather_value = None
 
     def weather_inputs():

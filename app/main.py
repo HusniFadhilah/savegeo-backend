@@ -183,6 +183,14 @@ def _problem_response(
     if errors is not None:
         body["errors"] = jsonable_encoder(errors)
     body["code"] = code
+    if isinstance(detail, dict):
+        # Preserve documented, non-sensitive agent response extensions while
+        # keeping every failure in the same Problem Details envelope.
+        for key in ("intent", "confidence", "needs_confirmation", "warnings", "actions", "retryable", "retry_after", "ai"):
+            if key in detail:
+                body[key] = jsonable_encoder(detail[key])
+        if code.startswith("agent_") and isinstance(detail.get("message"), str):
+            body["message"] = detail["message"][:2000]
     if (
         isinstance(detail, dict)
         and code in {"invalid_aoi", "invalid_year", "invalid_date_range", "invalid_cloud_threshold", "invalid_resolution", "analysis_preflight_blocked"}
