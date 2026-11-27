@@ -1084,8 +1084,14 @@ def run_batch(data):
             from app.api.routes import regions
 
             def geometry(candidate):
+                candidate = {**candidate, "boundary_source": "Peta Administratif (SP3STAB)"}
                 try:
                     geo = regions.get_region_geometry(endpoint=config["level"], code=candidate["code"])
+                    boundary_meta = geo.get("meta", {}) if isinstance(geo, dict) else {}
+                    if boundary_meta.get("boundary_source"):
+                        candidate["boundary_source"] = boundary_meta["boundary_source"]
+                    if boundary_meta.get("boundary_year"):
+                        candidate["boundary_year"] = int(boundary_meta["boundary_year"])
                     checksum = hashlib.sha256(json.dumps(geo, sort_keys=True).encode()).hexdigest()
                     cache_config = {
                         key: value

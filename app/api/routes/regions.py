@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeout
 from collections import OrderedDict
@@ -19,6 +20,7 @@ from pathlib import Path
 
 from app.core.public_http import public_http as requests
 from fastapi import APIRouter, HTTPException, Query
+from shapely.geometry import shape as shapely_shape
 
 from app.core.config import get_settings
 from app.services.boundary_provider import CachedBoundaryProvider, RegionBoundaryProvider
@@ -42,6 +44,15 @@ _REGION_DEADLINE_SECONDS = 25.0
 _REGION_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="regions")
 _REGION_SLOTS = BoundedSemaphore(24)
 _VALIDATED_BOUNDARY_PROVIDER = CachedBoundaryProvider(RegionBoundaryProvider(), ttl_seconds=86400)
+_VILLAGE_BOUNDARY_FALLBACK_URL = (
+    "https://geoportal.pertanian.go.id/arcgis/rest/services/Hosted/"
+    "Batas_Administrasi_Desa/FeatureServer/0/query"
+)
+_CITY_BOUNDARY_FALLBACK_URL = (
+    "https://geoservices.big.go.id/rbi/rest/services/BATASWILAYAH/"
+    "BATAS_WILAYAH/MapServer/13/query"
+)
+_INDONESIA_BOUNDS = (94.0, -12.0, 142.0, 8.0)
 
 
 def _local_province_features() -> dict[str, dict]:
@@ -98,6 +109,206 @@ def _fix_geometry_coord_order(geometry, level: str = ""):
     elif "coordinates" in geometry:
         geometry["coordinates"] = _swap_lat_lng(geometry["coordinates"])
     return geometry
+
+
+def _polygon_geometries(region: dict) -> list[dict]:
+    """Return polygon geometries from a region GeoJSON payload."""
+    if not isinstance(region, dict):
+        return []
+    kind = region.get("type")
+    if kind == "FeatureCollection":
+        features = region.get("features")
+    elif kind == "Feature":
+        features = [region]
+    elif kind in {"Polygon", "MultiPolygon"}:
+        return [region]
+    else:
+        return []
+    if not isinstance(features, list) or not features:
+        return []
+    geometries = []
+    for feature in features:
+        geometry = feature.get("geometry") if isinstance(feature, dict) else None
+        if not isinstance(geometry, dict) or geometry.get("type") not in {"Polygon", "MultiPolygon"}:
+            return []
+        geometries.append(geometry)
+    return geometries
+
+
+def _is_usable_polygon_geometry(geometry: dict) -> bool:
+    try:
+        polygon = shapely_shape(geometry)
+        min_x, min_y, max_x, max_y = polygon.bounds
+        return (
+            polygon.geom_type in {"Polygon", "MultiPolygon"}
+            and not polygon.is_empty
+            and polygon.is_valid
+            and polygon.area > 0
+            and _INDONESIA_BOUNDS[0] <= min_x <= max_x <= _INDONESIA_BOUNDS[2]
+            and _INDONESIA_BOUNDS[1] <= min_y <= max_y <= _INDONESIA_BOUNDS[3]
+        )
+    except Exception:  # noqa: BLE001 - malformed provider GeoJSON is handled as unavailable
+        return False
+
+
+def _digits_only(value: object) -> str:
+    return "".join(character for character in str(value or "") if character.isdigit())
+
+
+def _pum_code(digits: str) -> str:
+    parts = (2, 2, 2, 4) if len(digits) == 10 else (2, 2) if len(digits) == 4 else ()
+    if not parts or sum(parts) != len(digits):
+        return ""
+    chunks = []
+    offset = 0
+    for size in parts:
+        chunks.append(digits[offset : offset + size])
+        offset += size
+    return ".".join(chunks)
+
+
+def _fallback_admin_geometry(
+    code: str,
+    *,
+    url: str,
+    code_field: str,
+    pum_field: str,
+    parent_field: str,
+    parent_length: int,
+    boundary_source: str,
+    boundary_year: int,
+    timeout: int,
+    max_bytes: int,
+    max_allowable_offset: float | None = None,
+    geometry_precision: int | None = None,
+) -> dict | None:
+    """Fetch one or more exact-code polygons from a trusted administrative layer."""
+    digits = _digits_only(code)
+    pum_code = _pum_code(digits)
+    if not pum_code:
+        return None
+    params = {
+        "where": f"{code_field}='{digits}' OR {pum_field}='{pum_code}'",
+        "outFields": f"{code_field},{pum_field},{parent_field},kdbbps,kdcbps,kdebps,namobj,wadmkd,wadmkc,wadmkk,wadmpr,metadata,uupp",
+        "returnGeometry": "true",
+        "outSR": "4326",
+        "f": "geojson",
+    }
+    if max_allowable_offset is not None:
+        params["maxAllowableOffset"] = str(max_allowable_offset)
+    if geometry_precision is not None:
+        params["geometryPrecision"] = str(geometry_precision)
+    try:
+        response = requests.get(
+            url,
+            params=params,
+            timeout=timeout,
+            max_bytes=max_bytes,
+            allow_redirects=False,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as exc:  # noqa: BLE001 - fallback failure must not hide the primary response
+        logger.warning("Administrative boundary fallback request failed code=%s error=%s", digits, type(exc).__name__)
+        return None
+
+    if not isinstance(payload, dict) or payload.get("error"):
+        return None
+    features = payload.get("features")
+    if not isinstance(features, list):
+        return None
+
+    matches = []
+    for feature in features:
+        if not isinstance(feature, dict):
+            continue
+        properties = feature.get("properties") or {}
+        matched_codes = {_digits_only(properties.get("kdebps")), _digits_only(properties.get("kdepum"))}
+        matched_codes.update({_digits_only(properties.get(code_field)), _digits_only(properties.get(pum_field))})
+        if digits not in matched_codes:
+            continue
+        parent_code = _digits_only(properties.get(parent_field))
+        geometry = feature.get("geometry")
+        if parent_code and parent_code != digits[:parent_length]:
+            continue
+        if not isinstance(geometry, dict) or not _is_usable_polygon_geometry(geometry):
+            continue
+        matches.append(feature)
+
+    if not matches:
+        return None
+
+    metadata_years = {
+        int(match.group(1))
+        for feature in matches
+        if (match := re.search(r"(20\d{2})\d{4}", str((feature.get("properties") or {}).get("metadata") or ""), re.IGNORECASE))
+    }
+
+    return {
+        "type": "FeatureCollection",
+        "features": matches,
+        "meta": {
+            "boundary_source": boundary_source,
+            "boundary_year": max(metadata_years) if metadata_years else boundary_year,
+            "boundary_code_match": "BPS/PUM",
+        },
+    }
+
+
+def _fallback_village_geometry(code: str) -> dict | None:
+    """Fetch a missing village polygon from the ministry's 2025 ADM4 layer."""
+    return _fallback_admin_geometry(
+        code,
+        url=_VILLAGE_BOUNDARY_FALLBACK_URL,
+        code_field="kdebps",
+        pum_field="kdepum",
+        parent_field="kdcpum",
+        parent_length=6,
+        boundary_source="Kementerian Pertanian - Batas Administrasi Desa/Kelurahan 2025",
+        boundary_year=2025,
+        timeout=20,
+        max_bytes=16 * 1024 * 1024,
+    )
+
+
+def _fallback_city_geometry(code: str) -> dict | None:
+    """Fetch a missing kabupaten/kota polygon from the BIG RBI 2024 layer."""
+    return _fallback_admin_geometry(
+        code,
+        url=_CITY_BOUNDARY_FALLBACK_URL,
+        code_field="kdbbps",
+        pum_field="kdpkab",
+        parent_field="kdppum",
+        parent_length=2,
+        boundary_source="BIG RBI - Batas Wilayah Administrasi Kabupaten/Kota",
+        boundary_year=2024,
+        timeout=60,
+        max_bytes=32 * 1024 * 1024,
+        max_allowable_offset=0.0001,
+        geometry_precision=5,
+    )
+
+
+def _normalize_or_fallback_geometry(region: dict, endpoint: str, code: str) -> dict:
+    normalized = _fix_geometry_coord_order(region, endpoint)
+    if endpoint not in {"city", "village"}:
+        return normalized
+    geometries = _polygon_geometries(normalized)
+    if geometries and all(_is_usable_polygon_geometry(geometry) for geometry in geometries):
+        return normalized
+    fallback = _admin_polygon_fallback(endpoint, code)
+    if fallback:
+        logger.info("Using checked administrative polygon fallback level=%s code=%s", endpoint, code)
+        return fallback
+    return normalized
+
+
+def _admin_polygon_fallback(endpoint: str, code: str) -> dict | None:
+    if endpoint == "city":
+        return _fallback_city_geometry(code)
+    if endpoint == "village":
+        return _fallback_village_geometry(code)
+    return None
 
 
 def _base_url() -> str:
@@ -243,14 +454,22 @@ def get_region_geometry(endpoint: str = "", code: str = Query(default="", min_le
                 if local:
                     logger.warning("Using checked-in province boundary for empty provider geometry code=%s", code)
                     return local
-            return _fix_geometry_coord_order(region, endpoint)
+            return _normalize_or_fallback_geometry(region, endpoint, code)
         raise HTTPException(status_code=404, detail="Region not found")
     except HTTPException:
+        fallback = _admin_polygon_fallback(endpoint, code)
+        if fallback:
+            logger.info("Using checked administrative polygon fallback after provider error level=%s code=%s", endpoint, code)
+            return fallback
         local = _local_province_features().get(code) if endpoint == "province" else None
         if local:
             return local
         raise
     except Exception as e:
+        fallback = _admin_polygon_fallback(endpoint, code)
+        if fallback:
+            logger.info("Using checked administrative polygon fallback after provider gap level=%s code=%s", endpoint, code)
+            return fallback
         local = _local_province_features().get(code) if endpoint == "province" else None
         if local:
             logger.warning("Using checked-in province boundary for provider gap code=%s", code)
