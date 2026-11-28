@@ -115,6 +115,9 @@ granite-biomass = [
     "fsspec>=2026.6.0",
     "geopandas>=1.1.2",
 ]
+segmentation = [
+    "torch==2.13.0",
+]
 mlops = [
     "dvc>=3.0,<4",
     "mlflow>=3.0,<4",

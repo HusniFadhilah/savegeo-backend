@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 
@@ -18,12 +19,80 @@ from app.core.security import AppViewer, get_current_admin_panel, get_current_ap
 from app.core.bounded_json import read_typed_json_object
 from app.core.viewer_features import require_feature
 from app.db.session import get_db
+from app.db.models.analysis_provenance import AnalysisProvenance
+from app.db.models.carbon_analysis_snapshot import CarbonAnalysisSnapshot
 from app.services import carbon_service
+from app.services import carbon_snapshot_service, provenance_service
 from app.services.gee_common import AnalysisError, public_analysis_error
 from app.schemas.carbon_analysis import CarbonAnalysisRequest
 
 router = APIRouter(tags=["carbon"], dependencies=[Depends(require_feature("app.feature.carbon_stock"))])
 logger = logging.getLogger(__name__)
+
+
+def _persist_sync_carbon_snapshot(db: Session, viewer: AppViewer, data: dict, result: dict, analysis_type: str) -> dict:
+    """Keep the legacy synchronous API on the same saved-statistics contract."""
+    from app.api.routes.analysis_jobs import _model_pin_for_job, job_owner_key
+    from app.db.models.user import User
+
+    if data.get("calibration_model_id"):
+        from app.services.carbon_calibration_runtime import apply_selected_calibration
+
+        pin = _model_pin_for_job(db, analysis_type, data)
+        result = apply_selected_calibration(db, result, data, model_pin=pin)
+    analysis_id = str(uuid.uuid4())
+    owner_key = job_owner_key(viewer)
+    provenance_service.create_analysis_provenance(
+        db, analysis_id=analysis_id, analysis_type=analysis_type, payload=data,
+        user_id=viewer.id if isinstance(viewer, User) else None,
+    )
+    result = {**result, "analysis_snapshot_id": analysis_id}
+    provenance_service.record_analysis_execution(db, analysis_id, result)
+    provenance_service.update_analysis_provenance(
+        db, analysis_id, status="succeeded", completed_at=datetime.now(UTC)
+    )
+    provenance = db.get(AnalysisProvenance, analysis_id)
+    carbon_snapshot_service.create_carbon_snapshot(
+        db, analysis_id=analysis_id, owner_key=owner_key, analysis_type=analysis_type,
+        result=result, provenance=provenance,
+    )
+    return result
+
+
+@router.get("/carbon/analysis-snapshots/{analysis_id}/statistics.csv", dependencies=[Depends(get_current_app_viewer)])
+def export_carbon_statistics_csv(
+    analysis_id: str,
+    viewer: AppViewer = Depends(get_current_app_viewer),
+    db: Session = Depends(get_db),
+):
+    """Export statistics from the immutable server snapshot; never re-run analysis."""
+    from app.api.routes.analysis_jobs import job_owner_key
+
+    snapshot = db.get(CarbonAnalysisSnapshot, analysis_id)
+    if snapshot is None or snapshot.owner_key != job_owner_key(viewer):
+        raise HTTPException(status_code=404, detail="Analisis tidak ditemukan.")
+    document = dict(snapshot.snapshot or {})
+    if carbon_snapshot_service.snapshot_sha256(document) != snapshot.sha256:
+        raise HTTPException(status_code=409, detail="Snapshot statistik tidak lolos pemeriksaan integritas.")
+    document["_snapshot_sha256"] = snapshot.sha256
+    csv_bytes = carbon_snapshot_service.build_statistics_csv(document)
+    parameters = document.get("parameters") if isinstance(document.get("parameters"), dict) else {}
+    filename = carbon_snapshot_service.safe_csv_filename(
+        parameters.get("aoi_name") or parameters.get("analysis_area_name"), analysis_id
+    )
+    return Response(
+        content=csv_bytes,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"', "Cache-Control": "private, no-store"},
+    )
+
+
+@router.get("/carbon/segmentation/models", dependencies=[Depends(get_current_app_viewer)])
+def list_carbon_segmentation_models():
+    """Expose experimental segmentation contracts without claiming weights or validation."""
+    from app.inference.carbon_encoder_decoder import segmentation_model_catalog
+
+    return segmentation_model_catalog()
 
 
 @router.get("/carbon/extensions/catalog", dependencies=[Depends(get_current_app_viewer)])
@@ -43,9 +112,8 @@ def carbon_productivity_years():
 
 @router.get("/carbon/extensions/blue-carbon/catalog", dependencies=[Depends(get_current_app_viewer)])
 def carbon_blue_carbon_catalog(db: Session = Depends(get_db)):
-    """Curated open datasets and published admin records; edits remain admin-only."""
+    """Return published records from the same database catalogue admins edit."""
     from app.services.config_service import get_setting
-    from app.registries.blue_carbon_open_datasets import BLUE_CARBON_OPEN_DATASETS
 
     records = get_setting(db, "carbon.bluecarbon_profiles", [])
     if isinstance(records, str):
@@ -60,15 +128,8 @@ def carbon_blue_carbon_catalog(db: Session = Depends(get_db)):
         for record in records
         if isinstance(record, dict)
         and record.get("status") == "published"
-        and not record.get("is_curated")
     ]
-    curated_ids = {
-        str(record.get("id"))
-        for record in BLUE_CARBON_OPEN_DATASETS
-        if isinstance(record, dict) and record.get("id") is not None
-    }
-    published = [record for record in published if record.get("id") not in curated_ids]
-    return {"profiles": [*BLUE_CARBON_OPEN_DATASETS, *published]}
+    return {"profiles": published}
 
 
 @router.get("/carbon/green-rankings/latest")
@@ -311,6 +372,10 @@ async def analyze_carbon(request: Request, db: Session = Depends(get_db), viewer
     from app.api.routes.analysis_jobs import job_owner_key
 
     data = {**data, "_request_owner": job_owner_key(viewer)}
+    if data.get("calibration_model_id"):
+        from app.api.routes.analysis_jobs import _model_pin_for_job
+
+        data["_server_model_pin"] = _model_pin_for_job(db, "carbon", data)
     if "aoi" not in data:
         raise HTTPException(status_code=400, detail="Missing required field: aoi")
     from app.registries.carbon_dataset_registry import get_external_carbon_meta
@@ -334,7 +399,8 @@ async def analyze_carbon(request: Request, db: Session = Depends(get_db), viewer
     if requires_ee and not getattr(request.app.state, "ee_initialized", False):
         raise HTTPException(status_code=503, detail="Google Earth Engine belum diinisialisasi. Cek kredensial di Admin Panel.")
     try:
-        return await run_in_threadpool(carbon_service.analyze_carbon, db, data)
+        result = await run_in_threadpool(carbon_service.analyze_carbon, db, data)
+        return await run_in_threadpool(_persist_sync_carbon_snapshot, db, viewer, data, result, "carbon")
     except AnalysisError as e:
         raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
     except ValueError as e:
@@ -352,16 +418,26 @@ async def analyze_carbon(request: Request, db: Session = Depends(get_db), viewer
 
 
 @router.post("/analyze/carbon-local", dependencies=[Depends(get_current_app_viewer)])
-async def analyze_carbon_local(request: Request, db: Session = Depends(get_db)):
+async def analyze_carbon_local(
+    request: Request, db: Session = Depends(get_db), viewer: AppViewer = Depends(get_current_app_viewer)
+):
     """Local/STAC inference; Granite additionally downloads its HLS source from EE."""
     data = await read_typed_json_object(request, CarbonAnalysisRequest)
+    from app.api.routes.analysis_jobs import job_owner_key
+
+    data = {**data, "_request_owner": job_owner_key(viewer)}
+    if data.get("calibration_model_id"):
+        from app.api.routes.analysis_jobs import _model_pin_for_job
+
+        data["_server_model_pin"] = _model_pin_for_job(db, "carbon_local", data)
     if (
         data.get("model_name") == "ibm_granite_geospatial_biomass"
         and not getattr(request.app.state, "ee_initialized", False)
     ):
         raise HTTPException(status_code=503, detail="Google Earth Engine belum diinisialisasi. Cek kredensial di Admin Panel.")
     try:
-        return await run_in_threadpool(carbon_service.analyze_carbon_local, db, data)
+        result = await run_in_threadpool(carbon_service.analyze_carbon_local, db, data)
+        return await run_in_threadpool(_persist_sync_carbon_snapshot, db, viewer, data, result, "carbon_local")
     except AnalysisError as e:
         raise HTTPException(status_code=e.status_code, detail=public_analysis_error(e))
     except ValueError as e:

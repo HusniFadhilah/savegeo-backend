@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, Header, Response
 from sqlalchemy.orm import Session
 
 from app.core.security import get_current_app_viewer
+from app.core.viewer_features import FEATURE_CODES, require_feature
 from app.db.models.admin_user import AdminUser
 from app.db.models.user import User
 from app.db.session import get_db
@@ -13,7 +14,11 @@ from app.services import organizations as service
 from app.services.dmrv.authz import Principal
 from app.services.dmrv.errors import DmrvError
 
-router = APIRouter(prefix="/organizations", tags=["organizations"])
+router = APIRouter(
+    prefix="/organizations",
+    tags=["organizations"],
+    dependencies=[Depends(require_feature(FEATURE_CODES["dmrv_projects"]))],
+)
 
 
 @router.get("", response_model=list[OrganizationOut])

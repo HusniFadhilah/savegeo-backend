@@ -7,8 +7,10 @@ from the browser. Provider calls run outside this enqueue transaction.
 from __future__ import annotations
 
 import calendar
+import datetime as dt
 import hashlib
 import json
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -16,6 +18,9 @@ from sqlalchemy.orm import Session
 
 from app.core.viewer_features import ensure_job_feature_access
 from app.db.models.dmrv_boundary import BoundaryVersion
+from app.db.models.dmrv_advanced import DmrvFieldCapture
+from app.db.models.dmrv_field import ImportBatch, SurveyPlot, SurveyVisit, TreeMeasurement
+from app.db.models.dmrv_integrity import DmrvIntegrityDocument, DmrvIntegrityRecord
 from app.db.models.dmrv_job import DmrvJob
 from app.db.models.dmrv_monitoring import DmrvMonitoringPeriod
 from app.db.models.dmrv_project import DmrvProject
@@ -32,6 +37,212 @@ from app.services.analysis_preflight import preflight as run_analysis_preflight
 
 def digest(value: dict) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+
+
+def _methodology_snapshot(project: DmrvProject) -> dict[str, Any]:
+    method_id = (project.methodology_id or "").strip()
+    version = (project.methodology_version or "").strip()
+    canonical = method_id.upper().replace(" ", "")
+    supported = canonical in {"VM0047", "VERRAVM0047"} and version.lower().removeprefix("v") == "1.1"
+    sources: list[dict] = []
+    source_checked_on = None
+    if supported:
+        from app.services.dmrv.methodology import OFFICIAL_SOURCE_CHECKED_ON, OFFICIAL_SOURCE_DOCUMENTS
+
+        sources = [dict(item) for item in OFFICIAL_SOURCE_DOCUMENTS]
+        source_checked_on = OFFICIAL_SOURCE_CHECKED_ON
+    blockers = [
+        "methodology_specific_net_outcome_calculator_not_implemented",
+        "baseline_and_additionality_inputs_required",
+        "included_and_excluded_pools_require_method_review",
+        "project_emissions_and_leakage_inputs_required",
+        "uncertainty_and_reversal_risk_inputs_require_method_review",
+    ]
+    if not method_id or not version:
+        blockers.insert(0, "project_methodology_and_version_not_selected")
+    elif not supported:
+        blockers.insert(0, "methodology_version_has_no_supported_calculation_profile")
+    return {
+        "methodology_id": method_id or None,
+        "methodology_version": version or None,
+        "source_status": "official_sources_pinned" if supported else "unsupported_or_unreviewed",
+        "source_checked_on": source_checked_on,
+        "official_sources": sources,
+        "calculation_status": "not_implemented",
+        "net_project_outcome": None,
+        "blockers": blockers,
+    }
+
+
+def _sampling_plan_snapshot(db: Session, project_id: str, period_id: str) -> dict[str, Any]:
+    rows = db.execute(
+        select(DmrvIntegrityRecord)
+        .where(DmrvIntegrityRecord.project_id == project_id, DmrvIntegrityRecord.category == "sampling_plan")
+        .order_by(DmrvIntegrityRecord.updated_at.desc(), DmrvIntegrityRecord.id.desc())
+    ).scalars().all()
+    row = next((item for item in rows if (item.payload or {}).get("monitoring_period_id") == period_id), None)
+    if row is None:
+        row = next((item for item in rows if not (item.payload or {}).get("monitoring_period_id")), None)
+    if row is None:
+        return {"status": "not_available", "record_id": None, "revision": None, "sha256": None, "strata": []}
+    source = {"payload": row.payload or {}, "result": row.result or {}, "status": row.status, "revision": row.revision}
+    raw_strata = (row.payload or {}).get("strata", [])
+    strata = []
+    if isinstance(raw_strata, list):
+        for item in raw_strata[:100]:
+            if not isinstance(item, dict):
+                continue
+            result_stratum = next(
+                (s for s in (row.result or {}).get("strata", []) if isinstance(s, dict) and s.get("name") == item.get("name")),
+                {},
+            )
+            locations = result_stratum.get("plot_locations", []) if isinstance(result_stratum, dict) else []
+            strata.append({
+                "name": item.get("name"),
+                "area_ha": item.get("area_ha"),
+                "expected_cv_pct": item.get("expected_cv_pct"),
+                "proposed_plot_count": len(locations) if isinstance(locations, list) else 0,
+            })
+    return {
+        "status": row.status,
+        "accepted_for_stratification": row.status == "accepted",
+        "record_id": row.id,
+        "revision": row.revision,
+        "sha256": digest(source),
+        "monitoring_period_id": (row.payload or {}).get("monitoring_period_id"),
+        "strata": strata,
+    }
+
+
+def _field_evidence_snapshot(db: Session, project_id: str, period: DmrvMonitoringPeriod) -> dict[str, Any]:
+    """Freeze references and a digest for monitoring evidence without using it as model input."""
+    digest_state = hashlib.sha256()
+    measurement_count = 0
+    measurement_refs: list[dict] = []
+    measurement_query = (
+        select(SurveyPlot, SurveyVisit, TreeMeasurement, ImportBatch)
+        .join(SurveyVisit, SurveyVisit.plot_id == SurveyPlot.id)
+        .outerjoin(TreeMeasurement, TreeMeasurement.visit_id == SurveyVisit.id)
+        .outerjoin(ImportBatch, ImportBatch.id == TreeMeasurement.batch_id)
+        .where(
+            SurveyPlot.project_id == project_id,
+            SurveyVisit.visit_date >= period.start_date,
+            SurveyVisit.visit_date <= period.end_date,
+        )
+        .order_by(SurveyVisit.visit_date, SurveyPlot.plot_code, SurveyVisit.id, TreeMeasurement.id)
+        .execution_options(yield_per=500)
+    )
+    for plot, visit, measurement, batch in db.execute(measurement_query):
+        record = {
+            "plot_id": plot.id,
+            "plot_code": plot.plot_code,
+            "latitude": plot.latitude,
+            "longitude": plot.longitude,
+            "land_cover_class": None,
+            "visit_id": visit.id,
+            "visit_date": visit.visit_date.isoformat(),
+            "date_precision": visit.date_precision,
+            "measurement_id": measurement.id if measurement else None,
+            "tree_code": measurement.tree_code if measurement else None,
+            "species": measurement.species if measurement else None,
+            "dbh_cm": measurement.dbh_cm if measurement else None,
+            "height_m": measurement.height_m if measurement else None,
+            "biomass_kg": measurement.biomass_kg if measurement else None,
+            "tree_status": measurement.status if measurement else None,
+            "qa_flags": measurement.qa_flags if measurement else [],
+            "measurement_batch_id": measurement.batch_id if measurement else None,
+            "measurement_batch_sha256": batch.sha256 if batch else None,
+            "visit_batch_id": visit.batch_id,
+        }
+        digest_state.update(json.dumps(record, sort_keys=True, separators=(",", ":"), allow_nan=False).encode())
+        digest_state.update(b"\n")
+        measurement_count += 1
+        if len(measurement_refs) < 1000:
+            measurement_refs.append({"visit_id": visit.id, "measurement_id": measurement.id if measurement else None})
+
+    capture_hash = hashlib.sha256()
+    capture_count = 0
+    capture_refs: list[dict] = []
+    start_at = dt.datetime.combine(period.start_date, dt.time.min, tzinfo=dt.UTC)
+    end_at = dt.datetime.combine(period.end_date + dt.timedelta(days=1), dt.time.min, tzinfo=dt.UTC)
+    capture_query = (
+        select(DmrvFieldCapture, DmrvIntegrityDocument)
+        .outerjoin(DmrvIntegrityDocument, DmrvIntegrityDocument.id == DmrvFieldCapture.photo_document_id)
+        .where(
+            DmrvFieldCapture.project_id == project_id,
+            DmrvFieldCapture.observed_at >= start_at,
+            DmrvFieldCapture.observed_at < end_at,
+        )
+        .order_by(DmrvFieldCapture.observed_at, DmrvFieldCapture.capture_id)
+        .execution_options(yield_per=500)
+    )
+    for capture, document in db.execute(capture_query):
+        record = {
+            "capture_id": capture.capture_id,
+            "plot_id": capture.plot_id,
+            "plot_code": capture.plot_code,
+            "observed_at": capture.observed_at.isoformat(),
+            "latitude": capture.latitude,
+            "longitude": capture.longitude,
+            "gps_accuracy_m": capture.gps_accuracy_m,
+            "observation": capture.observation,
+            "qa_flags": capture.qa_flags,
+            "photo_document_id": capture.photo_document_id,
+            "photo_sha256": document.sha256 if document else None,
+        }
+        capture_hash.update(json.dumps(record, sort_keys=True, separators=(",", ":"), allow_nan=False).encode())
+        capture_hash.update(b"\n")
+        capture_count += 1
+        if len(capture_refs) < 1000:
+            capture_refs.append({"capture_id": capture.capture_id, "photo_document_id": capture.photo_document_id,
+                                 "photo_sha256": document.sha256 if document else None})
+
+    total = measurement_count + capture_count
+    return {
+        "status": "available" if total else "not_available",
+        "role": "monitoring_period_evidence_linked_not_used_for_model_inference",
+        "survey_record_rows": measurement_count,
+        "measurement_sha256": digest_state.hexdigest() if measurement_count else None,
+        "measurement_refs": measurement_refs,
+        "measurement_refs_truncated": measurement_count > len(measurement_refs),
+        "field_capture_rows": capture_count,
+        "field_capture_sha256": capture_hash.hexdigest() if capture_count else None,
+        "field_capture_refs": capture_refs,
+        "field_capture_refs_truncated": capture_count > len(capture_refs),
+        "plot_roles": {
+            "training": "not_linked_to_project_monitoring_evidence",
+            "calibration": "separate_calibration_dataset_and_model_version",
+            "validation": "no_independent_validation_record_attached",
+            "monitoring": "period_dated_project_field_records",
+        },
+    }
+
+
+def _calibration_snapshot(db: Session, parameters: dict) -> dict[str, Any] | None:
+    requested = parameters.get("calibration_model_id")
+    if requested in (None, ""):
+        return None
+    from app.db.models.carbon_calibration import CarbonCalibrationModel
+
+    try:
+        model_id = int(requested)
+    except (TypeError, ValueError):
+        return {"requested_model_id": str(requested), "status": "invalid_id"}
+    model = db.get(CarbonCalibrationModel, model_id)
+    if model is None:
+        return {"requested_model_id": model_id, "status": "not_found"}
+    metadata = model.metadata_json or {}
+    approval = metadata.get("approval_manifest")
+    return {
+        "requested_model_id": model_id,
+        "model_id": model.id,
+        "model_version": model.version,
+        "artifact_sha256": model.artifact_sha256,
+        "target_pool": model.target_pool,
+        "target_unit": model.target_unit,
+        "status_at_submission": model.status,
+        "approval_manifest_sha256": digest(approval) if isinstance(approval, dict) else None,
+    }
 
 
 def _period(db: Session, project_id: str, period_id: str) -> DmrvMonitoringPeriod:
@@ -111,6 +322,14 @@ def _submit(db: Session, viewer, project_id: str, request: ProjectAnalysisCreate
                 raise DmrvError(409, "model_not_approved", "Model GEE tutupan lahan belum dievaluasi, direview independen, dan diaktifkan.")
             if pin:
                 parameters["_server_model_pin"] = pin
+    if request.kind == "carbon":
+        # Resolve model identity at submission so a queued project run cannot
+        # silently switch to a later active model version.
+        from app.api.routes.analysis_jobs import _model_pin_for_job
+
+        model_pin = _model_pin_for_job(db, "carbon", parameters)
+        if model_pin:
+            parameters["_server_model_pin"] = model_pin
     baseline = None
     if request.kind == "landcover_transition":
         if not request.baseline_period_id:
@@ -123,11 +342,22 @@ def _submit(db: Session, viewer, project_id: str, request: ProjectAnalysisCreate
         parameters.update(from_year=baseline.start_date.year, to_year=period.start_date.year)
     elif request.baseline_period_id:
         raise DmrvError(422, "unexpected_baseline", "Baseline hanya dipakai untuk perubahan lahan.")
+    carbon_provenance = None
+    if request.kind == "carbon":
+        carbon_provenance = {
+            "methodology": _methodology_snapshot(project),
+            "sampling_plan": _sampling_plan_snapshot(db, project_id, period.id),
+            "field_evidence": _field_evidence_snapshot(db, project_id, period),
+            "model_pin": parameters.get("_server_model_pin"),
+            "calibration": _calibration_snapshot(db, parameters),
+        }
     context = {"schema": "project_analysis_v1", "organization_id": project.organization_id, "project_id": project_id,
+               "project_revision": project.revision,
                "period": {"id": period.id, "revision": period.revision, "start": period.start_date.isoformat(), "end": period.end_date.isoformat()},
                "baseline": {"id": baseline.id, "revision": baseline.revision} if baseline else None,
                "boundary": {"id": boundary.id, "version": boundary.version, "checksum": boundary.checksum, "area_ha": boundary.area_ha},
-               "parameters": parameters}
+               "parameters": parameters,
+               **({"carbon_provenance": carbon_provenance} if carbon_provenance is not None else {})}
     preflight = run_analysis_preflight(request.kind, parameters)
     if preflight["status"] == "blocked":
         raise DmrvError(422, preflight["blocking"][0]["code"],

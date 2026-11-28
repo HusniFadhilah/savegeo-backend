@@ -99,6 +99,22 @@ var/exports/
 var/carbon_tile_cache/
 ```
 
+### Earth Engine service-account credentials
+
+Admin can store multiple service-account JSON keys. Key material stays in the
+private encrypted credential storage; the database contains only metadata and
+the storage object path. Keep one credential active as the primary and run the
+connection check on each intended backup. At initialization and after an
+authentication/permission failure during a dMRV analysis, SaveGeo tries the
+primary first and then previously checked backups. A key with a failed check is
+skipped until it passes a new check.
+
+Rate-limit and quota responses do not trigger an identity switch. The Earth
+Engine client and carbon analysis retry logic use bounded backoff, and parallel
+jobs must stay within the quotas for their authorized Cloud project and account.
+Use Google Cloud/Earth Engine quota settings or reduce worker concurrency when
+those limits are reached; do not add accounts to evade quota limits.
+
 ### Carbon COG cache and monitoring
 
 Production compose mounts `./var/carbon_tile_cache` at

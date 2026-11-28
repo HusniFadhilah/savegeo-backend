@@ -38,6 +38,7 @@ def test_database_reload_keeps_selected_year_and_regenerates_map_ids(year):
     image = MagicMock()
     image.updateMask.return_value = image
     image.clip.return_value = image
+    image.reproject.return_value = image
     image.getMapId.return_value = {'tile_fetcher': type('Tile', (), {'url_format': 'fresh-map-url'})()}
     roi = MagicMock()
     roi.bounds.return_value = roi

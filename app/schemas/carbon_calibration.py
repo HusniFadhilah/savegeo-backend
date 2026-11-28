@@ -95,6 +95,9 @@ class CalibrationDatasetCreate(BaseModel):
     access: str = "restricted"
     status: str = "draft"
     soil_depth_cm: list[float] | None = None
+    application_domain_geojson: dict[str, Any] | None = None
+    compatible_sensors: list[str] = Field(default_factory=list, max_length=8)
+    preprocessing_version: str | None = Field(default=None, min_length=1, max_length=128)
     source_reference_only: bool = False
     source_references: list[CalibrationSourceReference] = Field(default_factory=list, max_length=20)
     reported_2026_summary: ReportedCarbonSummary | None = None
@@ -106,6 +109,17 @@ class CalibrationDatasetCreate(BaseModel):
             raise ValueError("A source-reference draft cannot claim unimported field plots")
         if self.source_reference_only and not self.source_references:
             raise ValueError("A source-reference draft must include at least one reviewed source link")
+        if self.application_domain_geojson is not None:
+            from shapely.geometry import shape
+
+            value = self.application_domain_geojson
+            if value.get("type") == "Feature":
+                value = value.get("geometry") or {}
+            geometry = shape(value)
+            if geometry.geom_type not in {"Polygon", "MultiPolygon"} or geometry.is_empty or not geometry.is_valid:
+                raise ValueError("Calibration application domain must be a valid Polygon or MultiPolygon.")
+        if any(not item.strip() or len(item) > 64 for item in self.compatible_sensors):
+            raise ValueError("Compatible sensor IDs must be non-empty strings up to 64 characters.")
         return self
 
     @field_validator("target_pools")
@@ -115,6 +129,15 @@ class CalibrationDatasetCreate(BaseModel):
         if unknown:
             raise ValueError(f"Unsupported target pool(s): {sorted(unknown)}")
         return value
+
+    @field_validator("compatible_sensors")
+    @classmethod
+    def validate_compatible_sensors(cls, value: list[str]) -> list[str]:
+        normalized = [item.strip().lower() for item in value]
+        supported = {"sentinel-1", "sentinel-2", "landsat"}
+        if any(item not in supported for item in normalized):
+            raise ValueError(f"Compatible sensors must be selected from {sorted(supported)}.")
+        return sorted(set(normalized))
 
     def manifest(self) -> dict[str, Any]:
         return self.model_dump(mode="json")
@@ -135,3 +158,9 @@ class CalibrationRunCreate(BaseModel):
         if value not in TARGET_POOLS:
             raise ValueError(f"Unsupported target pool: {value}")
         return value
+
+
+class CalibrationReviewDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(min_length=3, max_length=1000)

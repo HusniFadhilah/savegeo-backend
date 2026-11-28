@@ -21,7 +21,13 @@ from app.schemas.dmrv_integrity import AccountingInput, ValidationInput
 from app.services.dmrv.integrity_calculations import spatial_validation, stock_change
 from app.services.dmrv.integrity_risks import enqueue_due
 from app.workers.dmrv_worker import run_one
-from tests.test_dmrv_projects import SQUARE, call, create, env as dmrv_env  # noqa: F401 - pytest fixture
+from tests.test_dmrv_projects import (
+    PROJECT,
+    SQUARE,
+    call,
+    create,
+    env as dmrv_env,  # noqa: F401 - pytest fixture
+)
 
 EXTRA = [
     DmrvIntegrityRecord.__table__,
@@ -66,6 +72,48 @@ def setup_project(client, *, boundary=True, reviewer=True):
             == 201
         )
     return project_id, f"/dmrv/projects/{project_id}/integrity"
+
+
+def test_methodology_checklist_identifies_official_sources_without_claiming_expert_review(ienv):
+    client, _ = ienv
+    project_id = create(client).json()["id"]
+    response = call(
+        client,
+        "GET",
+        f"/dmrv/projects/{project_id}/integrity/methodology-checklist",
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["supported"] is True
+    assert body["source_checked_on"] == "2026-11-28"
+    assert body["reviewed_on"] is None
+    assert body["expert_review_status"] == "not_recorded_for_pack"
+    assert body["qualification_id"] == "internal_review_aid"
+    assert [source["id"] for source in body["official_sources"]] == [
+        "vm0047_v1_1",
+        "vmd0054_v1_1",
+    ]
+    assert body["official_sources"][0]["url"].endswith("VM0047-v1.1_Final.pdf")
+    assert all("title_id" in item and "description_id" in item for item in body["items"])
+
+
+def test_methodology_checklist_does_not_apply_rules_to_unsupported_version(ienv):
+    client, _ = ienv
+    project_id = create(client, payload={**PROJECT, "methodology_version": "9.0"}).json()["id"]
+    response = call(
+        client,
+        "GET",
+        f"/dmrv/projects/{project_id}/integrity/methodology-checklist",
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["supported"] is False
+    assert body["official_sources"] == []
+    assert body["source_checked_on"] is None
+    assert body["qualification_id"] == "unsupported_version"
+    assert body["items"] == []
 
 
 def save(
@@ -177,6 +225,62 @@ def test_required_criterion_cannot_be_excluded_and_field_role_cannot_write(ienv)
     )
     assert call(client, "GET", base, viewer="user:1").status_code == 403
     assert call(client, "GET", "/dmrv/portfolio", viewer="user:1").json()["total"] == 0
+
+
+def test_project_operations_record_tracks_attribution_and_review_without_claiming_verification(ienv):
+    client, _factory = ienv
+    project_id, base = setup_project(client, boundary=False)
+    url = f"{base}/records/operations/case-study-forest-edge"
+    payload = {
+        "record_type": "case_study",
+        "summary": "Document the methods and evidence collected for the monitoring area.",
+        "source": "Project field team interview log",
+        "source_date": "2026-11-20",
+        "owner": "Project analyst",
+        "record_status": "in_progress",
+        "target_date": "2026-12-15",
+        "evidence": [],
+    }
+    draft = call(
+        client,
+        "PUT",
+        url,
+        if_match='"0"',
+        json={"title": "Forest edge case study", "status": "draft", "payload": payload},
+    )
+    assert draft.status_code == 200
+    assert draft.json()["result"]["externally_verified"] is False
+
+    no_evidence = call(
+        client,
+        "PUT",
+        url,
+        if_match='"1"',
+        json={"title": "Forest edge case study", "status": "submitted", "payload": payload},
+    )
+    assert no_evidence.status_code == 422
+    assert no_evidence.json()["code"] == "evidence_required"
+
+    submitted_payload = {**payload, "evidence": ["https://example.org/source-record"]}
+    submitted = call(
+        client,
+        "PUT",
+        url,
+        if_match='"1"',
+        json={"title": "Forest edge case study", "status": "submitted", "payload": submitted_payload},
+    )
+    assert submitted.status_code == 200 and submitted.json()["status"] == "submitted"
+    reviewed = call(
+        client,
+        "POST",
+        f"{base}/records/{submitted.json()['id']}/review",
+        viewer="admin:2",
+        if_match='"2"',
+        json={"decision": "accepted", "reason": "Source and owner fields are recorded."},
+    )
+    assert reviewed.status_code == 200
+    assert reviewed.json()["status"] == "accepted"
+    assert reviewed.json()["result"]["externally_verified"] is False
 
 
 def accounting_payload(period_id="period"):

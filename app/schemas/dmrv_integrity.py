@@ -20,6 +20,27 @@ class EvidenceInput(Strict):
     owner: str = Field(default="", max_length=100)
 
 
+class ProjectOperationsInput(Strict):
+    """Attribution and lifecycle fields for project operations records."""
+
+    record_type: Literal["case_study", "prospective_partner", "follow_up", "implementation_roadmap"]
+    summary: str = Field(min_length=1, max_length=8000)
+    source: str = Field(min_length=1, max_length=1000)
+    source_date: dt.date
+    owner: str = Field(min_length=1, max_length=100)
+    record_status: Literal["planned", "in_progress", "blocked", "completed", "on_hold", "closed"]
+    target_date: dt.date | None = None
+    evidence: list[str] = Field(default_factory=list, max_length=30)
+
+    @model_validator(mode="after")
+    def valid_source_date_and_evidence(self):
+        if self.source_date > dt.datetime.now(dt.UTC).date():
+            raise ValueError("Tanggal sumber tidak boleh di masa depan.")
+        if len(set(self.evidence)) != len(self.evidence):
+            raise ValueError("Referensi bukti harus unik.")
+        return self
+
+
 class PoolStock(Strict):
     pool: Literal["AGB", "BGB", "SOC", "litter", "deadwood"]
     project_start: float = Field(ge=0, le=1e7)

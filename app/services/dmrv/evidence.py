@@ -89,6 +89,9 @@ def _build_archive(snapshot: DmrvSnapshot) -> tuple[bytes, dict, list[str]]:
             "Missing components are intentionally reported; do not infer zero from missing data.\n"
         ).encode("utf-8"),
     }
+    carbon_mrv = outputs.get("carbon_mrv")
+    if isinstance(carbon_mrv, dict):
+        payloads["snapshot/carbon-mrv-status.json"] = _canonical(carbon_mrv)
     # Include optional snapshot artifacts under fixed, server-selected names.
     optional = {
         "field_measurements": "measurements.json",
@@ -124,6 +127,16 @@ def _build_archive(snapshot: DmrvSnapshot) -> tuple[bytes, dict, list[str]]:
         "qualification": "reproducibility_package",
         "verification_status": "not_verified",
         "issuance_status": "not_issued",
+        "carbon_mrv_status": ({
+            "estimate": (carbon_mrv.get("estimate") or {}).get("status"),
+            "calibration": (carbon_mrv.get("calibration") or {}).get("status"),
+            "validation": (carbon_mrv.get("validation") or {}).get("status"),
+            "validation_type": (carbon_mrv.get("validation") or {}).get("validation_type"),
+            "segmentation": (carbon_mrv.get("segmentation") or {}).get("status"),
+            "review": (carbon_mrv.get("review") or {}).get("status"),
+            "accounting": (carbon_mrv.get("accounting") or {}).get("status"),
+            "registry": (carbon_mrv.get("registry") or {}).get("status"),
+        } if isinstance(carbon_mrv, dict) else None),
         "components": component_rows,
         "missing_components": missing,
         "entries": entry_rows,

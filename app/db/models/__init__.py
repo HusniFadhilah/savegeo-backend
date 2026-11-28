@@ -11,6 +11,7 @@ from app.db.models.analysis_provenance import AnalysisProvenance
 from app.db.models.analysis_output import AnalysisOutput
 from app.db.models.carbon_inference_cache import CarbonInferenceCache
 from app.db.models.carbon_annual_estimate import CarbonAnnualEstimate
+from app.db.models.carbon_analysis_snapshot import CarbonAnalysisSnapshot
 from app.db.models.crop_monitoring_cache import CropMonitoringCache
 from app.db.models.audit_log import AuditLog
 from app.db.models.chat_message import ChatMessage
@@ -70,6 +71,7 @@ __all__ = [
     "AnalysisOutput",
     "CarbonInferenceCache",
     "CarbonAnnualEstimate",
+    "CarbonAnalysisSnapshot",
     "CropMonitoringCache",
     "AuditLog",
     "ChatMessage",

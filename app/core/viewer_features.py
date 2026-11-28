@@ -18,15 +18,17 @@ FEATURE_CODES: dict[str, str] = {
     "satellite_exploration": "app.feature.satellite_exploration",
     "disaster_mapping": "app.feature.disaster_mapping",
     "crop_monitoring": "app.feature.crop_monitoring",
+    "dmrv_projects": "app.feature.dmrv_projects",
 }
 VIEWER_FEATURES: tuple[tuple[str, str, str], ...] = (
-    (FEATURE_CODES["carbon_stock"], "Estimasi stok karbon", "Estimasi dan ekspor hasil stok karbon."),
+    (FEATURE_CODES["carbon_stock"], "Estimasi stok karbon", "Estimasi AGB, BGB, SOC, serasah, dan kayu mati; peringkat wilayah, peta, serta ekspor hasil karbon."),
     (FEATURE_CODES["land_cover"], "Land Cover / LULC", "Klasifikasi tutupan lahan dan hasilnya."),
     (FEATURE_CODES["vegetation_indices"], "Indeks vegetasi", "Analisis indeks vegetasi dan deret waktunya."),
     (FEATURE_CODES["land_cover_change"], "Perubahan tutupan lahan", "Perbandingan tutupan lahan antarperiode."),
     (FEATURE_CODES["satellite_exploration"], "Eksplorasi scene satelit", "Pencarian scene, tampilan tile, dan unduhan."),
     (FEATURE_CODES["disaster_mapping"], "Pemetaan bencana", "Melihat data dan analisis bencana yang dipublikasikan."),
     (FEATURE_CODES["crop_monitoring"], "Crop Monitoring", "Pemantauan field, tanaman, dan hasil analisis."),
+    (FEATURE_CODES["dmrv_projects"], "Proyek dMRV dan organisasi", "Melihat ruang kerja, portofolio, dan proyek dMRV sesuai keanggotaan serta peran proyek."),
 )
 VIEWER_FEATURE_CODES = frozenset(code for code, _, _ in VIEWER_FEATURES)
 DEFAULT_VIEWER_FEATURE_CODES = VIEWER_FEATURE_CODES

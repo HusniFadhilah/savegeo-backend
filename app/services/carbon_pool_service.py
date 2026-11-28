@@ -8,6 +8,7 @@ import ee
 from app.registries.carbon_dataset_registry import get_dataset_meta, load_carbon_reference_ee, soilgrids_stock_image
 from app.registries.carbon_pool_models import get_builtin_carbon_model
 from app.services import config_service
+from app.services.carbon_map_grid import WEB_MAP_CRS, apply_carbon_map_grid
 from app.services.gee_common import AnalysisError, geojson_to_ee_geometry
 
 logger = logging.getLogger(__name__)
@@ -271,6 +272,35 @@ def summary_scale(native_scale, bounds_area_m2, max_pixels):
     return max(int(native_scale), math.ceil(math.sqrt(bounds_area_m2 / budget)))
 
 
+def _carbon_value_kind(dataset_key, meta, model, method, extras):
+    """Describe how pool values were obtained; satellite products are not field measurements."""
+    explicit = meta.get("data_value_kind") or extras.get("data_value_kind")
+    if (meta.get("transform") == "tropical_detritus_proxy"
+            or dataset_key in {"TROPICAL_LITTER_REFERENCE", "TROPICAL_DEADWOOD_REFERENCE"}
+            or extras.get("source_data_kind") == "proxy_not_field_measurement"
+            or method in {"soil_stock_integration", "ipcc_root_to_shoot"}):
+        return "derived"
+    # A model prediction remains an estimate even when its training source was
+    # a measured or imputed dataset.
+    if model:
+        return "modeled"
+    if isinstance(explicit, str) and explicit in {"measured", "imputed", "modeled", "derived"}:
+        return explicit
+    if dataset_key == "GEDI_L4D":
+        return "imputed"
+    return "modeled"
+
+
+def _reference_support_scale(meta, extras, model):
+    if model:
+        for key in ("reference_support_m", "training_sample_scale_m", "sample_scale_m"):
+            value = extras.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0:
+                return int(value)
+    value = meta.get("resolution")
+    return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0 else None
+
+
 def build_pool_export_image(db, data, roi):
     """Use the same pool model and reference semantics as the analysis map."""
     key = data["reference_dataset"]
@@ -319,6 +349,13 @@ def analyze_carbon_pool(db, data):
     extras = {}
     image = reference
     method = model["metadata_json"].get("method") if model else None
+    pool_key = {
+        "aboveground_biomass_carbon": "agb",
+        "belowground_biomass_carbon": "bgb",
+        "soil_organic_carbon": "soc",
+        "litter_carbon": "litter",
+        "deadwood_carbon": "deadwood",
+    }.get(meta.get("target_pool"))
     source_year = int(meta.get("selection_year") or meta.get("year") or year)
     requested_analysis_year = int(data.get("year", datetime.now(UTC).year))
     current_year = datetime.now(UTC).year
@@ -327,6 +364,13 @@ def analyze_carbon_pool(db, data):
     annual_model = bool(model and method not in {"soil_stock_integration", "ipcc_root_to_shoot"})
     analysis_year = requested_analysis_year if annual_model else source_year
     scale = max(int(meta["resolution"]), int(data.get("scale") or meta["resolution"]))
+    configured_map_resolution = defaults.get("carbon_pool_map_resolution_m", {}).get(pool_key, 30)
+    map_resolution_m = (
+        int(meta["resolution"])
+        if not model or configured_map_resolution == "reference"
+        else int(configured_map_resolution)
+    )
+    map_resolution_mode = "reference" if not model or configured_map_resolution == "reference" else "configured"
     simple_baseline = bool(data.get("simple_mode") and not model)
     if data.get("simple_mode"):
         bounds_area = calculation_roi.bounds(maxError=100).area(maxError=100).getInfo()
@@ -354,13 +398,6 @@ def analyze_carbon_pool(db, data):
             image, extras = _random_forest(reference, calculation_roi, meta, model, analysis_year,
                                            allow_large=bool(data.get("simple_mode")),
                                            cached_model_info=cached_model_info)
-    pool_key = {
-        "aboveground_biomass_carbon": "agb",
-        "belowground_biomass_carbon": "bgb",
-        "soil_organic_carbon": "soc",
-        "litter_carbon": "litter",
-        "deadwood_carbon": "deadwood",
-    }.get(meta.get("target_pool"))
     pool_vis = defaults.get("carbon_pool_visualization", {}).get(pool_key, {})
     vis = {
         "min": pool_vis.get("min", meta.get("vis_min", defaults["carbon_vis_min"])),
@@ -390,7 +427,17 @@ def analyze_carbon_pool(db, data):
                                      maxPixels=defaults["max_pixels"], tileScale=4)
         raw = reduced.set("aoi_area", calculation_roi.area(maxError=1).divide(10000)).getInfo()
         if raw.get("agb_mean") is None or not raw.get("valid_area_sum"):
-            raise AnalysisError("AOI tidak memiliki piksel valid untuk dataset/model BGB atau SOC yang dipilih.", 422)
+            if key in {"TROPICAL_LITTER_REFERENCE", "TROPICAL_DEADWOOD_REFERENCE"}:
+                pool_label = "serasah" if key == "TROPICAL_LITTER_REFERENCE" else "kayu mati"
+                raise AnalysisError(
+                    f"Tidak ditemukan piksel tutupan pohon yang valid di AOI untuk estimasi karbon {pool_label}. "
+                    "Pilih area berhutan atau periksa tahun analisis.",
+                    422,
+                )
+            raise AnalysisError(
+                f"AOI tidak memiliki piksel valid untuk dataset karbon {meta.get('name') or key}.",
+                422,
+            )
         stats = _pool_density_statistics(raw, scale, int(meta["resolution"]))
         if not stats.get("histogram"):
             try:
@@ -412,6 +459,8 @@ def analyze_carbon_pool(db, data):
         )
         vis.update(min=vis_min, max=vis_max)
     display = image.clip(calculation_roi)
+    if model:
+        display = apply_carbon_map_grid(display, map_resolution_m)
     tile = display.getMapId(vis)["tile_fetcher"].url_format
     if external:
         if key in CARBON_ARCGIS_REGISTRY or key == "CHLORIS_AGB_STOCK":
@@ -433,11 +482,11 @@ def analyze_carbon_pool(db, data):
         reference_info["statistics"] = stats
     estimated = {**provenance, "tile_url": tile if model else None, "statistics": stats, "vis_params": vis,
                  "inference_mode": "builtin_model" if model else "reference_only"}
+    reference_support_m = _reference_support_scale(meta, extras, model)
+    value_kind = _carbon_value_kind(key, meta, model, method, extras)
     result = {"carbon_estimated": estimated, "carbon_reference": reference_info, "area_info": area_info,
               "model_info": {"model_name": model["name"] if model else "reference_only", "algorithm": model["algorithm"] if model else "direct_raster",
                              "display_mode": "model" if model else "reference_only", "scale": scale,
-                             **({"map_resolution_m": 30, "reference_support_m": meta["resolution"]}
-                                if key in {"TROPICAL_LITTER_REFERENCE", "TROPICAL_DEADWOOD_REFERENCE"} and model else {}),
                              "calculation_mode": area_info["calculation_mode"], "model_version": model["version"] if model else None,
                              "reference_dataset": key, "reference_dataset_year": meta["year"], "analysis_year": analysis_year,
                              "requested_analysis_year": requested_analysis_year,
@@ -448,7 +497,13 @@ def analyze_carbon_pool(db, data):
                              "load_only": bool(data.get("load_only")), "statistics_available": stats is not None,
                              "visualization_mode": visualization_mode,
                              "large_aoi_baseline": simple_baseline,
-                             "method_description": model["description"] if model else meta["description"], **extras},
+                             "method_description": model["description"] if model else meta["description"], **extras,
+                             "map_resolution_m": map_resolution_m,
+                             "map_resolution_mode": map_resolution_mode,
+                             "map_resolution_crs": WEB_MAP_CRS if model else meta.get("crs"),
+                             "reference_support_m": reference_support_m,
+                             "summary_scale_m": scale,
+                             "data_value_kind": value_kind},
               "data_quality": {"valid_pixel_pct": coverage, "gap_filled": None, "images_used": None,
                                "analysis_year_partial": analysis_year == current_year,
                                "coefficient_of_variation_pct": stats["std_dev"] / stats["mean"] * 100 if stats and stats["mean"] and stats["std_dev"] is not None else None,

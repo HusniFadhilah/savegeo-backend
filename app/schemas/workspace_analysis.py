@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 class AnalysisParameters(BaseModel):
     model_config = ConfigDict(extra="forbid")
     model_name: str | None = Field(default=None, max_length=128)
+    calibration_model_id: int | None = Field(default=None, ge=1)
     reference_dataset: str = Field(default="WCMC", min_length=1, max_length=128)
     datasets: list[str] = Field(default_factory=lambda: ["Dynamic_World"], min_length=1, max_length=12)
     dataset: str = Field(default="Dynamic_World", min_length=1, max_length=128)

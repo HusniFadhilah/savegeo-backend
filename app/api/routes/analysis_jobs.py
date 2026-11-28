@@ -44,6 +44,7 @@ from app.services import (
     landcover_fusion_service,
     landcover_service,
     provenance_service,
+    carbon_snapshot_service,
     output_registry_service,
     vegetation_service,
 )
@@ -89,7 +90,7 @@ _GEE_SERVING_JOB_TYPES = {
     "landcover_change", "landcover_transition", "landcover_change_map",
     "landcover_hotspots", "landcover_fusion",
 }
-_CARBON_CACHE_SCHEMA = 5
+_CARBON_CACHE_SCHEMA = 6
 _UPSTREAM_CONNECTION_ERROR = (
     "Koneksi ke layanan data eksternal terputus sebelum respons diterima. "
     "Coba jalankan ulang analisis; jika berulang, kecilkan AOI/rentang waktu "
@@ -154,7 +155,7 @@ def _verify_serving_code_identity(payload: dict[str, Any]) -> dict[str, Any] | N
 
     if not matches(expected):
         raise AnalysisError(
-            "Versi serving GEE berubah setelah job dibuat. Job dihentikan agar model tidak berjalan dengan kode yang berbeda; kirim ulang analisis.",
+            "Kode analisis GEE di server berbeda dengan versi saat job dibuat. Job dihentikan agar hasil tetap konsisten; kirim ulang analisis.",
             409,
         )
     return expected
@@ -292,6 +293,7 @@ def _model_pin_for_job(db: Session, job_type: str, payload: dict[str, Any]) -> d
         "artifact_sha256": row.artifact_sha256,
         "approval_digest": row.approval_digest,
         "format": artifact_format,
+        "preprocessing_version": metadata.get("preprocessing_version"),
     }
 
 
@@ -334,7 +336,7 @@ def _verify_job_model_pin(db: Session, payload: dict[str, Any]) -> dict[str, Any
         raise AnalysisError("Artefak model tidak lolos pemeriksaan integritas saat job dijalankan.", 409) from exc
     if not valid:
         raise AnalysisError("Approval versi model tidak lagi berlaku saat job dijalankan.", 409)
-    return pin
+    return {**pin, "preprocessing_version": (row.metadata_json or {}).get("preprocessing_version")}
 
 
 def _carbon_cache_key(db: Session, job_type: str, payload: dict[str, Any], owner: str) -> str:
@@ -377,6 +379,7 @@ def _carbon_cache_key(db: Session, job_type: str, payload: dict[str, Any], owner
             "carbon_vis_palette": analysis_defaults["carbon_vis_palette"],
             "carbon_legend_bins": analysis_defaults["carbon_legend_bins"],
             "carbon_pool_visualization": analysis_defaults["carbon_pool_visualization"],
+            "carbon_pool_map_resolution_m": analysis_defaults["carbon_pool_map_resolution_m"],
         }
     encoded = json.dumps(
         {
@@ -480,6 +483,8 @@ def _complete_cached_job(
         user_id=viewer.id if isinstance(viewer, User) else None,
     )
     result = {**result, "quality_assessment": assess_result_quality(job_type, result)}
+    if job_type in {"carbon", "carbon_local"}:
+        result["analysis_snapshot_id"] = job_id
     _write_job(job_id, {
         "job_id": job_id,
         "type": job_type,
@@ -500,6 +505,11 @@ def _complete_cached_job(
     provenance_service.update_analysis_provenance(
         db, job_id, status="succeeded", started_at=now, completed_at=now
     )
+    if job_type in {"carbon", "carbon_local"}:
+        record = db.get(AnalysisProvenance, job_id)
+        carbon_snapshot_service.create_carbon_snapshot(
+            db, analysis_id=job_id, owner_key=owner, analysis_type=job_type, result=result, provenance=record
+        )
     return {"job_id": job_id, "status": "succeeded", "status_url": f"/analysis-jobs/{job_id}", "cache_hit": True}
 
 
@@ -556,6 +566,10 @@ def _run_job(
             result = crop_monitoring_service.run_crop_monitoring(db, payload, owner)
         else:  # defensive; validated before submit
             raise ValueError(f"Unsupported job type: {job_type}")
+        if isinstance(result, dict) and job_type in {"carbon", "carbon_local"} and payload.get("calibration_model_id"):
+            from app.services.carbon_calibration_runtime import apply_selected_calibration
+
+            result = apply_selected_calibration(db, result, payload, model_pin=pinned_model)
         if isinstance(result, dict):
             result = {**result, "quality_assessment": assess_result_quality(job_type, result)}
         if cache_key and owner:
@@ -565,6 +579,8 @@ def _run_job(
                 db, cache_key=cache_key, owner=owner, job_id=job_id,
                 job_type=job_type, status="completed", result=cached_result,
             )
+        if job_type in {"carbon", "carbon_local"}:
+            result["analysis_snapshot_id"] = job_id
         output_registry_service.register_action_outputs(db, job_id, result)
         provenance_service.record_analysis_execution(db, job_id, result, pinned_model, serving_revision)
         provenance_service.update_analysis_provenance(
@@ -573,6 +589,12 @@ def _run_job(
             status="succeeded",
             completed_at=datetime.now(UTC),
         )
+        if job_type in {"carbon", "carbon_local"}:
+            record = db.get(AnalysisProvenance, job_id)
+            carbon_snapshot_service.create_carbon_snapshot(
+                db, analysis_id=job_id, owner_key=owner or "", analysis_type=job_type,
+                result=result, provenance=record,
+            )
         _write_job(
             job_id,
             {
@@ -656,7 +678,7 @@ def _run_job(
     except Exception:
         if cache_key and owner:
             _upsert_carbon_cache(db, cache_key=cache_key, owner=owner, job_id=job_id, job_type=job_type, status="failed")
-        logger.error("Analysis job %s failed", job_id)
+        logger.exception("Analysis job %s (%s) failed unexpectedly", job_id, job_type)
         _write_job(
             job_id,
             {
@@ -744,6 +766,10 @@ def _create_analysis_job_sync(request: Request, data: dict[str, Any], viewer: Ap
     needs_ee = requires_earth_engine(job_type, payload)
     owner = job_owner_key(viewer)
     cache_key = _carbon_cache_key(db, job_type, payload, owner) if job_type in _RESULT_CACHEABLE_TYPES else None
+    # A selected local calibration is reviewed at serving time and therefore
+    # never reuses a result cached under an earlier activation/review state.
+    if payload.get("calibration_model_id"):
+        cache_key = None
     if cache_key:
         cached = _get_carbon_cache(db, cache_key)
         if cached is not None and _cache_entry_is_fresh(cached):

@@ -22,7 +22,9 @@ _cache: dict[str, object] = {}
 _cache_ts: float = 0.0
 _CFG_TTL = 30.0
 _CARBON_POOL_STYLE_KEY = re.compile(r"^carbon\.pool\.(agb|bgb|soc|litter|deadwood)\.(vis_min|vis_max|vis_palette)$")
+_CARBON_POOL_MAP_RESOLUTION_KEY = re.compile(r"^carbon\.pool\.(agb|bgb|soc|litter|deadwood)\.map_resolution_m$")
 _CARBON_POOLS = ("agb", "bgb", "soc", "litter", "deadwood")
+CARBON_POOL_MAP_RESOLUTION_OPTIONS = (30, 60, 100, 250, 300, 500, 1000)
 
 
 def _refresh(db: Session) -> None:
@@ -161,6 +163,7 @@ def get_analysis_defaults(db: Session) -> dict:
     palette_raw = get_setting(db, "carbon.vis_palette", settings.carbon_vis_palette)
     config_defaults = {entry[0]: entry[1] for entry in DEFAULT_CONFIGS}
     pool_visualization = {}
+    pool_map_resolution = {}
     for pool in _CARBON_POOLS:
         prefix = f"carbon.pool.{pool}"
         min_raw = get_setting(db, f"{prefix}.vis_min", config_defaults[f"{prefix}.vis_min"])
@@ -179,6 +182,19 @@ def get_analysis_defaults(db: Session) -> dict:
         if not 2 <= len(palette) <= 12 or any(not re.fullmatch(r"[0-9a-fA-F]{6}", color) for color in palette):
             palette = config_defaults[f"{prefix}.vis_palette"].split(",")
         pool_visualization[pool] = {"min": vis_min, "max": vis_max, "palette": palette}
+        map_resolution_raw = str(get_setting(
+            db,
+            f"{prefix}.map_resolution_m",
+            config_defaults[f"{prefix}.map_resolution_m"],
+        )).strip().lower()
+        if map_resolution_raw == "reference":
+            pool_map_resolution[pool] = "reference"
+        else:
+            try:
+                map_resolution = int(map_resolution_raw)
+            except (TypeError, ValueError):
+                map_resolution = 30
+            pool_map_resolution[pool] = map_resolution if map_resolution in CARBON_POOL_MAP_RESOLUTION_OPTIONS else 30
 
     return {
         "cloud_threshold": int(get_setting(db, "analysis.cloud_threshold", settings.default_cloud_threshold)),
@@ -191,6 +207,7 @@ def get_analysis_defaults(db: Session) -> dict:
         "carbon_vis_palette": palette_raw.split(",") if isinstance(palette_raw, str) else list(palette_raw),
         "carbon_legend_bins": int(get_setting(db, "carbon.legend_bins", settings.carbon_legend_bins)),
         "carbon_pool_visualization": pool_visualization,
+        "carbon_pool_map_resolution_m": pool_map_resolution,
         "carbon_co2_factor": float(get_setting(db, "carbon.co2_factor", settings.carbon_co2_factor)),
     }
 
@@ -247,6 +264,20 @@ def validate_carbon_pool_visualization_updates(db: Session, updates: dict) -> di
                         errors[key] = "Nilai minimum harus lebih kecil daripada nilai maksimum."
         except (TypeError, ValueError):
             continue
+    return errors
+
+
+def validate_carbon_pool_map_resolution_updates(updates: dict) -> dict[str, str]:
+    """Validate per-pool output grid choices configured by administrators."""
+    errors: dict[str, str] = {}
+    allowed = {str(value) for value in CARBON_POOL_MAP_RESOLUTION_OPTIONS} | {"reference"}
+    for key, value in updates.items():
+        if not isinstance(key, str) or not _CARBON_POOL_MAP_RESOLUTION_KEY.fullmatch(key):
+            continue
+        normalized = str(value).strip().lower()
+        if normalized not in allowed:
+            choices = ", ".join(str(value) for value in CARBON_POOL_MAP_RESOLUTION_OPTIONS)
+            errors[key] = f"Pilih 'reference' atau resolusi peta yang tersedia: {choices} m."
     return errors
 
 

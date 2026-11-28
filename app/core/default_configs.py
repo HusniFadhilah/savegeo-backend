@@ -4,11 +4,16 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import os
 
 from app.core.version import get_product_version
+from app.registries.blue_carbon_open_datasets import BLUE_CARBON_OPEN_DATASETS
 
 DEFAULT_CONFIGS: list[tuple[str, str, str, str, str, str, bool]] = [
+    ("carbon.bluecarbon_profiles", json.dumps(BLUE_CARBON_OPEN_DATASETS, ensure_ascii=False), "json", "carbon",
+     "Katalog Blue Carbon", "Sumber terbuka blue carbon pada katalog pengguna; nilai pool kosong bila sumber tidak memberi angka ringkasan.", False),
+
     ("analysis.cloud_threshold", os.getenv("DEFAULT_CLOUD_THRESHOLD", "10"), "int", "analysis",
      "Cloud threshold (%)", "Max cloud cover for Sentinel-2 filtering", False),
 
@@ -61,30 +66,40 @@ DEFAULT_CONFIGS: list[tuple[str, str, str, str, str, str, bool]] = [
      "AGB · Maks", "Batas maksimum rentang warna densitas AGB dalam Mg C/ha.", False),
     ("carbon.pool.agb.vis_palette", "440154,414487,2a788e,22a884,7ad151,fde725", "string", "carbon_maps",
      "AGB · Palet warna", "Ramp berurutan berkontras luminansi tinggi, dari densitas rendah ke tinggi; ramah untuk buta warna parsial.", False),
+    ("carbon.pool.agb.map_resolution_m", "30", "string", "carbon_maps",
+     "AGB · Grid peta", "Resolusi target layer AGB. Pilih Ikuti referensi untuk memakai resolusi sumber; nilai lebih halus tidak menambah detail sumber.", False),
     ("carbon.pool.bgb.vis_min", "0", "float", "carbon_maps",
      "BGB · Min", "Batas minimum rentang warna densitas BGB dalam Mg C/ha.", False),
     ("carbon.pool.bgb.vis_max", "60", "float", "carbon_maps",
      "BGB · Maks", "Batas maksimum rentang warna densitas BGB dalam Mg C/ha.", False),
     ("carbon.pool.bgb.vis_palette", "00204c,414f79,697777,97935f,c5b54f,ffea46", "string", "carbon_maps",
      "BGB · Palet warna", "Ramp berurutan berkontras luminansi tinggi, dari densitas rendah ke tinggi; ramah untuk buta warna parsial.", False),
+    ("carbon.pool.bgb.map_resolution_m", "30", "string", "carbon_maps",
+     "BGB · Grid peta", "Resolusi target layer BGB. Pilih Ikuti referensi untuk memakai resolusi sumber; nilai lebih halus tidak menambah detail sumber.", False),
     ("carbon.pool.soc.vis_min", "0", "float", "carbon_maps",
      "SOC · Min", "Batas minimum rentang warna densitas SOC dalam Mg C/ha.", False),
     ("carbon.pool.soc.vis_max", "400", "float", "carbon_maps",
      "SOC · Maks", "Batas maksimum rentang warna densitas SOC dalam Mg C/ha.", False),
     ("carbon.pool.soc.vis_palette", "0d0887,5c01a6,9c179e,cc4778,ed7953,f0f921", "string", "carbon_maps",
      "SOC · Palet warna", "Ramp berurutan berkontras luminansi tinggi, dari densitas rendah ke tinggi; ramah untuk buta warna parsial.", False),
+    ("carbon.pool.soc.map_resolution_m", "30", "string", "carbon_maps",
+     "SOC · Grid peta", "Resolusi target layer SOC. Pilih Ikuti referensi untuk memakai resolusi sumber; nilai lebih halus tidak menambah detail sumber.", False),
     ("carbon.pool.litter.vis_min", "0", "float", "carbon_maps",
      "Litter · Min", "Batas minimum rentang warna densitas litter dalam Mg C/ha.", False),
     ("carbon.pool.litter.vis_max", "1", "float", "carbon_maps",
      "Litter · Maks", "Batas maksimum rentang warna densitas litter dalam Mg C/ha.", False),
     ("carbon.pool.litter.vis_palette", "000004,420a68,932667,dd513a,fba40a,fcffa4", "string", "carbon_maps",
      "Litter / serasah · Palet warna", "Palet Inferno ungu-merah-kuning dengan kontras luminansi tinggi, dari densitas rendah ke tinggi.", False),
+    ("carbon.pool.litter.map_resolution_m", "30", "string", "carbon_maps",
+     "Litter / serasah · Grid peta", "Resolusi target layer serasah. Pilih Ikuti referensi untuk memakai resolusi sumber; nilai lebih halus tidak menambah detail sumber.", False),
     ("carbon.pool.deadwood.vis_min", "0", "float", "carbon_maps",
      "Deadwood · Min", "Batas minimum rentang warna densitas deadwood dalam Mg C/ha.", False),
     ("carbon.pool.deadwood.vis_max", "10", "float", "carbon_maps",
      "Deadwood · Maks", "Batas maksimum rentang warna densitas deadwood dalam Mg C/ha.", False),
     ("carbon.pool.deadwood.vis_palette", "000004,3b0f70,8c2981,de4968,fe9f6d,fcfdbf", "string", "carbon_maps",
      "Deadwood / kayu mati · Palet warna", "Palet Magma ungu-ke-krem dengan kontras luminansi tinggi, dari densitas rendah ke tinggi.", False),
+    ("carbon.pool.deadwood.map_resolution_m", "30", "string", "carbon_maps",
+     "Deadwood / kayu mati · Grid peta", "Resolusi target layer kayu mati. Pilih Ikuti referensi untuk memakai resolusi sumber; nilai lebih halus tidak menambah detail sumber.", False),
 
     ("carbon.co2_factor", os.getenv("CO2_CONVERSION_FACTOR", "3.67"), "float", "carbon",
      "CO₂ conversion factor", "IPCC C→CO₂ factor", True),

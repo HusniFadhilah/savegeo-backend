@@ -18,6 +18,8 @@ from sqlalchemy.orm import Session
 from app.db.models.admin_user import AdminUser
 from app.db.models.dmrv_audit import DmrvIdempotencyKey
 from app.db.models.dmrv_boundary import BoundaryVersion
+from app.db.models.dmrv_job import DmrvSnapshot
+from app.db.models.dmrv_monitoring import DmrvMonitoringPeriod
 from app.db.models.dmrv_project import DmrvProject, ProjectMember
 from app.db.models.user import User
 from app.schemas.dmrv import (
@@ -135,6 +137,26 @@ def update_project(
     role = _authorize(db, project_id, principal, "project.write")
     changes = payload.model_dump(exclude_unset=True)
     project = db.get(DmrvProject, project_id)
+    methodology_fields = {"methodology_id", "methodology_version"}
+    methodology_changed = any(
+        key in methodology_fields and value != getattr(project, key)
+        for key, value in changes.items()
+    )
+    methodology_already_selected = bool(project.methodology_id or project.methodology_version)
+    if methodology_changed:
+        active_period = db.scalar(select(DmrvMonitoringPeriod.id).where(
+            DmrvMonitoringPeriod.project_id == project_id,
+            DmrvMonitoringPeriod.status.in_(("in_progress", "completed")),
+        ).limit(1))
+        carbon_snapshot = db.scalar(select(DmrvSnapshot.id).where(
+            DmrvSnapshot.project_id == project_id, DmrvSnapshot.kind == "carbon",
+        ).limit(1))
+        if carbon_snapshot or (active_period and methodology_already_selected):
+            raise DmrvError(
+                409,
+                "methodology_locked",
+                "Metodologi proyek sudah dikunci setelah periode monitoring dimulai atau snapshot karbon dibuat. Buat proyek/periode baru untuk memakai metode lain.",
+            )
     before = {key: getattr(project, key) for key in changes}
     try:
         result = db.execute(

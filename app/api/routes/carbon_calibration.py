@@ -27,7 +27,7 @@ from app.db.models.carbon_calibration import (
     FieldTree,
 )
 from app.db.session import SessionLocal, get_db
-from app.schemas.carbon_calibration import CalibrationDatasetCreate, CalibrationRunCreate
+from app.schemas.carbon_calibration import CalibrationDatasetCreate, CalibrationReviewDecision, CalibrationRunCreate
 from app.services import audit_service
 from app.services.carbon_calibration_service import (
     CARBON_FRACTION,
@@ -525,10 +525,50 @@ def _run_calibration(run_id: str) -> None:
                 rows.append(
                     {"plot_id": plot.plot_id, "predicted": float(predicted), "observed": float(observed)}
                 )
+        parameters = run.parameters if isinstance(run.parameters, dict) else {}
+        requested_training = parameters.get("training_plot_ids") if isinstance(parameters.get("training_plot_ids"), list) else []
+        requested_validation = parameters.get("validation_plot_ids") if isinstance(parameters.get("validation_plot_ids"), list) else []
+        rows_by_plot = {str(row["plot_id"]): row for row in rows}
+        explicit_holdout = bool(requested_training or requested_validation)
+        split_valid = (
+            len(set(map(str, requested_training))) >= 3
+            and len(set(map(str, requested_validation))) >= 3
+            and not (set(map(str, requested_training)) & set(map(str, requested_validation)))
+            and set(map(str, requested_training + requested_validation)).issubset(rows_by_plot)
+        )
+        training_rows = [rows_by_plot[str(plot_id)] for plot_id in requested_training] if split_valid else rows
+        validation_rows = [rows_by_plot[str(plot_id)] for plot_id in requested_validation] if split_valid else []
         if run.method == "baseline":
             metrics = evaluate_predictions(rows)
         elif run.method == "linear_calibration":
-            metrics = lopo_linear_calibration(rows)
+            fitted = lopo_linear_calibration(training_rows)
+            if split_valid and fitted.get("status") == "computed":
+                intercept = float(fitted["calibration_intercept"])
+                slope = float(fitted["calibration_slope"])
+                validation_predictions = [
+                    {"plot_id": row["plot_id"], "observed": row["observed"],
+                     "predicted": intercept + slope * row["predicted"]}
+                    for row in validation_rows
+                ]
+                independent_metrics = evaluate_predictions(validation_predictions)
+                metrics = {
+                    **independent_metrics,
+                    "method": "linear_calibration",
+                    "calibration_intercept": intercept,
+                    "calibration_slope": slope,
+                    "validation_type": "independent_field_plot_holdout",
+                    "training_sample_count": len(training_rows),
+                    "sample_count": len(training_rows) + len(validation_rows),
+                    "independent_validation_metrics": {
+                        key: value for key, value in independent_metrics.items() if key != "rows"
+                    },
+                    "validation_plot_ids": [row["plot_id"] for row in validation_rows],
+                    "training_plot_ids": [row["plot_id"] for row in training_rows],
+                }
+            elif explicit_holdout:
+                metrics = {"status": "not_computed", "reason": "Plot split must contain at least three disjoint, matched training and validation plots"}
+            else:
+                metrics = fitted
         elif run.method == "intercept_bias":
             baseline = evaluate_predictions(rows)
             metrics = (
@@ -565,7 +605,14 @@ def _run_calibration(run_id: str) -> None:
                 "validation": metrics,
                 "source_dataset_ids": [dataset.dataset_id],
                 "source_dataset_checksums": [item.sha256 for item in dataset.files],
-                "feature_schema": run.parameters.get("feature_schema", []),
+                "feature_schema": parameters.get("feature_schema", []),
+                "baseline_model": parameters.get("baseline_model"),
+                "training_plot_ids": metrics.get("training_plot_ids", []),
+                "validation_plot_ids": metrics.get("validation_plot_ids", []),
+                "validation_type": metrics.get("validation_type", "leave_one_plot_out"),
+                "preprocessing_version": (parameters.get("baseline_model") or {}).get("preprocessing_version"),
+                "compatible_sensors": (dataset.manifest or {}).get("compatible_sensors", []),
+                "application_domain_geojson": (dataset.manifest or {}).get("application_domain_geojson"),
                 "uncertainty": {"status": "not_computed", "reason": "plot-level bootstrap not configured"},
                 "scope": {
                     key: (dataset.manifest or {}).get(key)
@@ -585,7 +632,8 @@ def _run_calibration(run_id: str) -> None:
                     target_unit="Mg C/ha",
                     status="experimental",
                     metadata_json=artifact["scope"]
-                    | {"validation_method": "leave_one_plot_out", "independent_sample_count": len(rows)},
+                    | {"validation_method": metrics.get("validation_type", "leave_one_plot_out"),
+                       "independent_sample_count": len(validation_rows) if split_valid else 0},
                     artifact_path=str(artifact_path),
                     artifact_sha256=artifact_sha,
                     is_active=False,
@@ -1060,7 +1108,8 @@ def get_run(run_id: str, db: Session = Depends(get_db)):
     run = db.get(CarbonCalibrationRun, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Calibration run not found")
-    return run.to_dict()
+    model = db.query(CarbonCalibrationModel).filter_by(run_id=run_id).first()
+    return {**run.to_dict(), "model": model.to_dict() if model else None}
 
 
 @router.post("/models/{model_id}/activate", dependencies=[Depends(require_permission("calibration.write"))])
@@ -1073,7 +1122,8 @@ def activate_model(
 
 @router.post("/runs/{run_id}/approve", dependencies=[Depends(require_permission("calibration.write"))])
 def approve_run(
-    run_id: str, admin=Depends(require_permission("calibration.write")), db: Session = Depends(get_db)
+    run_id: str, admin=Depends(require_permission("calibration.write")), db: Session = Depends(get_db),
+    decision: CalibrationReviewDecision | None = None,
 ):
     run = db.get(CarbonCalibrationRun, run_id)
     if not run:
@@ -1082,32 +1132,42 @@ def approve_run(
     if not model:
         raise HTTPException(status_code=409, detail="A completed run with a calibration artifact is required")
     from app.services.calibration_review import approve
-    model = approve(db, model.id, admin.id)
+    reviewer = {"username": getattr(admin, "username", None), "role": getattr(getattr(admin, "role", None), "name", None)}
+    model = approve(db, model.id, admin.id, reason=decision.reason if decision else None, reviewer=reviewer)
     return {"run": run.to_dict(), "model": model.to_dict()}
 
 
 @router.post("/models/{model_id}/promote", dependencies=[Depends(require_permission("calibration.write"))])
 def promote_model(
-    model_id: int, admin=Depends(require_permission("calibration.write")), db: Session = Depends(get_db)
+    model_id: int, admin=Depends(require_permission("calibration.write")), db: Session = Depends(get_db),
+    decision: CalibrationReviewDecision | None = None,
 ):
     """Compatibility alias with the exact same approval guard as /approve."""
     from app.services.calibration_review import approve
-    return approve(db, model_id, admin.id).to_dict()
+    reviewer = {"username": getattr(admin, "username", None), "role": getattr(getattr(admin, "role", None), "name", None)}
+    return approve(db, model_id, admin.id, reason=decision.reason if decision else None, reviewer=reviewer).to_dict()
+
+
+@router.post("/models/{model_id}/reject", dependencies=[Depends(require_permission("calibration.write"))])
+def reject_model(
+    model_id: int,
+    decision: CalibrationReviewDecision,
+    admin=Depends(require_permission("calibration.write")),
+    db: Session = Depends(get_db),
+):
+    from app.services.calibration_review import reject
+    reviewer = {"username": getattr(admin, "username", None), "role": getattr(getattr(admin, "role", None), "name", None)}
+    return reject(db, model_id, admin.id, reason=decision.reason, reviewer=reviewer).to_dict()
 
 
 @router.post("/models/{model_id}/rollback", dependencies=[Depends(require_permission("calibration.write"))])
 def rollback_model(
-    model_id: int, admin=Depends(require_permission("calibration.write")), db: Session = Depends(get_db)
+    model_id: int, admin=Depends(require_permission("calibration.write")), db: Session = Depends(get_db),
+    decision: CalibrationReviewDecision | None = None,
 ):
-    model = db.get(CarbonCalibrationModel, model_id)
-    if not model:
-        raise HTTPException(status_code=404, detail="Calibration model not found")
-    model.is_active, model.status = False, "archived"
-    db.commit()
-    audit_service.log_audit(
-        db, admin.id, "calibration.model.rollback", "carbon_calibration_model", str(model.id)
-    )
-    return model.to_dict()
+    from app.services.calibration_review import rollback
+    rolled_back, restored = rollback(db, model_id, admin.id, reason=decision.reason if decision else None)
+    return {**rolled_back.to_dict(), "restored_model": restored.to_dict()}
 
 
 @router.get("/models/{model_id}/validation", dependencies=[Depends(require_permission("calibration.read"))])
@@ -1140,8 +1200,39 @@ def list_public_calibration_models(
         .filter(CarbonCalibrationModel.is_active.is_(True), CarbonCalibrationModel.status == "active_local")
         .all()
     )
+    public_models = []
+    for model in models:
+        dataset = db.get(CarbonCalibrationDataset, model.dataset_pk)
+        run = db.get(CarbonCalibrationRun, model.run_id) if model.run_id else None
+        artifact = model.metadata_json or {}
+        baseline = artifact.get("baseline_model") if isinstance(artifact.get("baseline_model"), dict) else {}
+        public_models.append({
+            "id": model.id,
+            "model_id": model.model_id,
+            "model_name": model.model_name,
+            "version": model.version,
+            "target_pool": model.target_pool,
+            "target_unit": model.target_unit,
+            "status": model.status,
+            "artifact_sha256": model.artifact_sha256,
+            "dataset_id": dataset.dataset_id if dataset else None,
+            "application_scope": {
+                "site": (dataset.manifest or {}).get("site") if dataset else None,
+                "ecosystem": (dataset.manifest or {}).get("ecosystem") if dataset else None,
+                "survey_year": (dataset.manifest or {}).get("survey_year") if dataset else None,
+                "compatible_sensors": (dataset.manifest or {}).get("compatible_sensors", []) if dataset else [],
+                "compatible_analysis_years": artifact.get("compatible_analysis_years", []),
+            },
+            "baseline_model": {key: baseline.get(key) for key in ("id", "version", "preprocessing_version")},
+            "validation": {
+                "type": (run.metrics or {}).get("validation_type") if run else None,
+                "independent_metrics": (run.metrics or {}).get("independent_validation_metrics") if run else None,
+                "validation_plot_count": len((run.metrics or {}).get("validation_plot_ids", [])) if run else 0,
+            },
+            "trained_at": model.trained_at.isoformat() if model.trained_at else None,
+        })
     return {
-        "models": [model.to_dict() for model in models],
+        "models": public_models,
         "selection": "explicit",
         "warning": "Local calibration applies only within its documented site, habitat, source model and sampling depth; it is not the national default.",
         "aoi_received": bool(aoi),

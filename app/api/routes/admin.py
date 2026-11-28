@@ -551,12 +551,18 @@ async def config_update(request: Request, admin: AdminUser = Depends(require_per
     pool_style_errors = config_service.validate_carbon_pool_visualization_updates(
         db, {key: value for key, value in items if isinstance(key, str)}
     )
+    pool_map_resolution_errors = config_service.validate_carbon_pool_map_resolution_updates(
+        {key: value for key, value in items if isinstance(key, str)}
+    )
     for key, value in items:
         if key in rejected:
             errors.append({"key": key, "error": rejected[key]})
             continue
         if key in pool_style_errors:
             errors.append({"key": key, "error": pool_style_errors[key]})
+            continue
+        if key in pool_map_resolution_errors:
+            errors.append({"key": key, "error": pool_map_resolution_errors[key]})
             continue
         if _requires_full_access_config(key) and not admin_has_permission(admin, "secret.write"):
             errors.append({"key": key, "error": "Secret configuration is restricted to full-access administrators"})

@@ -21,10 +21,14 @@ from sqlalchemy.pool import StaticPool
 
 from app.api.routes import admin, admin_mfa, dmrv, organizations, workspace_analysis
 from app.core.security import get_current_app_viewer
+from app.core.viewer_features import DEFAULT_VIEWER_FEATURE_CODES
 from app.db.base import Base
 from app.db.models.admin_user import AdminUser
 from app.db.models.dmrv_audit import DmrvAuditEvent, DmrvIdempotencyKey
 from app.db.models.dmrv_project import DmrvProject, ProjectMember
+from app.db.models.dmrv_integrity import DmrvIntegrityDocument, DmrvIntegrityRecord
+from app.db.models.dmrv_advanced import DmrvFieldCapture
+from app.db.models.dmrv_field import ImportBatch, SurveyPlot, SurveyVisit, TreeMeasurement
 from app.db.models.dmrv_boundary import BoundaryVersion
 from app.db.models.dmrv_monitoring import DmrvMonitoringPeriod
 from app.db.models.dmrv_job import DmrvJob, DmrvSnapshot
@@ -35,7 +39,7 @@ from app.db.models.user import User
 from app.db.models.gee_credential import GEECredential
 from app.db.models.audit_log import AuditLog
 from app.db.models.admin_mfa import AdminMfa, MfaChallenge
-from app.db.models.carbon_calibration import CarbonCalibrationDataset, CarbonCalibrationFile, CarbonCalibrationRun, CarbonCalibrationModel
+from app.db.models.carbon_calibration import CarbonCalibrationDataset, CarbonCalibrationFile, CarbonCalibrationRun, CarbonCalibrationModel, FieldPlot
 from app.db.session import get_db
 from app.schemas.organizations import MemberChange
 from app.services import organizations as service
@@ -52,9 +56,11 @@ TABLES = [User.__table__, AdminUser.__table__, Role.__table__, Permission.__tabl
           Organization.__table__, OrganizationMember.__table__, OrganizationInvitation.__table__, WorkspaceRequest.__table__,
           DmrvProject.__table__, ProjectMember.__table__, DmrvAuditEvent.__table__, DmrvIdempotencyKey.__table__,
           BoundaryVersion.__table__, DmrvMonitoringPeriod.__table__, DmrvJob.__table__, DmrvSnapshot.__table__,
+          DmrvIntegrityRecord.__table__, DmrvIntegrityDocument.__table__, ImportBatch.__table__, SurveyPlot.__table__,
+          SurveyVisit.__table__, TreeMeasurement.__table__, DmrvFieldCapture.__table__,
           WorkspaceAnalysisRun.__table__, WorkspaceQuota.__table__, WorkspaceUsageEvent.__table__, GEECredential.__table__, AuditLog.__table__,
           AdminMfa.__table__, MfaChallenge.__table__, CarbonCalibrationDataset.__table__, CarbonCalibrationFile.__table__,
-          CarbonCalibrationRun.__table__, CarbonCalibrationModel.__table__]
+          CarbonCalibrationRun.__table__, CarbonCalibrationModel.__table__, FieldPlot.__table__]
 
 
 @pytest.fixture(params=["sqlite", "postgresql"])
@@ -74,6 +80,13 @@ def env(request):
     Base.metadata.create_all(engine, tables=TABLES)
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     with factory() as db:
+        viewer_role = Role(
+            name="viewer",
+            is_viewer=True,
+            feature_permissions_configured=True,
+        )
+        viewer_role.permissions = [Permission(code=code) for code in DEFAULT_VIEWER_FEATURE_CODES]
+        db.add(viewer_role)
         db.add_all([User(id=1, username="alice", email="alice@example.test", password_hash="x"),
                     User(id=2, username="bob", email="bob@example.test", password_hash="x"),
                     User(id=3, username="carol", email="carol@example.test", password_hash="x"),

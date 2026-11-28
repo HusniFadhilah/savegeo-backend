@@ -37,6 +37,7 @@ from app.schemas.dmrv_integrity import (
     EvidenceInput,
     GrievanceInput,
     MethodologyCheckInput,
+    ProjectOperationsInput,
     RecordOut,
     RecordReview,
     RecordSave,
@@ -106,6 +107,7 @@ CATALOG = [
     ),
 ]
 SCHEMAS = {
+    "operations": ProjectOperationsInput,
     "readiness": EvidenceInput,
     "safeguard": EvidenceInput,
     "registry": RegistryInput,
@@ -244,6 +246,11 @@ def _record(db: Session, project_id: str, record_id: str) -> DmrvIntegrityRecord
 
 
 def _calculated(db: Session, project_id: str, category: str, data) -> dict:
+    if category == "operations":
+        return {
+            "qualification": "internal_project_record",
+            "externally_verified": False,
+        }
     if category == "grievance":
         days_open = max(0, (dt.datetime.now(dt.UTC).date() - data.received_on).days)
         return {

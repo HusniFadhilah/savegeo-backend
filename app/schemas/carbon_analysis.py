@@ -14,6 +14,7 @@ class CarbonAnalysisRequest(BaseModel):
 
     aoi: dict[str, Any] | None = None
     model_name: str | None = Field(default=None, max_length=128)
+    calibration_model_id: int | None = Field(default=None, ge=1)
     reference_dataset: str | None = Field(default=None, max_length=128)
     dataset_year: int | None = Field(default=None, ge=1980, le=2100)
     year: int | None = Field(default=None, ge=1980, le=2100)

@@ -217,7 +217,7 @@ services:
         SAVEGEO_BUILD_NUMBER: ${SAVEGEO_BUILD_NUMBER:-}
     restart: unless-stopped
     mem_limit: 8g
-    pids_limit: 256
+    pids_limit: 512
     cpus: 4
     env_file:
       - .env

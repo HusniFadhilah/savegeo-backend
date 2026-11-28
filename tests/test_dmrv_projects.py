@@ -1,3 +1,4 @@
+import datetime as dt
 import os
 import uuid
 
@@ -13,6 +14,7 @@ from sqlalchemy.schema import CreateSchema, DropSchema
 
 from app.api.routes import dmrv as dmrv_routes
 from app.core.security import get_current_app_viewer
+from app.core.viewer_features import DEFAULT_VIEWER_FEATURE_CODES
 from app.db.base import Base
 from app.db.models.admin_user import AdminUser
 from app.db.models.dmrv_audit import DmrvAuditEvent, DmrvIdempotencyKey
@@ -75,6 +77,14 @@ def env():
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     with factory() as seed:
         seed.add(Role(id=1, name="limited"))
+        viewer_role = Role(
+            id=2,
+            name="viewer",
+            is_viewer=True,
+            feature_permissions_configured=True,
+        )
+        viewer_role.permissions = [Permission(code=code) for code in DEFAULT_VIEWER_FEATURE_CODES]
+        seed.add(viewer_role)
         seed.add_all([
             User(id=1, username="field-user", email="f@x.test", password_hash="x"),
             AdminUser(id=1, username="owner-a", password_hash="x", is_superuser=True),
@@ -183,6 +193,33 @@ def test_patch_requires_if_match(env):
     project_id = create(client).json()["id"]
     response = call(client, "PATCH", f"/dmrv/projects/{project_id}", json={"name": "x"})
     assert response.status_code == 428
+
+
+def test_methodology_is_locked_after_monitoring_period_starts(env):
+    client, factory = env
+    project_id = create(client).json()["id"]
+    boundary_id = "boundary-method-lock"
+    with factory() as db:
+        db.add(BoundaryVersion(
+            id=boundary_id, project_id=project_id, version=1, original_geojson=SQUARE,
+            validated_geojson=SQUARE, crs="EPSG:4326", area_ha=1.0, area_method="geodesic",
+            checksum="b" * 64, created_by="admin:1", reason="method lock test",
+        ))
+        db.add(DmrvMonitoringPeriod(
+            id="period-method-lock", project_id=project_id, boundary_version_id=boundary_id,
+            name="Monitoring 2026", start_date=dt.date(2026, 1, 1), end_date=dt.date(2026, 12, 31),
+            status="in_progress", created_by="admin:1",
+        ))
+        db.commit()
+    response = call(
+        client, "PATCH", f"/dmrv/projects/{project_id}", if_match='"1"',
+        json={"methodology_id": "VM0033", "methodology_version": "2.1"},
+    )
+    assert response.status_code == 409
+    assert response.json()["code"] == "methodology_locked"
+    with factory() as db:
+        project = db.get(DmrvProject, project_id)
+        assert (project.methodology_id, project.methodology_version) == ("VM0047", "1.1")
 
 
 def test_user_and_admin_without_permission_cannot_create_project(env):
@@ -486,6 +523,12 @@ def test_submission_review_enforces_independence_and_audits_state_changes(env, m
         json={"decision": "approved", "reason": "Fixture test review completed."},
     )
     assert decision.status_code == 200 and decision.json()["status"] == "approved"
+    snapshot = call(client, "GET", f"/dmrv/projects/{project_id}/snapshots/snap-ready-1")
+    assert snapshot.status_code == 200
+    assert snapshot.json()["mrv_review_status"]["status"] == "approved"
+    assert snapshot.json()["mrv_review_status"]["reviewer_key"] == "user:1"
+    assert snapshot.json()["mrv_review_status"]["decided_at"]
+    assert snapshot.json()["mrv_review_status"]["decision_reason"] == "Fixture test review completed."
     with factory() as db:
         actions = db.execute(select(DmrvAuditEvent.action).where(
             DmrvAuditEvent.project_id == project_id,

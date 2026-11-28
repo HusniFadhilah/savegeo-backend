@@ -430,6 +430,12 @@ def assess_dataset(
         result = assess([row.to_dict() for row in rows], payload)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+    training_rows = (result.get("cross_validation") or {}).get("rows") or []
+    validation_rows = (result.get("baseline_validation") or {}).get("rows") or []
+    result["training_plot_ids"] = sorted({str(item.get("plot_id")) for item in training_rows if item.get("plot_id")})
+    result["validation_plot_ids"] = sorted({str(item.get("plot_id")) for item in validation_rows if item.get("plot_id")})
+    result["validation_type"] = "independent_field_plot_holdout" if len(result["validation_plot_ids"]) >= 3 else "insufficient_independent_field_plots"
+    result["independent_validation_metrics"] = result.get("calibrated_validation") or {"status": "not_computed"}
     result["provenance"] = {
         "dataset_id": dataset_id,
         "observation_ids": [row.id for row in rows],
@@ -437,6 +443,33 @@ def assess_dataset(
             json.dumps([row.to_dict() for row in rows], sort_keys=True).encode()
         ).hexdigest(),
     }
+    baseline_identity = None
+    compatible_analysis_years: list[int] = []
+    source_prefix = "gee:"
+    source = payload.prediction_source
+    if source.startswith(source_prefix):
+        try:
+            model_version_and_name, source_year, source_digest_prefix = source[len(source_prefix):].rsplit(":", 2)
+            baseline_name, baseline_version = model_version_and_name.rsplit("@", 1)
+            if source_year.isdigit() and len(source_digest_prefix) == 8:
+                compatible_analysis_years = [int(source_year)]
+                candidates = _pool_model_candidates(db, payload.pool, baseline_name)
+                base_model = next((candidate for _, candidate in candidates
+                                   if candidate.version == baseline_version
+                                   and candidate.artifact_sha256.startswith(source_digest_prefix)), None)
+                if base_model is not None:
+                    base_metadata = base_model.metadata_json or {}
+                    baseline_identity = {
+                        "database_id": base_model.id,
+                        "id": base_model.name,
+                        "version": base_model.version,
+                        "artifact_sha256": base_model.artifact_sha256,
+                        "preprocessing_version": base_metadata.get("preprocessing_version"),
+                        "format": base_metadata.get("format"),
+                    }
+        except (ValueError, TypeError):
+            baseline_identity = None
+    result["baseline_model"] = baseline_identity
     run = CarbonCalibrationRun(
         id=str(uuid.uuid4()),
         dataset_pk=dataset.id,
@@ -444,7 +477,7 @@ def assess_dataset(
         target_pool=POOL_TARGETS[payload.pool],
         status="complete" if result["status"] == "computed" else "not_computed",
         progress=100,
-        parameters=payload.model_dump(),
+        parameters={**payload.model_dump(), "baseline_model": baseline_identity},
         metrics=result,
         created_by=admin.id,
         completed_at=datetime.now(UTC),
@@ -467,7 +500,11 @@ def assess_dataset(
         )
         artifact = {
             **result["artifact"],
+            "baseline_model": baseline_identity,
             "scope": scope,
+            "application_domain_geojson": (dataset.manifest or {}).get("application_domain_geojson"),
+            "compatible_sensors": (dataset.manifest or {}).get("compatible_sensors", []),
+            "compatible_analysis_years": compatible_analysis_years,
             "source_dataset_ids": [dataset_id],
             "validation": result,
             "provenance": result["provenance"],
@@ -495,6 +532,10 @@ def assess_dataset(
                 artifact_sha256=run.artifact_sha256,
                 metadata_json={
                     **scope,
+                    "baseline_model": baseline_identity,
+                    "application_domain_geojson": (dataset.manifest or {}).get("application_domain_geojson"),
+                    "compatible_sensors": (dataset.manifest or {}).get("compatible_sensors", []),
+                    "compatible_analysis_years": compatible_analysis_years,
                     "validation_method": "leave_one_plot_out_and_separate_validation",
                     "independent_sample_count": result["calibration_plots"],
                     "field_schema": "v1",
@@ -521,12 +562,7 @@ def assess_dataset(
 def assessment_history(dataset_id: str, db: Session = Depends(get_db)):
     dataset = dataset_or_404(db, dataset_id)
     runs = (
-        db.query(
-            CarbonCalibrationRun.id,
-            CarbonCalibrationRun.target_pool,
-            CarbonCalibrationRun.status,
-            CarbonCalibrationRun.created_at,
-        )
+        db.query(CarbonCalibrationRun)
         .filter_by(dataset_pk=dataset.id, method="field_plot_calibration")
         .order_by(CarbonCalibrationRun.created_at.desc())
         .limit(20)
@@ -535,10 +571,8 @@ def assessment_history(dataset_id: str, db: Session = Depends(get_db)):
     return {
         "runs": [
             {
-                "id": run.id,
-                "target_pool": run.target_pool,
-                "status": run.status,
-                "created_at": run.created_at.isoformat() if run.created_at else None,
+                **{key: run.to_dict().get(key) for key in ("id", "target_pool", "status", "created_at")},
+                "model": (model.to_dict() if (model := db.query(CarbonCalibrationModel).filter_by(run_id=run.id).first()) else None),
             }
             for run in runs
         ]

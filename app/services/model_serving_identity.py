@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import get_settings
-from app.core.version import get_product_version, get_public_version_metadata
 
 
 _SERVING_SOURCE_FILES = (
@@ -43,14 +42,22 @@ def current_identity() -> dict[str, Any]:
         if landcover_registry_path.is_file()
         else hashlib.sha256(b"missing").hexdigest()
     )
-    deployment = get_public_version_metadata()
+    # This identity is persisted on queued GEE jobs and checked later by a
+    # worker. Keep it limited to serving inputs that must remain identical.
+    # Deployment metadata is written to the shared /app/var volume after the
+    # new API and workers start, so commit_sha/product_version can change while
+    # a job is waiting even though the serving code itself did not change.
     return {
-        "product_version": get_product_version(),
-        "commit_sha": deployment.get("commit_sha"),
         "serving_code_sha256": digest.hexdigest(),
         "landcover_registry_sha256": landcover_registry_sha256,
     }
 
 
 def matches(expected: dict[str, Any] | None) -> bool:
-    return isinstance(expected, dict) and current_identity() == expected
+    if not isinstance(expected, dict):
+        return False
+    actual = current_identity()
+    # Compare only semantic serving identity fields. This remains compatible
+    # with queued jobs created by older releases, whose identity also carried
+    # volatile deployment metadata (commit and product version).
+    return all(expected.get(key) == value for key, value in actual.items())

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import csv
+import io
 import datetime as dt
 import hashlib
 from typing import Literal
@@ -13,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.security import admin_has_permission, get_current_app_viewer
+from app.core.viewer_features import FEATURE_CODES, require_feature
 from app.api.routes.dmrv_integrity import router as integrity_router
 from app.db.models.admin_user import AdminUser
 from app.db.models.dmrv_job import DmrvJob, DmrvSnapshot
@@ -59,7 +62,11 @@ from app.services.dmrv.audit import record_audit
 from app.services.dmrv.errors import DmrvError
 from app.services.dmrv.field_import import CANONICAL_FIELDS, ImportOptions
 
-router = APIRouter(prefix="/dmrv", tags=["dmrv"])
+router = APIRouter(
+    prefix="/dmrv",
+    tags=["dmrv"],
+    dependencies=[Depends(require_feature(FEATURE_CODES["dmrv_projects"]))],
+)
 
 router.include_router(integrity_router)
 
@@ -266,7 +273,149 @@ def get_snapshot(
         raise DmrvError(404, "not_found", "Snapshot tidak ditemukan.")
     if row.kind in {"carbon", "landcover", "landcover_transition", "vegetation"} and not _analysis_visible(db, viewer, "analysis." + row.kind):
         raise DmrvError(403, "feature_forbidden", "Akses fitur analisis tidak diizinkan.")
-    return DmrvSnapshotOut.model_validate(row, from_attributes=True)
+    snapshot_out = DmrvSnapshotOut.model_validate(row, from_attributes=True)
+    snapshot_out.mrv_review_status = _snapshot_review_status(db, project_id, row.id)
+    return snapshot_out
+
+
+def _snapshot_review_status(db: Session, project_id: str, snapshot_id: str) -> dict:
+    submission = db.scalar(
+        select(DmrvSubmission)
+        .join(DmrvEvidencePackage, DmrvEvidencePackage.id == DmrvSubmission.evidence_package_id)
+        .where(
+            DmrvSubmission.project_id == project_id,
+            DmrvEvidencePackage.project_id == project_id,
+            DmrvEvidencePackage.snapshot_id == snapshot_id,
+            DmrvSubmission.status != "superseded",
+        )
+        .order_by(DmrvSubmission.version.desc(), DmrvSubmission.created_at.desc())
+        .limit(1)
+    )
+    if submission is None:
+        return {
+            "status": "not_reviewed",
+            "submission_id": None,
+            "reviewer_key": None,
+            "decided_at": None,
+            "decision_reason": None,
+            "qualification": "No linked SaveGeo review decision is recorded.",
+        }
+    return {
+        "status": submission.status,
+        "submission_id": submission.id,
+        "reviewer_key": submission.reviewer_key,
+        "decided_at": submission.decided_at.isoformat() if submission.decided_at else None,
+        "decision_reason": submission.decision_reason,
+        "qualification": "SaveGeo internal project review status; not external verification or issuance.",
+    }
+
+
+@router.get("/projects/{project_id}/snapshots/{snapshot_id}/carbon-statistics.csv")
+def export_carbon_snapshot_csv(
+    project_id: str,
+    snapshot_id: str,
+    request: Request,
+    viewer: User | AdminUser = Depends(get_current_app_viewer),
+    db: Session = Depends(get_db),
+):
+    principal = _principal(viewer)
+    authorize(db, project_id, principal, "field.read")
+    snapshot = db.scalar(select(DmrvSnapshot).where(
+        DmrvSnapshot.id == snapshot_id,
+        DmrvSnapshot.project_id == project_id,
+        DmrvSnapshot.kind == "carbon",
+    ))
+    if snapshot is None:
+        raise DmrvError(404, "not_found", "Snapshot karbon tidak ditemukan.")
+    if not _analysis_visible(db, viewer, "analysis.carbon"):
+        raise DmrvError(403, "feature_forbidden", "Akses fitur analisis karbon tidak diizinkan.")
+
+    context = (snapshot.inputs or {}).get("context", {})
+    result = snapshot.outputs or {}
+    mrv = result.get("carbon_mrv") if isinstance(result.get("carbon_mrv"), dict) else {}
+    estimate = mrv.get("estimate") if isinstance(mrv.get("estimate"), dict) else {}
+    calibration = mrv.get("calibration") if isinstance(mrv.get("calibration"), dict) else {}
+    validation = mrv.get("validation") if isinstance(mrv.get("validation"), dict) else {}
+    segmentation = mrv.get("segmentation") if isinstance(mrv.get("segmentation"), dict) else {}
+    review = mrv.get("review") if isinstance(mrv.get("review"), dict) else {}
+    current_review = _snapshot_review_status(db, project_id, snapshot.id)
+    accounting = mrv.get("accounting") if isinstance(mrv.get("accounting"), dict) else {}
+    registry = mrv.get("registry") if isinstance(mrv.get("registry"), dict) else {}
+    carbon = result.get("carbon_estimated") if isinstance(result.get("carbon_estimated"), dict) else {}
+    stats = carbon.get("statistics") if isinstance(carbon.get("statistics"), dict) else {}
+    area = result.get("area_info") if isinstance(result.get("area_info"), dict) else {}
+    fields = [
+        "project_id", "monitoring_period_id", "result_version", "snapshot_id", "snapshot_sha256",
+        "methodology_id", "methodology_version", "pool", "source_dataset", "source_year",
+        "model_name", "model_version", "calibration_status", "calibration_model_id",
+        "validation_status", "validation_type", "mrv_review_status", "accounting_status",
+        "segmentation_status", "registry_status", "mrv_reviewer", "mrv_reviewed_at", "mrv_review_reason",
+        "mean", "std_dev", "min", "max", "total_carbon_tons", "unit",
+    ]
+    mrv_method = accounting.get("methodology_id")
+    if mrv_method is None:
+        mrv_method = (context.get("carbon_provenance", {}).get("methodology") or {}).get("methodology_id")
+    mrv_version = accounting.get("methodology_version")
+    if mrv_version is None:
+        mrv_version = (context.get("carbon_provenance", {}).get("methodology") or {}).get("methodology_version")
+    row = {
+        "project_id": project_id,
+        "monitoring_period_id": (context.get("period") or {}).get("id"),
+        "result_version": snapshot.snapshot_hash,
+        "snapshot_id": snapshot.id,
+        "snapshot_sha256": snapshot.snapshot_hash,
+        "methodology_id": mrv_method,
+        "methodology_version": mrv_version,
+        "pool": estimate.get("pool"),
+        "source_dataset": estimate.get("source_dataset"),
+        "source_year": estimate.get("source_year"),
+        "model_name": estimate.get("model_name"),
+        "model_version": estimate.get("model_version"),
+        "calibration_status": calibration.get("status", "not_recorded"),
+        "calibration_model_id": calibration.get("model_id"),
+        "validation_status": validation.get("status", "not_validated"),
+        "validation_type": validation.get("validation_type", "none"),
+        "segmentation_status": segmentation.get("status", "not_linked"),
+        "mrv_review_status": current_review.get("status", review.get("status", "not_reviewed")),
+        "mrv_reviewer": current_review.get("reviewer_key"),
+        "mrv_reviewed_at": current_review.get("decided_at"),
+        "mrv_review_reason": current_review.get("decision_reason"),
+        "accounting_status": accounting.get("status", "not_calculated"),
+        "registry_status": registry.get("status", "not_connected"),
+        "mean": stats.get("mean"),
+        "std_dev": stats.get("std_dev"),
+        "min": stats.get("min"),
+        "max": stats.get("max"),
+        "total_carbon_tons": area.get("total_carbon_tons"),
+        "unit": carbon.get("unit"),
+    }
+    stream = io.StringIO(newline="")
+    writer = csv.DictWriter(stream, fieldnames=fields, extrasaction="ignore", lineterminator="\r\n")
+    writer.writeheader()
+    writer.writerow({key: _safe_csv_cell(row.get(key)) for key in fields})
+    record_audit(
+        db,
+        principal=principal,
+        action="snapshot.csv.export",
+        resource_type="dmrv_snapshot",
+        resource_id=snapshot.id,
+        project_id=project_id,
+        after={"format": "carbon_statistics_csv", "snapshot_hash": snapshot.snapshot_hash},
+        snapshot_hash=snapshot.snapshot_hash,
+        request_id=_request_id(request),
+    )
+    db.commit()
+    return Response(
+        content=stream.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="savegeo-carbon-{snapshot.id}.csv"'},
+    )
+
+
+def _safe_csv_cell(value):
+    if isinstance(value, str) and value[:1] in {"=", "+", "-", "@", "\t", "\r"}:
+        return "'" + value
+    return value
 
 
 def _evidence_out(row: DmrvEvidencePackage) -> EvidencePackageOut:

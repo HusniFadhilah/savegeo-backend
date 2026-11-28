@@ -153,6 +153,9 @@ class DmrvSnapshotOut(BaseModel):
     snapshot_hash: str
     created_by: str
     created_at: dt.datetime | None
+    # Derived from the latest non-superseded submission linked to the snapshot;
+    # it is not part of the immutable calculation output or its checksum.
+    mrv_review_status: dict | None = None
 
 
 class EvidencePackageCreate(_Strict):

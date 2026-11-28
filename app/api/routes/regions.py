@@ -1,8 +1,9 @@
 """Region hierarchy endpoints - /api/regions/*.
 
-Provinces/cities/districts/villages/geometry proxy an external REST API
-(REGION_API_BASE_URL, default api.sp3stab.id). Islands and the whole-Indonesia
-geometry are served from local static GeoJSON files. The whole-Indonesia AOI
+Cities/districts/villages/geometry proxy an external REST API
+(REGION_API_BASE_URL, default api.sp3stab.id). Checked-in province boundaries,
+islands, and whole-Indonesia geometry come from local static GeoJSON files.
+The whole-Indonesia AOI
 is refreshed from BIG's official BAPANAS/Batas_Administrasi service; island
 groupings remain project-specific, not an official administrative level.
 Ported from app.py.
@@ -393,6 +394,33 @@ def get_provinces(island: str | None = None):
             raise HTTPException(status_code=400, detail=f"Unknown island {island!r}. Valid: {ISLAND_NAMES}")
         merged = {code: name for code, name in merged.items() if _classify_province_island(name) == island}
     return {name: code for code, name in sorted(merged.items(), key=lambda item: item[1])}
+
+
+@router.get("/provinces/geometries")
+def get_province_geometries():
+    """Return the checked-in 38-province boundaries as one map-ready collection."""
+    features_by_code = _local_province_features()
+    if not features_by_code:
+        raise HTTPException(status_code=503, detail="Province boundary data is unavailable")
+    features = []
+    for code, source in sorted(features_by_code.items()):
+        properties = source.get("properties") or {}
+        features.append(
+            {
+                **source,
+                "properties": {
+                    **properties,
+                    "code": code,
+                    "name": str(properties.get("PROVINSI") or properties.get("name") or code),
+                    "level": "province",
+                },
+            }
+        )
+    return {
+        "type": "FeatureCollection",
+        "features": features,
+        "meta": {"count": len(features), "source": "checked_in_38_provinces"},
+    }
 
 
 @router.get("/cities")

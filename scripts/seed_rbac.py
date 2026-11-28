@@ -18,6 +18,7 @@ PERMISSIONS = [
     ("app.feature.satellite_exploration", "Viewer: eksplorasi scene satelit"),
     ("app.feature.disaster_mapping", "Viewer: pemetaan bencana yang dipublikasikan"),
     ("app.feature.crop_monitoring", "Viewer: Crop Monitoring"),
+    ("app.feature.dmrv_projects", "Viewer: ruang kerja dMRV dan organisasi"),
     ("config.read", "View system configuration"),
     ("config.write", "Update system configuration"),
     ("model.read", "View uploaded models"),
@@ -68,6 +69,7 @@ VIEWER_FEATURE_PERMISSIONS = [
     "app.feature.satellite_exploration",
     "app.feature.disaster_mapping",
     "app.feature.crop_monitoring",
+    "app.feature.dmrv_projects",
 ]
 
 ROLES = [
@@ -125,7 +127,7 @@ def seed_rbac() -> None:
             if name == "viewer":
                 # Reconcile historic read-only grants without touching an
                 # administrator's feature selection, including an intentionally
-                # empty selection. New roles receive the seven safe defaults.
+                # empty selection. New roles receive the declared safe defaults.
                 assigned = [perm_by_code[c] for c in VIEWER_PERMISSIONS]
                 if role.feature_permissions_configured:
                     configured_features = [p for p in role.permissions if p.code in VIEWER_FEATURE_PERMISSIONS]

@@ -45,6 +45,7 @@ from app.registries.carbon_dataset_registry import (
 from app.repositories import dataset_repo
 from app.repositories.uploaded_model_repo import get_active_model_path
 from app.services import config_service
+from app.services.carbon_map_grid import WEB_MAP_CRS, apply_carbon_map_grid
 from app.services.model_catalog_service import list_carbon_models
 from app.services.arcgis_helpers import (
     _arcgis_carbon_reference_stats,
@@ -539,6 +540,8 @@ def _reference_load_only_response(
     Earth Engine memory and request-time limits.
     """
     unit = dataset_info.get("unit", "Mg C/ha")
+    reference_resolution = dataset_info.get("resolution")
+    value_kind = _carbon_dataset_value_kind(dataset_info)
     layer = {
         "tile_url": reference_tile_url,
         "statistics": None,
@@ -589,6 +592,11 @@ def _reference_load_only_response(
             "display_mode": "reference_only",
             "load_only": True,
             "scale": scale if scale is not None else dataset_info.get("resolution"),
+            "summary_scale_m": None,
+            "map_resolution_m": reference_resolution,
+            "map_resolution_mode": "reference",
+            "reference_support_m": reference_resolution,
+            "data_value_kind": value_kind,
             "reference_dataset": dataset_info.get("key"),
             "reference_dataset_year": dataset_info.get("year", dataset_year),
             "target_pool": dataset_info.get("target_pool"),
@@ -603,6 +611,22 @@ def _reference_load_only_response(
             "model_rmse": None,
         },
     }
+
+
+def _carbon_dataset_value_kind(dataset_info: dict) -> str:
+    """Classify the source product without calling satellite estimates field measurements."""
+    explicit = dataset_info.get("data_value_kind")
+    if isinstance(explicit, str) and explicit in {"measured", "imputed", "modeled", "derived"}:
+        return explicit
+    if explicit == "field_measurement":
+        return "measured"
+    if dataset_info.get("key") == "GEDI_L4D":
+        return "imputed"
+    if dataset_info.get("transform") == "tropical_detritus_proxy":
+        return "derived"
+    if dataset_info.get("transform") in {"density_depth_integration", "soil_stock_integration"}:
+        return "derived"
+    return "modeled"
 
 
 def _analyze_local_reference_only(
@@ -735,6 +759,11 @@ def _analyze_local_reference_only(
             "calculation_mode": calculation_mode,
             "display_mode": "reference_only",
             "scale": resolution,
+            "summary_scale_m": resolution,
+            "map_resolution_m": resolution,
+            "map_resolution_mode": "reference",
+            "reference_support_m": dataset_info.get("resolution") or resolution,
+            "data_value_kind": _carbon_dataset_value_kind(dataset_info),
             "reference_dataset": dataset_info["key"],
             "reference_dataset_year": load_info.get("label_year", dataset_info.get("year")),
             "target_pool": dataset_info.get("target_pool"),
@@ -874,6 +903,11 @@ def _analyze_external_reference_only(
             "calculation_mode": "reference_only",
             "display_mode": "reference_only",
             "scale": dataset_info.get("resolution"),
+            "summary_scale_m": dataset_info.get("resolution"),
+            "map_resolution_m": dataset_info.get("resolution"),
+            "map_resolution_mode": "reference",
+            "reference_support_m": dataset_info.get("resolution"),
+            "data_value_kind": _carbon_dataset_value_kind(dataset_info),
             "reference_dataset": dataset_info["key"],
             "reference_dataset_year": dataset_year,
             "target_pool": dataset_info.get("target_pool"),
@@ -1268,11 +1302,9 @@ def analyze_carbon(db: Session, data: dict) -> dict:
                 provider_type=dataset_info.get("provider_type", "gee"),
             )
 
+        reference_resolution = int(float(dataset_info.get("resolution") or carbon_scale))
+        reference_scale = max(carbon_scale, reference_resolution)
         try:
-            reference_scale = max(
-                carbon_scale,
-                int(float(dataset_info.get("resolution") or carbon_scale)),
-            )
             reference_stats_raw = reference_display.reduceRegion(
                 reducer=ee.Reducer.mean()
                     .combine(ee.Reducer.stdDev(), "", True)
@@ -1353,6 +1385,11 @@ def analyze_carbon(db: Session, data: dict) -> dict:
                 "calculation_mode": calculation_mode,
                 "display_mode": "reference_only",
                 "scale": carbon_scale,
+                "summary_scale_m": reference_scale,
+                "map_resolution_m": reference_resolution,
+                "map_resolution_mode": "reference",
+                "reference_support_m": reference_resolution,
+                "data_value_kind": _carbon_dataset_value_kind(dataset_info),
                 "reference_dataset": reference_dataset,
                 "reference_dataset_year": dataset_info.get("year"),
                 "target_pool": dataset_info.get("target_pool"),
@@ -1414,6 +1451,18 @@ def analyze_carbon(db: Session, data: dict) -> dict:
         vis_min = pool_visualization["min"]
         vis_max = pool_visualization["max"]
         vis_palette = pool_visualization["palette"]
+    map_resolution_choice = analysis_defaults.get("carbon_pool_map_resolution_m", {}).get(pool_key, "reference")
+    reference_support_m = _compat_meta.get("reference_support_m") or _compat_meta.get("training_sample_scale_m") or _compat_meta.get("sample_scale_m") or dataset_info.get("resolution")
+    try:
+        reference_support_m = int(float(reference_support_m)) if reference_support_m is not None else None
+    except (TypeError, ValueError):
+        reference_support_m = None
+    if map_resolution_choice == "reference" or pool_key is None:
+        map_resolution_m = int(float(dataset_info.get("resolution") or carbon_scale))
+        map_resolution_mode = "reference"
+    else:
+        map_resolution_m = int(map_resolution_choice)
+        map_resolution_mode = "configured"
 
     # Non-GEE-trained models (STAC/local-raster feature stacks, e.g. interaction terms
     # like NDVI_x_elevation) cannot be built server-side in GEE — CarbonInferenceEngine
@@ -1557,6 +1606,7 @@ def analyze_carbon(db: Session, data: dict) -> dict:
         original_area = filtering_area = geometry_area_ha(roi_original)
         calculation_area = geometry_area_ha(roi_for_calculation)
 
+    calibration_info = None
     if is_gee_deployable:
         # ── GEE tile-map inference (linear/ridge/lasso) ──────────────────
         carbon_estimated = inference_engine.predict_for_region(
@@ -1564,8 +1614,28 @@ def analyze_carbon(db: Session, data: dict) -> dict:
             start_month=start_month, end_month=end_month,
             cloud_threshold=cloud_threshold
         )
+        if data.get("calibration_model_id"):
+            from app.services.carbon_calibration_runtime import resolve_calibration_for_raster
+
+            calibration_artifact, calibration_info = resolve_calibration_for_raster(
+                db,
+                data,
+                model_pin=data.get("_server_model_pin"),
+                target_pool=_compat_meta.get("target_pool") or dataset_info.get("target_pool"),
+                unit=_compat_meta.get("target_unit") or dataset_info.get("unit", "Mg/ha"),
+                source_provenance=list(inference_engine.inference_quality.provider_scenes or []),
+            )
+            if calibration_artifact is not None:
+                carbon_estimated = (
+                    carbon_estimated
+                    .multiply(calibration_artifact["slope"])
+                    .add(calibration_artifact["intercept"])
+                    .max(calibration_artifact["clip_min"])
+                    .rename("carbon_estimated")
+                )
 
         carbon_estimated_display = carbon_estimated.clip(roi_original) if (clip_to_aoi and has_geojson) else carbon_estimated
+        carbon_estimated_display = apply_carbon_map_grid(carbon_estimated_display, map_resolution_m)
 
         # Default vis_max is a static config value (e.g. 200) that rarely
         # matches this AOI's actual carbon density range, so the legend
@@ -1824,10 +1894,17 @@ def analyze_carbon(db: Session, data: dict) -> dict:
             "analysis_year_mode": "annual_covariate_inference",
             "reference_dataset": reference_dataset,
             "scale": carbon_scale,
+            "summary_scale_m": carbon_scale,
+            "map_resolution_m": map_resolution_m,
+            "map_resolution_mode": map_resolution_mode,
+            "reference_support_m": reference_support_m,
+            "data_value_kind": "modeled",
+            "map_resolution_crs": WEB_MAP_CRS,
             "images_used": quality.images_used,
             "statistics_available": statistics_available,
             "co2_conversion_factor": co2_factor,
             "gee_deployable": is_gee_deployable,
+            **({"calibration": calibration_info} if calibration_info is not None else {}),
         },
         # P0 "confidence & data quality": cv_metrics above is the model's own
         # training-time accuracy (R²/RMSE, static per model); this block is

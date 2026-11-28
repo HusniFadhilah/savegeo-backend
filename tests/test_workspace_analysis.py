@@ -14,6 +14,8 @@ from sqlalchemy import select
 from tests.test_organizations import call, workspace
 from app.db.models.admin_user import AdminUser
 from app.db.models.dmrv_boundary import BoundaryVersion
+from app.db.models.dmrv_field import SurveyPlot, SurveyVisit, TreeMeasurement
+from app.db.models.dmrv_integrity import DmrvIntegrityRecord
 from app.db.models.dmrv_job import DmrvJob, DmrvSnapshot
 from app.db.models.dmrv_monitoring import DmrvMonitoringPeriod
 from app.db.models.workspace_analysis import WorkspaceQuota, WorkspaceUsageEvent
@@ -54,6 +56,24 @@ def submit(client, project, period, key=None, **changes):
 def test_server_context_replay_foreign_resources_and_cancel_release(env):
     client, factory, _ = env
     org, project, period = setup_project(client, factory)
+    with factory() as db:
+        plot = SurveyPlot(id="plot-a", project_id=project, plot_code="A-1", latitude=-7.0, longitude=110.0,
+                          area_m2=400.0, area_basis="measured")
+        db.add(plot)
+        db.flush()
+        visit = SurveyVisit(id="visit-a", plot_id=plot.id, visit_date=dt.date(2026, 3, 1), date_precision="day")
+        db.add(visit)
+        db.flush()
+        db.add(TreeMeasurement(visit_id=visit.id, tree_code="T-1", species="Avicennia marina", dbh_cm=12.0,
+                               height_m=6.0, biomass_kg=18.0, status="live", qa_flags=[]))
+        db.add(DmrvIntegrityRecord(
+            id="sampling-plan-a", project_id=project, category="sampling_plan", record_key="current",
+            title="Accepted sample plan", payload={"monitoring_period_id": period, "strata": [{
+                "name": "mangrove", "area_ha": 122.0, "expected_cv_pct": 15.0,
+            }]}, result={"strata": [{"name": "mangrove", "plot_locations": [{"plot_code": "A-1"}]}]},
+            status="accepted", revision=2, created_by="admin:1", updated_by="admin:1",
+        ))
+        db.commit()
     result = submit(client, project, period, "submit-once")
     assert result.status_code == 202, result.text
     job_id = result.json()["id"]
@@ -65,6 +85,12 @@ def test_server_context_replay_foreign_resources_and_cancel_release(env):
     rows = call(client, "GET", f"/dmrv/projects/{project}/analysis-runs", "admin:1").json()
     assert len(rows) == 1 and rows[0]["context"]["boundary"]["area_ha"] == 122
     assert rows[0]["context"]["parameters"]["year"] == 2026
+    provenance = rows[0]["context"]["carbon_provenance"]
+    assert provenance["sampling_plan"]["status"] == "accepted"
+    assert provenance["sampling_plan"]["strata"][0]["name"] == "mangrove"
+    assert provenance["field_evidence"]["status"] == "available"
+    assert provenance["field_evidence"]["survey_record_rows"] == 1
+    assert provenance["field_evidence"]["role"] == "monitoring_period_evidence_linked_not_used_for_model_inference"
     usage = call(client, "GET", f"/organizations/{org}/usage", "admin:1").json()
     assert (usage["reserved"], usage["used"]) == (1, 0)
     cancelled = call(client, "POST", f"/dmrv/projects/{project}/analysis-runs/{job_id}/cancel", "admin:1")
@@ -98,6 +124,12 @@ def test_worker_snapshot_and_meter_finalize_once(env, monkeypatch):
         snapshot = db.get(DmrvSnapshot, job.result["snapshot_id"])
         assert snapshot.inputs["context"]["period"]["id"] == period
         assert snapshot.outputs["mean_carbon"] == 31.5
+        assert snapshot.outputs["carbon_mrv"]["estimate"]["status"] == "model_estimate"
+        assert snapshot.outputs["carbon_mrv"]["validation"]["status"] == "not_validated"
+        assert snapshot.outputs["carbon_mrv"]["validation"]["validation_type"] == "none"
+        assert snapshot.outputs["carbon_mrv"]["review"]["status"] == "not_reviewed"
+        assert snapshot.outputs["carbon_mrv"]["accounting"]["status"] == "not_calculated"
+        assert snapshot.outputs["carbon_mrv"]["registry"]["status"] == "not_connected"
         quota = db.scalar(select(WorkspaceQuota))
         assert (quota.used, quota.reserved) == (1, 0)
         assert not jobs.complete(db, job.id, "test-worker", {})
