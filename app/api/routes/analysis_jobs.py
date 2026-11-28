@@ -154,7 +154,7 @@ def _verify_serving_code_identity(payload: dict[str, Any]) -> dict[str, Any] | N
 
     if not matches(expected):
         raise AnalysisError(
-            "Versi serving GEE berubah setelah job dibuat. Job dihentikan agar model tidak berjalan dengan kode yang berbeda; kirim ulang analisis.",
+            "Kode analisis GEE di server berbeda dengan versi saat job dibuat. Job dihentikan agar hasil tetap konsisten; kirim ulang analisis.",
             409,
         )
     return expected
