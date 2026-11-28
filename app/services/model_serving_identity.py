@@ -33,9 +33,9 @@ def current_identity() -> dict[str, Any]:
     for relative in _SERVING_SOURCE_FILES:
         path = root / relative
         digest.update(relative.encode("utf-8"))
-        digest.update(b"\0")
+        digest.update(b"\\0")
         digest.update(path.read_bytes() if path.is_file() else b"missing")
-        digest.update(b"\0")
+        digest.update(b"\\0")
     landcover_registry_path = Path(get_settings().landcover_model_config_path).resolve()
     landcover_registry_sha256 = (
         hashlib.sha256(landcover_registry_path.read_bytes()).hexdigest()
